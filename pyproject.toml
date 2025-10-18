@@ -1,0 +1,125 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "AdvancedBiomedAgent"
+version = "0.1.0"
+description = "CureBench"
+authors = [{ name = "skolchenko" }]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  # AI/ML packages
+  "openai",
+  # langchain ecosystem
+  "langchain",
+  "langchain_openai",
+  "langchain_together",
+  "langchain_google_genai",
+  "langgraph",
+  # Database
+  "psycopg2-binary",  # PostgreSQL adapter
+  "asyncpg",          # Async PostgreSQL adapter
+  # Data processing
+  "pandas",
+  "ijson",            # Streaming JSON parser
+  "requests",         # HTTP requests
+  "beautifulsoup4",   # HTML/XML parsing
+  "python-dateutil",  # Date parsing
+  "tavily-python",
+  "tqdm",             # Progress bars
+  # Jupyter ecosystem
+  "nbformat>=4.2.0",
+  "ipywidgets",
+  "jupyterlab",
+  # Environment and data
+  "python-dotenv"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pre-commit",
+  "black",
+  "ruff",
+  "mypy",
+  "isort",
+  "pytest",
+  "pytest-cov",
+  "ipykernel",
+]
+
+# Optional dependencies for advanced features
+chem = [
+  "rdkit",  # Chemistry toolkit for molecular property computation
+]
+
+mcp = [
+  "httpx",    # Async HTTP client for MCP services
+  "asyncpg"   # for tools
+]
+
+all = [
+  "rdkit",
+  "httpx",
+]
+
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 130
+target-version = ['py312']
+skip-string-normalization = true
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+exclude = ["build", "dist", "*.ipynb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = [
+    "D",
+    "ANN",
+    "TD",
+    "E402",
+    "SIM102",
+    "E501", # prompts
+    "B008",
+    "SIM115",
+    "E722",
+    "I001",
+    "SIM117",
+    "SIM108",
+    "SIM105",
+    "F841",
+    "E701",
+    "E702",
+    "B007",
+    "UP038"
+
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+disable_error_code = [
+  "unused-ignore",
+  "no-any-return",
+  "misc",
+  "attr-defined"
+]
+
+[tool.isort]
+profile = "black"
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "--cov=src --cov-report=term-missing"
+testpaths = ["tests"]
