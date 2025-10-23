@@ -20,8 +20,13 @@ import psycopg2.extras
 import requests
 from tqdm import tqdm
 
-# Import our database config
-from .config import DatabaseConfig, get_connection
+# Handle imports for both direct execution and module import
+try:
+    from .config import DatabaseConfig, get_connection
+    from .constants import DRUGCENTRAL_BASE_URL
+except ImportError:
+    from config import DatabaseConfig, get_connection
+    from constants import DRUGCENTRAL_BASE_URL
 
 # ---- RDKit (optional) --------------------------------------------------------
 try:
@@ -33,9 +38,6 @@ try:
 except Exception:
     warnings.warn("RDKit is not installed", stacklevel=2)
     RDKit_OK = False
-
-# Import constants
-from .constants import DRUGCENTRAL_BASE_URL
 
 BASE_URL = DRUGCENTRAL_BASE_URL
 CANDIDATE_FILES = ["structures.molV3.sdf.gz", "structures.molV2.sdf.gz"]

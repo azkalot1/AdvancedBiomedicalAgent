@@ -17,25 +17,41 @@ import sys
 import time
 from pathlib import Path
 
-from curebench.data.ingest.build_ctgov import ingest_ctgov_full
-from curebench.data.ingest.build_dailymed import run_dailymed_ingestion_pipeline
-from curebench.data.ingest.build_drugcentral import build_drugcentral
-
-# Import all ingestion functions
-from curebench.data.ingest.build_openfda import build_fda_normalized
-from curebench.data.ingest.build_orange_book import ingest_orange_book
-
-# Import our database config and all ingestion modules
-from curebench.data.ingest.config import (
-    DEFAULT_CONFIG,
-    DatabaseConfig,
-    get_all_tables,
-    get_connection,
-    get_table_stats,
-    reset_database,
-    show_database_info,
-    vacuum_database,
-)
+# Handle imports for both direct execution and module import
+try:
+    # When run as module (through CLI)
+    from .build_ctgov import ingest_ctgov_full
+    from .build_dailymed import run_dailymed_ingestion_pipeline
+    from .build_drugcentral import build_drugcentral
+    from .build_openfda import build_fda_normalized
+    from .build_orange_book import ingest_orange_book
+    from .config import (
+        DEFAULT_CONFIG,
+        DatabaseConfig,
+        get_all_tables,
+        get_connection,
+        get_table_stats,
+        reset_database,
+        show_database_info,
+        vacuum_database,
+    )
+except ImportError:
+    # When run directly
+    from build_ctgov import ingest_ctgov_full
+    from build_dailymed import run_dailymed_ingestion_pipeline
+    from build_drugcentral import build_drugcentral
+    from build_openfda import build_fda_normalized
+    from build_orange_book import ingest_orange_book
+    from config import (
+        DEFAULT_CONFIG,
+        DatabaseConfig,
+        get_all_tables,
+        get_connection,
+        get_table_stats,
+        reset_database,
+        show_database_info,
+        vacuum_database,
+    )
 
 
 def run_drugcentral_ingestion(config: DatabaseConfig, raw_dir: Path) -> bool:
@@ -332,7 +348,7 @@ def get_database_sample_data(config: DatabaseConfig, sample_size: int = 3) -> No
 
 def main():
     """Main ingestion orchestrator."""
-    print("🚀 CureBench PostgreSQL Data Ingestion Pipeline")
+    print("🚀 BiomedicalAgent PostgreSQL Data Ingestion Pipeline")
     print("=" * 70)
 
     # Configuration
@@ -342,7 +358,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="CureBench PostgreSQL Data Ingestion Pipeline",
+        description="BiomedicalAgent PostgreSQL Data Ingestion Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -378,7 +394,7 @@ Examples:
 
     # Handle --get-db-info command (standalone)
     if args.get_db_info:
-        print("🔍 CureBench Database Information")
+        print("🔍 BiomedicalAgent Database Information")
         print("=" * 50)
         print(f"🔗 Connected to: {config.host}:{config.port}/{config.database}")
         print(f"👤 User: {config.user}")
@@ -418,7 +434,7 @@ Examples:
     # Handle --dump-db command (standalone)
     if args.dump_db:
         dump_file = Path(args.dump_db)
-        print("💾 CureBench Database Dump")
+        print("💾 BiomedicalAgent Database Dump")
         print("=" * 50)
         print(f"🔗 Connected to: {config.host}:{config.port}/{config.database}")
         print(f"👤 User: {config.user}")
@@ -434,7 +450,7 @@ Examples:
     # Handle --restore-db command (standalone)
     if args.restore_db:
         dump_file = Path(args.restore_db)
-        print("📥 CureBench Database Restore")
+        print("📥 BiomedicalAgent Database Restore")
         print("=" * 50)
         print(f"🔗 Connected to: {config.host}:{config.port}")
         print(f"👤 User: {config.user}")

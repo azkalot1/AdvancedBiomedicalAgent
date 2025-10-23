@@ -14,11 +14,13 @@ import psycopg2
 import requests
 from tqdm import tqdm
 
-# Import our database config
-from .config import DatabaseConfig, get_connection
-
-# Import constants
-from .constants import ORANGE_BOOK_URL
+# Handle imports for both direct execution and module import
+try:
+    from .config import DatabaseConfig, get_connection
+    from .constants import ORANGE_BOOK_URL
+except ImportError:
+    from config import DatabaseConfig, get_connection
+    from constants import ORANGE_BOOK_URL
 
 OB_URL = ORANGE_BOOK_URL
 

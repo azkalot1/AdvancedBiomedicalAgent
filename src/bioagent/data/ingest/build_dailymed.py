@@ -30,11 +30,13 @@ from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-# Import our database config
-from .config import DatabaseConfig, get_connection
-
-# Import constants
-from .constants import DAILYMED_BASE_URL, DAILYMED_PAGE, DAILYMED_SITE_BASE
+# Handle imports for both direct execution and module import
+try:
+    from .config import DatabaseConfig, get_connection
+    from .constants import DAILYMED_BASE_URL, DAILYMED_PAGE, DAILYMED_SITE_BASE
+except ImportError:
+    from config import DatabaseConfig, get_connection
+    from constants import DAILYMED_BASE_URL, DAILYMED_PAGE, DAILYMED_SITE_BASE
 
 
 # ----------------------------- fetch utils (Unchanged) ------------------------------------

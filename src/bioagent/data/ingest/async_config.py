@@ -9,7 +9,11 @@ from typing import Any
 import asyncpg
 import numpy as np
 
-from .config import DatabaseConfig
+# Handle imports for both direct execution and module import
+try:
+    from .config import DatabaseConfig
+except ImportError:
+    from config import DatabaseConfig
 
 
 def encode_vector(value: np.ndarray) -> str:

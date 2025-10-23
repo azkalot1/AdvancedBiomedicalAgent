@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Database configuration for CureBench OpenFDA ingestion.
+Database configuration for data ingestion.
 Modify these settings to match your PostgreSQL setup.
 """
 from typing import Any
@@ -17,9 +17,9 @@ class DatabaseConfig:
         self,
         host: str = "localhost",
         port: int = 5432,
-        database: str = "bioagent_database",
-        user: str = "bioagent_user",
-        password: str = "bioagent_password",
+        database: str = "database",
+        user: str = "database_user",
+        password: str = "database_password",
     ):
         self.host = host
         self.port = port
@@ -64,7 +64,7 @@ def ensure_public_schema(config: DatabaseConfig) -> bool:
                     SELECT schema_name
                     FROM information_schema.schemata
                     WHERE schema_name = 'public'
-                """
+                    """
                 )
 
                 if cur.fetchone():
@@ -94,7 +94,7 @@ def get_all_tables(config: DatabaseConfig) -> list[str]:
                 FROM pg_tables
                 WHERE schemaname = 'public'
                 ORDER BY tablename
-            """
+                """
             )
             return [row[0] for row in cur.fetchall()]
 
@@ -177,7 +177,7 @@ def reset_database(config: DatabaseConfig, confirm: bool = False) -> bool:
                             cur.execute(
                                 f"""
                                 DROP SEQUENCE IF EXISTS {table}_id_seq CASCADE
-                            """
+                                """
                             )
 
                 # Drop any remaining FTS tables (virtual tables in SQLite, but views/indexes in PostgreSQL)
@@ -187,7 +187,7 @@ def reset_database(config: DatabaseConfig, confirm: bool = False) -> bool:
                         f"""
                         SELECT tablename FROM pg_tables
                         WHERE schemaname = 'public' AND tablename LIKE '{pattern}'
-                    """
+                        """
                     )
                     fts_tables = [row[0] for row in cur.fetchall()]
 
@@ -248,7 +248,7 @@ def show_database_info(config: DatabaseConfig) -> None:
                 cur.execute(
                     f"""
                     SELECT pg_size_pretty(pg_database_size('{config.database}')) as size
-                """
+                    """
                 )
                 db_size = cur.fetchone()['size']
                 print(f"Database Size: {db_size}")

@@ -15,8 +15,11 @@ import psycopg2
 import requests
 from tqdm import tqdm
 
-# Import our database config
-from .config import DatabaseConfig, get_connection
+# Handle imports for both direct execution and module import
+try:
+    from .config import DatabaseConfig, get_connection
+except ImportError:
+    from config import DatabaseConfig, get_connection
 
 # CTTI AACT dump URL
 CTGOV_DUMP_URL = "https://ctti-aact.nyc3.digitaloceanspaces.com/yr48nmlriax3euffw45a773wx2ha"
@@ -218,6 +221,79 @@ def _move_views_to_public(con: psycopg2.extensions.connection) -> None:
         print("✅ All views moved successfully!")
 
 
+def _verify_and_cleanup_ctgov_schema(con: psycopg2.extensions.connection) -> None:
+    """Verify that ctgov schema is empty and clean it up."""
+    print("🔍 Verifying ctgov schema is empty and cleaning up...")
+    
+    with con.cursor() as cur:
+        # Check for remaining tables in ctgov schema
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.tables 
+            WHERE table_schema = 'ctgov'
+            """
+        )
+        remaining_tables = cur.fetchone()[0]
+        
+        # Check for remaining views in ctgov schema
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.views 
+            WHERE table_schema = 'ctgov'
+            """
+        )
+        remaining_views = cur.fetchone()[0]
+        
+        # Check for remaining functions/procedures in ctgov schema
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.routines 
+            WHERE routine_schema = 'ctgov'
+            """
+        )
+        remaining_routines = cur.fetchone()[0]
+        
+        # Check for remaining types in ctgov schema
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.user_defined_types 
+            WHERE user_defined_type_schema = 'ctgov'
+            """
+        )
+        remaining_types = cur.fetchone()[0]
+        
+        total_remaining = remaining_tables + remaining_views + remaining_routines + remaining_types
+        
+        if total_remaining > 0:
+            print(f"⚠️  ctgov schema still contains objects:")
+            print(f"   - Tables: {remaining_tables}")
+            print(f"   - Views: {remaining_views}")
+            print(f"   - Functions/Procedures: {remaining_routines}")
+            print(f"   - Types: {remaining_types}")
+            print("   Skipping schema cleanup - manual review needed")
+            return
+        
+        # Schema is empty, safe to drop
+        print("✅ ctgov schema is empty, dropping it...")
+        cur.execute("DROP SCHEMA IF EXISTS ctgov CASCADE")
+        con.commit()
+        print("✅ ctgov schema dropped successfully!")
+        
+        # Verify schema is gone
+        cur.execute(
+            """
+            SELECT COUNT(*) FROM information_schema.schemata 
+            WHERE schema_name = 'ctgov'
+            """
+        )
+        schema_exists = cur.fetchone()[0] > 0
+        
+        if not schema_exists:
+            print("✅ Verified: ctgov schema has been completely removed")
+        else:
+            print("⚠️  Warning: ctgov schema still exists after drop attempt")
+
+
 def verify_indexes_preserved(con: psycopg2.extensions.connection) -> None:
     """Check that indexes were preserved after schema move."""
     with con.cursor() as cur:
@@ -296,48 +372,66 @@ def create_full_text_search_indexes(con: psycopg2.extensions.connection) -> None
         print("\n✅ Full-text search indexing process completed successfully!")
 
 
-def execute_sql_file(con: psycopg2.extensions.connection, sql_file_path: Path) -> None:
+def execute_sql_file_via_psql(config: DatabaseConfig, sql_file_path: Path) -> None:
     """
-    Execute a SQL file against the database connection.
+    Execute a SQL file using psql subprocess (better for complex SQL with meta-commands).
 
     Args:
-        con: Database connection
+        config: Database configuration
         sql_file_path: Path to the SQL file to execute
     """
     if not sql_file_path.exists():
         raise FileNotFoundError(f"SQL file not found: {sql_file_path}")
 
-    print(f"📄 Executing SQL file: {sql_file_path.name}")
+    print(f"📄 Executing SQL file via psql: {sql_file_path.name}")
 
-    with con.cursor() as cursor:
-        try:
-            # Read and execute the SQL file
-            with open(sql_file_path, encoding='utf-8') as f:
-                sql_content = f.read()
+    # Build psql command
+    cmd = [
+        "psql",
+        "-h", config.host,
+        "-U", config.user,
+        "-d", config.database,
+        "-f", str(sql_file_path),
+        "--echo-errors",
+        "--set", "ON_ERROR_STOP=1"
+    ]
 
-            # Split by semicolon and execute each statement
-            statements = [stmt.strip() for stmt in sql_content.split(';') if stmt.strip()]
+    # Set password via environment variable
+    env = {"PGPASSWORD": config.password}
 
-            for i, statement in enumerate(statements, 1):
-                if statement:
-                    print(f"  Executing statement {i}/{len(statements)}...")
-                    cursor.execute(statement)
+    try:
+        result = subprocess.run(
+            cmd,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        
+        print(f"✅ Successfully executed {sql_file_path.name}")
+        
+        # Show output if there's any
+        if result.stdout.strip():
+            print("📋 Output:")
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    print(f"  {line}")
+                    
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Error executing {sql_file_path.name}: {e}")
+        if e.stderr:
+            print(f"Error details: {e.stderr}")
+        if e.stdout:
+            print(f"Output: {e.stdout}")
+        raise
 
-            con.commit()
-            print(f"✅ Successfully executed {sql_file_path.name}")
 
-        except Exception as e:
-            con.rollback()
-            print(f"❌ Error executing {sql_file_path.name}: {e}")
-            raise
-
-
-def create_rag_functionality(con: psycopg2.extensions.connection, sql_dir: Path) -> None:
+def create_rag_functionality(config: DatabaseConfig, sql_dir: Path) -> None:
     """
-    Create RAG functionality by executing rag_study_json.sql.
+    Create RAG functionality by executing rag_study_json.sql via psql.
 
     Args:
-        con: Database connection
+        config: Database configuration
         sql_dir: Directory containing SQL files
     """
     rag_sql_path = sql_dir / "rag_study_json.sql"
@@ -347,7 +441,7 @@ def create_rag_functionality(con: psycopg2.extensions.connection, sql_dir: Path)
         return
 
     print("🧠 Setting up RAG functionality...")
-    execute_sql_file(con, rag_sql_path)
+    execute_sql_file_via_psql(config, rag_sql_path)
     print("✅ RAG functionality setup completed!")
 
 
@@ -370,10 +464,7 @@ def create_rag_functionality_standalone(config: DatabaseConfig, sql_dir: Path) -
     This can be called independently after data ingestion is complete.
     """
     print("🧠 Starting standalone RAG functionality setup...")
-
-    with get_connection(config) as con:
-        create_rag_functionality(con, sql_dir)
-
+    create_rag_functionality(config, sql_dir)
     print("✅ Standalone RAG functionality setup completed!")
 
 
@@ -411,6 +502,9 @@ def ingest_ctgov_full(config: DatabaseConfig, raw_dir: Path, n_max: int | None =
         with get_connection(config) as con:
             _move_tables_to_public(con)
             _move_views_to_public(con)
+            
+            # Step 4.1: Verify and cleanup empty ctgov schema
+            _verify_and_cleanup_ctgov_schema(con)
 
         # Step 5: Create full-text search indexes
         print("\n🔍 Creating full-text search indexes...")
@@ -420,8 +514,7 @@ def ingest_ctgov_full(config: DatabaseConfig, raw_dir: Path, n_max: int | None =
         # Step 6: Create RAG functionality (rag_study_json.sql)
         print("\n🧠 Setting up RAG functionality...")
         sql_dir = Path(__file__).parent  # Directory containing this script and rag_study_json.sql
-        with get_connection(config) as con:
-            create_rag_functionality(con, sql_dir)
+        create_rag_functionality(config, sql_dir)
 
         print("\n🔍 After move and indexing:")
         with get_connection(config) as con:
@@ -476,12 +569,23 @@ def ingest_ctgov_full(config: DatabaseConfig, raw_dir: Path, n_max: int | None =
                 rag_keys_exists = cur.fetchone()[0] > 0
                 print(f"  RAG study keys view: {'✅' if rag_keys_exists else '❌'}")
 
+                # Verify ctgov schema is gone
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM information_schema.schemata 
+                    WHERE schema_name = 'ctgov'
+                    """
+                )
+                ctgov_schema_exists = cur.fetchone()[0] > 0
+                print(f"  ctgov schema removed: {'❌' if ctgov_schema_exists else '✅'}")
+
             verify_indexes_preserved(con)
 
         print("✅ [CT.gov] Successfully ingested CTTI AACT data")
         print("🔍 Data available in public schema with ctgov_ prefix (tables and views)")
         print("🔍 Full-text search indexes created for enhanced search capabilities")
         print("🧠 RAG functionality created for advanced trial search and analysis")
+        print("🧹 Original ctgov schema cleaned up and removed")
 
     except Exception as e:
         print(f"❌ [CT.gov] Error during ingestion: {e}")
@@ -492,7 +596,11 @@ if __name__ == "__main__":
     # Command line interface for CT.gov operations
     import sys
 
-    from .config import DEFAULT_CONFIG
+    # Handle imports for both direct execution and module import
+    try:
+        from .config import DEFAULT_CONFIG
+    except ImportError:
+        from config import DEFAULT_CONFIG
 
     if len(sys.argv) < 2:
         print("Usage:")
@@ -500,6 +608,7 @@ if __name__ == "__main__":
         print("  python build_ctgov.py tsvector             - Create tsvector indexes on existing tables")
         print("  python build_ctgov.py rag                  - Create RAG functionality (rag_study_json.sql)")
         print("  python build_ctgov.py verify               - Verify database state")
+        print("  python build_ctgov.py cleanup              - Verify and cleanup empty ctgov schema")
         sys.exit(1)
 
     command = sys.argv[1].lower()
@@ -549,6 +658,11 @@ if __name__ == "__main__":
                         print(f"  - {table}.{column}")
                 else:
                     print("\n⚠️  No tsvector columns found")
+
+    elif command == "cleanup":
+        print("🧹 Verifying and cleaning up ctgov schema...")
+        with get_connection(DEFAULT_CONFIG) as con:
+            _verify_and_cleanup_ctgov_schema(con)
 
     else:
         print(f"❌ Unknown command: {command}")

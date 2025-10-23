@@ -11,11 +11,12 @@ from pathlib import Path
 import psycopg2
 import psycopg2.extras
 
+# Handle imports for both direct execution and module import
 try:
     from .config import DatabaseConfig, get_connection
 except ImportError:
-    # Handle direct execution
     from config import DatabaseConfig, get_connection
+
 
 
 def extract_schema_and_examples(

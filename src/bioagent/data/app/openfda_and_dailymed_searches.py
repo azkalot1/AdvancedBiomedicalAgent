@@ -13,9 +13,15 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 
 # Assuming these are in the user's environment as specified
-from curebench.data.ingest.async_config import AsyncDatabaseConfig, get_async_connection
-from curebench.data.ingest.config import DatabaseConfig
-from curebench.api import dailymed_find
+from bioagent.data.ingest.async_config import AsyncDatabaseConfig, get_async_connection
+from bioagent.data.ingest.config import DatabaseConfig
+# from bioagent.api import dailymed_find  # TODO: Fix this import
+
+
+async def dailymed_find(drug_name: str, limit: int = 10) -> list[dict]:
+    """Placeholder function for dailymed_find API call."""
+    # TODO: Implement actual DailyMed API search
+    return []
 
 
 SIMILARITY_THRESHOLD = 0.87

@@ -8,8 +8,8 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 # Reuse your infra
-from curebench.data.ingest.async_config import AsyncDatabaseConfig, get_async_connection
-from curebench.data.ingest.config import DatabaseConfig
+from bioagent.data.ingest.async_config import AsyncDatabaseConfig, get_async_connection
+from bioagent.data.ingest.config import DatabaseConfig
 
 
 def _nz(x: Any, default: str = "—") -> str:

@@ -1,13 +1,13 @@
 from typing import Any
-
 import psycopg2
-
-# Assume these are in your project's environment
-from curebench.data.ingest.config import DEFAULT_CONFIG, DatabaseConfig
+# Handle imports for both direct execution and module import
+try:
+    from .config import DEFAULT_CONFIG, DatabaseConfig
+except ImportError:
+    from config import DEFAULT_CONFIG, DatabaseConfig
 
 # --- Configuration (Unchanged) ---
 TABLE_VECTOR_CONFIG: list[dict[str, Any]] = [
-    # ... (Your configuration list remains exactly the same)
     {"table_name": "ctgov_brief_summaries", "vector_column": "description_vector", "source_columns": ["description"]},
     {"table_name": "ctgov_browse_conditions", "vector_column": "term_vector", "source_columns": ["downcase_mesh_term"]},
     {"table_name": "ctgov_browse_interventions", "vector_column": "term_vector", "source_columns": ["downcase_mesh_term"]},
@@ -94,8 +94,5 @@ def create_full_text_search_indexes_sync(db_config: DatabaseConfig):
             print("\nDatabase connection closed.")
 
 
-# --- How to Run This Script ---
 if __name__ == "__main__":
-    # To run this script, execute it from your terminal.
-    # It will connect, perform the operations, and wait for each to finish.
     create_full_text_search_indexes_sync(DEFAULT_CONFIG)

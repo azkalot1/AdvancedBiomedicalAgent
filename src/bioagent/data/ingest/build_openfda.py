@@ -44,10 +44,13 @@ from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
-from .config import DatabaseConfig, get_connection
-
-# Import constants
-from .constants import MAPPING_TABLES, OPENFDA_DOWNLOAD_INDEX
+# Handle imports for both direct execution and module import
+try:
+    from .config import DatabaseConfig, get_connection
+    from .constants import MAPPING_TABLES, OPENFDA_DOWNLOAD_INDEX
+except ImportError:
+    from config import DatabaseConfig, get_connection
+    from constants import MAPPING_TABLES, OPENFDA_DOWNLOAD_INDEX
 
 DOWNLOAD_INDEX = OPENFDA_DOWNLOAD_INDEX
 
@@ -945,6 +948,3 @@ def build_fda_normalized(
     print(f"💾 Database: {config.database} on {config.host}:{config.port}")
     print("🔍 Ready for advanced searches with PostgreSQL features")
     print("🧠 Semantic search enabled with vector embeddings")
-
-
-# Search functions have been moved to src/curebench/data/app/search_openfda.py
