@@ -21,14 +21,20 @@ dependencies = [
   # Database
   "psycopg2-binary",  # PostgreSQL adapter
   "asyncpg",          # Async PostgreSQL adapter
+  "pgvector",         # PostgreSQL vector extension
   # Data processing
   "pandas",
   "ijson",            # Streaming JSON parser
   "requests",         # HTTP requests
   "beautifulsoup4",   # HTML/XML parsing
+  "lxml",             # XML/HTML parser
   "python-dateutil",  # Date parsing
   "tavily-python",
   "tqdm",             # Progress bars
+  "numpy",            # Numerical computing
+  "sentence-transformers",  # Semantic embeddings
+  # CLI framework
+  "typer",            # CLI framework
   # Jupyter ecosystem
   "nbformat>=4.2.0",
   "ipywidgets",
@@ -36,6 +42,9 @@ dependencies = [
   # Environment and data
   "python-dotenv"
 ]
+
+[project.scripts]
+biomedagent-db = "bioagent.cli.main:main"
 
 [project.optional-dependencies]
 dev = [

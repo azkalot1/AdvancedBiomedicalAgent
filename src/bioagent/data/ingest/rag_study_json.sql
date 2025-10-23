@@ -74,7 +74,13 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ctgov_dgi_dg
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ctgov_dgi_intervention
   ON ctgov_design_group_interventions (intervention_id);
 \echo === ANALYZE to update stats ===
-ANALYZE;
+-- Only analyze our tables, not system tables
+ANALYZE ctgov_conditions;
+ANALYZE ctgov_interventions;
+ANALYZE ctgov_sponsors;
+ANALYZE ctgov_facilities;
+ANALYZE ctgov_designs;
+ANALYZE ctgov_eligibilities;
 \echo === Done: indexes created (concurrently) ===
 -- (paste your helper view defs here: rag_result_groups, rag_canonical_groups, rag_registry_groups, rag_design_groups_ix)
 drop materialized view if exists rag_study_json cascade;
@@ -657,10 +663,8 @@ BEGIN
     RAISE EXCEPTION 'p_k (number of buckets) must be >= 1';
   END IF;
   FOR k IN 0..p_k-1 LOOP
-    -- each bucket in its own small transaction (faster + visible progress)
-    START TRANSACTION;
-    SET LOCAL synchronous_commit = off;
-    SET LOCAL work_mem = '256MB';
+    -- each bucket processed separately (faster + visible progress)
+    -- Note: Cannot use START TRANSACTION inside PL/pgSQL procedure
     WITH ids AS (
       SELECT s.nct_id
       FROM public.ctgov_studies s
@@ -678,7 +682,6 @@ BEGIN
     SELECT count(*) INTO done
     FROM public.rag_study_corpus c
     WHERE (abs(hashtextextended(c.nct_id, 0)) % p_k) = k;
-    COMMIT;
     RAISE NOTICE 'Bucket %/% committed. Rows in bucket now: %', k+1, p_k, done;
   END LOOP;
   RAISE NOTICE 'All % buckets completed.', p_k;
