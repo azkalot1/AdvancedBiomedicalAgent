@@ -7,7 +7,8 @@ This script coordinates the ingestion of:
 2. Orange Book products
 3. ClinicalTrials.gov trials
 4. DailyMed SPL labels
-5. DrugCentral molecular structures
+5. BindingDB molecular targets and binding affinity data
+6. DrugCentral molecular structures
 
 All data goes into the same PostgreSQL database for integrated querying.
 """
@@ -20,6 +21,8 @@ from pathlib import Path
 # Handle imports for both direct execution and module import
 try:
     # When run as module (through CLI)
+    from .build_bindingdb import ingest_bindingdb_full
+    from .build_chembl import ingest_chembl_full
     from .build_ctgov import ingest_ctgov_full
     from .build_dailymed import run_dailymed_ingestion_pipeline
     from .build_drugcentral import build_drugcentral
@@ -37,6 +40,8 @@ try:
     )
 except ImportError:
     # When run directly
+    from build_bindingdb import ingest_bindingdb_full
+    from build_chembl import ingest_chembl_full
     from build_ctgov import ingest_ctgov_full
     from build_dailymed import run_dailymed_ingestion_pipeline
     from build_drugcentral import build_drugcentral
@@ -152,6 +157,66 @@ def run_dailymed_ingestion(config: DatabaseConfig, raw_dir: Path, n_max: int | N
         return True
     except Exception as e:
         print(f"❌ DailyMed ingestion failed: {e}")
+        return False
+
+
+def run_bindingdb_ingestion(config: DatabaseConfig, raw_dir: Path, n_max: int | None = None, 
+                           all_organisms: bool = False, batch_size: int = 10000, 
+                           force_recreate: bool = False) -> bool:
+    """Run BindingDB ingestion."""
+    print("\n" + "=" * 60)
+    print("🧬 BINDINGDB MOLECULAR TARGETS INGESTION")
+    if n_max:
+        print(f"   (Limited to {n_max:,} records)")
+    else:
+        print("   (Processing all available records)")
+    if not all_organisms:
+        print("   (Human targets only)")
+    else:
+        print("   (All organisms)")
+    if force_recreate:
+        print("   (Force recreating tables)")
+    print(f"   (Batch size: {batch_size:,})")
+    print("=" * 60)
+
+    try:
+        start_time = time.time()
+        ingest_bindingdb_full(
+            config, 
+            raw_dir, 
+            limit=n_max, 
+            human_only=not all_organisms,
+            batch_size=batch_size,
+            force_recreate=force_recreate
+        )
+        elapsed = time.time() - start_time
+        print(f"✅ BindingDB ingestion completed in {elapsed:.1f} seconds")
+        return True
+    except Exception as e:
+        print(f"❌ BindingDB ingestion failed: {e}")
+        return False
+
+
+def run_chembl_ingestion(config: DatabaseConfig, raw_dir: Path, force_recreate: bool = False) -> bool:
+    """Run ChEMBL ingestion."""
+    print("\n" + "=" * 60)
+    print("🧪 CHEMBL BIOCHEMICAL ANNOTATIONS INGESTION")
+    if force_recreate:
+        print("   (Force recreating tables)")
+    print("=" * 60)
+
+    try:
+        start_time = time.time()
+        ingest_chembl_full(
+            config, 
+            raw_dir, 
+            force_recreate=force_recreate
+        )
+        elapsed = time.time() - start_time
+        print(f"✅ ChEMBL ingestion completed in {elapsed:.1f} seconds")
+        return True
+    except Exception as e:
+        print(f"❌ ChEMBL ingestion failed: {e}")
         return False
 
 
@@ -368,6 +433,11 @@ Examples:
   %(prog)s --vacuum                         # Optimize database
   %(prog)s --skip-openfda                   # Skip OpenFDA ingestion
   %(prog)s --openfda-files 10 --n-max 1000  # Limit OpenFDA files and entries
+  %(prog)s --bindingdb-all-organisms        # Include all organisms in BindingDB
+  %(prog)s --bindingdb-batch-size 5000      # Use smaller batch size for low memory
+  %(prog)s --bindingdb-force-recreate       # Force recreate BindingDB tables
+  %(prog)s --chembl-force-recreate          # Force recreate ChEMBL tables
+  %(prog)s --reset --force --vacuum         # Complete reset: drop all, reimport, optimize
   %(prog)s --dump-db backup.sql             # Create database dump
   %(prog)s --restore-db backup.sql          # Restore database from dump
         """,
@@ -377,7 +447,13 @@ Examples:
     parser.add_argument("--skip-orange-book", action="store_true", help="Skip Orange Book ingestion")
     parser.add_argument("--skip-ctgov", action="store_true", help="Skip ClinicalTrials.gov ingestion")
     parser.add_argument("--skip-dailymed", action="store_true", help="Skip DailyMed ingestion")
+    parser.add_argument("--skip-bindingdb", action="store_true", help="Skip BindingDB ingestion")
     parser.add_argument("--skip-drugcentral", action="store_true", help="Skip DrugCentral ingestion")
+    parser.add_argument("--skip-chembl", action="store_true", help="Skip ChEMBL ingestion")
+    parser.add_argument("--bindingdb-all-organisms", action="store_true", help="Include all organisms in BindingDB (default: human only)")
+    parser.add_argument("--bindingdb-batch-size", type=int, default=10000, help="Batch size for BindingDB processing (default: 10000)")
+    parser.add_argument("--bindingdb-force-recreate", action="store_true", help="Force recreate BindingDB tables (WARNING: deletes existing data)")
+    parser.add_argument("--chembl-force-recreate", action="store_true", help="Force recreate ChEMBL tables (WARNING: deletes existing data)")
     parser.add_argument("--openfda-files", type=int, help="Max OpenFDA files to process (default: all)")
     parser.add_argument("--n-max", type=int, help="Max entries to process")
     parser.add_argument("--vacuum", action="store_true", help="Run VACUUM after ingestion")
@@ -513,7 +589,32 @@ Examples:
         print("\n⏭️  Skipping DailyMed ingestion")
         results["dailymed"] = True
 
-    # 5. DrugCentral (molecular structures and chemical data)
+    # 5. BindingDB (molecular targets and binding affinity data)
+    if not args.skip_bindingdb:
+        results["bindingdb"] = run_bindingdb_ingestion(
+            config, 
+            raw_dir, 
+            args.n_max, 
+            args.bindingdb_all_organisms,
+            args.bindingdb_batch_size,
+            args.bindingdb_force_recreate
+        )
+    else:
+        print("\n⏭️  Skipping BindingDB ingestion")
+        results["bindingdb"] = True
+
+    # 6. ChEMBL (biochemical annotations and molecule naming)
+    if not args.skip_chembl:
+        results["chembl"] = run_chembl_ingestion(
+            config, 
+            raw_dir, 
+            args.chembl_force_recreate
+        )
+    else:
+        print("\n⏭️  Skipping ChEMBL ingestion")
+        results["chembl"] = True
+
+    # 7. DrugCentral (molecular structures and chemical data)
     if not args.skip_drugcentral:
         results["drugcentral"] = run_drugcentral_ingestion(config, raw_dir)
     else:
@@ -552,6 +653,15 @@ Examples:
         print("\n📊 Key tables created:")
         print("   - drug_mapping_final: Cross-source drug mappings with match types")
         print("   - drug_mapping_summary: Aggregated view of drug mappings")
+        print("   - bindingdb_molecules: Molecular structures and identifiers")
+        print("   - bindingdb_targets: Protein targets and gene information")
+        print("   - bindingdb_activities: Binding affinity measurements")
+        print("   - bindingdb_human_targets: Human-specific target interactions")
+        print("   - molecule_dictionary: ChEMBL molecule definitions and metadata")
+        print("   - compound_structures: ChEMBL chemical structures and identifiers")
+        print("   - molecule_synonyms: ChEMBL alternative molecule names")
+        print("   - target_dictionary: ChEMBL protein targets")
+        print("   - activities: ChEMBL bioactivity measurements")
         print("\nExample cross-source queries you can now run:")
         print("1. Find OpenFDA drugs with Orange Book therapeutic equivalents")
         print("2. Link clinical trials to FDA-approved drugs")
@@ -561,6 +671,8 @@ Examples:
         print("6. Find chemical similarities using DrugCentral SMILES data")
         print("7. Query drug_mapping_final for exact matches across all sources")
         print("8. Use drug_mapping_summary for aggregated drug relationships")
+        print("9. Find drugs targeting specific proteins using BindingDB data")
+        print("10. Analyze binding affinity patterns across drug classes")
     else:
         print("\n⚠️  Some ingestions failed. Check the logs above.")
         sys.exit(1)

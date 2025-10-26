@@ -77,6 +77,8 @@ def _iter_outcome_analyses(study_json: dict[str, Any]) -> Iterable[dict[str, Any
                 "outcome_title": o.get("title"),
                 "time_frame": o.get("time_frame"),
                 "method": a.get("method"),
+                "param_type": a.get("param_type"),
+                "param_value": a.get("param_value"),
                 "p_value": a.get("p_value"),
                 "ci_percent": a.get("ci_percent"),
                 "ci_lower": a.get("ci_lower"),
@@ -145,6 +147,15 @@ class ClinicalTrialsSearchInput(BaseModel):
     # NEW: for combo searches
     condition_query: str | None = None
     intervention_query: str | None = None
+    
+    # Output control flags - control what sections to display
+    output_eligibility: bool = Field(default=True, description="Include eligibility criteria")
+    output_groups: bool = Field(default=True, description="Include registry-defined groups & interventions")
+    output_baseline_measurements: bool = Field(default=True, description="Include baseline measurements")
+    output_results: bool = Field(default=True, description="Include outcome results")
+    output_adverse_effects: bool = Field(default=True, description="Include adverse events")
+    output_sponsors: bool = Field(default=True, description="Include sponsor information")
+    output_countries: bool = Field(default=True, description="Include country information")
 
     @field_validator("query")
     @classmethod
@@ -159,6 +170,10 @@ class TrialHit(BaseModel):
     score: float
     summary: str
     study_json: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional metadata about the match (e.g., matched MeSH terms, match source)"
+    )
 
 
 class ClinicalTrialsSearchOutput(BaseModel):
@@ -177,19 +192,40 @@ def _list_from(obj: dict[str, Any], key: str) -> list[str]:
     return v if isinstance(v, list) else []
 
 
-def render_study_text_full(study_json: dict[str, Any], nct_id: str | None = None) -> str:
+def render_study_text_full(
+    study_json: dict[str, Any],
+    nct_id: str | None = None,
+    output_eligibility: bool = True,
+    output_groups: bool = True,
+    output_baseline_measurements: bool = True,
+    output_results: bool = True,
+    output_adverse_effects: bool = True,
+    output_sponsors: bool = True,
+    output_countries: bool = True,
+) -> str:
     """
     Render a comprehensive, ordered narrative for a single trial.
 
     Sections:
-      1) Header & metadata
-      2) Design
-      3) Eligibility
-      4) Labels (conditions, interventions, sponsors, countries)
-      5) Registry-defined groups (with assigned interventions)
-      6) Results groups (with baseline counts & baseline measurements)
-      7) Outcomes (per-group numeric measures, count outcomes, and analyses)
-      8) Adverse events (per-group incidence)
+      1) Header & metadata (always included)
+      2) Design (always included)
+      3) Eligibility (controlled by output_eligibility)
+      4) Labels: conditions (always), interventions (always), sponsors/countries (controlled by flags)
+      5) Registry-defined groups (controlled by output_groups)
+      6) Results groups with baseline measurements (controlled by output_baseline_measurements)
+      7) Outcomes (controlled by output_results)
+      8) Adverse events (controlled by output_adverse_effects)
+    
+    Args:
+        study_json: The study JSON data
+        nct_id: Optional NCT ID to include in header
+        output_eligibility: Include eligibility criteria
+        output_groups: Include registry-defined groups & interventions
+        output_baseline_measurements: Include baseline measurements
+        output_results: Include outcome results
+        output_adverse_effects: Include adverse events
+        output_sponsors: Include sponsor information
+        output_countries: Include country information
     """
     md = study_json.get("metadata") or {}
     dsn = study_json.get("design") or {}
@@ -245,19 +281,20 @@ def render_study_text_full(study_json: dict[str, Any], nct_id: str | None = None
         lines.append("Masking description: " + _nz(dsn.get("masking_description")) + ".")
 
     # 3) Eligibility
-    lines.append(
-        "Eligibility — gender: {gender}; age: {min_age}–{max_age}; healthy volunteers: {hv}.".format(
-            gender=_nz(elig.get("gender")),
-            min_age=_nz(elig.get("minimum_age")),
-            max_age=_nz(elig.get("maximum_age")),
-            hv=_fmt_bool(elig.get("healthy_volunteers")),
+    if output_eligibility:
+        lines.append(
+            "Eligibility — gender: {gender}; age: {min_age}–{max_age}; healthy volunteers: {hv}.".format(
+                gender=_nz(elig.get("gender")),
+                min_age=_nz(elig.get("minimum_age")),
+                max_age=_nz(elig.get("maximum_age")),
+                hv=_fmt_bool(elig.get("healthy_volunteers")),
+            )
         )
-    )
-    # Keep criteria short; call-site can print full criteria if desired.
-    crit = elig.get("criteria") or ""
-    if isinstance(crit, str) and crit.strip():
-        first_line = crit.strip().splitlines()[0]
-        lines.append("Eligibility criteria (first line): " + first_line)
+        # Keep criteria short; call-site can print full criteria if desired.
+        crit = elig.get("criteria") or ""
+        if isinstance(crit, str) and crit.strip():
+            first_line = crit.strip().splitlines()[0]
+            lines.append("Eligibility criteria (first line): " + first_line)
 
     # 4) Labels
     conditions = labels.get("conditions") or []
@@ -266,13 +303,13 @@ def render_study_text_full(study_json: dict[str, Any], nct_id: str | None = None
     countries = labels.get("countries") or []
     lines.append("Conditions: " + (", ".join(map(str, conditions)) if conditions else "—") + ".")
     lines.append("Interventions (registry): " + (", ".join(map(str, interventions)) if interventions else "—") + ".")
-    if sponsors:
+    if output_sponsors and sponsors:
         lines.append("Lead sponsors: " + ", ".join(map(str, sponsors)) + ".")
-    if countries:
+    if output_countries and countries:
         lines.append("Countries: " + ", ".join(map(str, countries)) + ".")
 
     # 5) Registry-defined groups (with assigned interventions)
-    if reg_groups:
+    if output_groups and reg_groups:
         lines.append("Registry-defined groups & assigned interventions:")
         for g in reg_groups:
             title = _nz(g.get("title"))
@@ -296,85 +333,133 @@ def render_study_text_full(study_json: dict[str, Any], nct_id: str | None = None
                 lines.append(f"    {desc}")
 
     # 6) Results groups, baselines & baseline measurements
-    # if res_groups:
-    #     lines.append("Results groups, baseline counts & baseline measurements:")
-    #     for g in res_groups:
-    #         title = _nz(g.get("title"))
-    #         lines.append(f"  • Group: {title}")
-    #         # Baseline counts (often overall participants analyzed)
-    #         for bc in _as_list(g.get("baselines")):
-    #             units = bc.get("units")
-    #             scope = bc.get("scope")
-    #             count = bc.get("count")
-    #             lines.append(f"    - Baseline count: {_nz(count)} {units or ''} (scope: {_nz(scope)})".rstrip())
-    #         # Baseline measurements (e.g., Age mean ± SD)
-    #         for bm in _as_list(g.get("baseline_measurements")):
-    #             parts = [
-    #                 _nz(bm.get("title")),
-    #                 (_nz(bm.get("param_type")).title() if bm.get("param_type") else ""),
-    #                 _nz(bm.get("value")),
-    #                 _nz(bm.get("units"), ""),
-    #             ]
-    #             disp = None
-    #             if bm.get("dispersion_type") and bm.get("dispersion") is not None:
-    #                 disp = f"{str(bm['dispersion_type']).replace('_', ' ').title()} {_nz(bm['dispersion'])}"
-    #             if disp:
-    #                 parts.append(f"({disp})")
-    #             lines.append("    - Baseline measure: " + " ".join([p for p in parts if p]).strip())
+    if output_baseline_measurements and res_groups:
+         lines.append("Results groups, baseline counts & baseline measurements:")
+         for g in res_groups:
+             title = _nz(g.get("title"))
+             lines.append(f"  • Group: {title}")
+             # Baseline counts (often overall participants analyzed)
+             for bc in _as_list(g.get("baselines")):
+                 units = bc.get("units")
+                 scope = bc.get("scope")
+                 count = bc.get("count")
+                 lines.append(f"    - Baseline count: {_nz(count)} {units or ''} (scope: {_nz(scope)})".rstrip())
+             # Baseline measurements (e.g., Age mean ± SD)
+             for bm in _as_list(g.get("baseline_measurements")):
+                 parts = [
+                     _nz(bm.get("title")),
+                     (_nz(bm.get("param_type")).title() if bm.get("param_type") else ""),
+                     _nz(bm.get("value")),
+                     _nz(bm.get("units"), ""),
+                 ]
+                 disp = None
+                 if bm.get("dispersion_type") and bm.get("dispersion") is not None:
+                     disp = f"{str(bm['dispersion_type']).replace('_', ' ').title()} {_nz(bm['dispersion'])}"
+                 if disp:
+                     parts.append(f"({disp})")
+                 lines.append("    - Baseline measure: " + " ".join([p for p in parts if p]).strip())
 
     # 7) Outcomes (measures, counts, analyses)
-    if outcomes:
+    if output_results and outcomes:
         lines.append("Outcomes:")
-        # (a) numeric measures per group
+        
+        # (a) numeric measures per group - group by header
+        measures_by_header = {}
         for row in _iter_outcome_measures(study_json):
-            header = f"  • [{_nz(row['outcome_type']).title()}] {_nz(row['outcome_title'])} [{_nz(row['time_frame'])}]"
+            header_key = (row['outcome_type'], row['outcome_title'], row['time_frame'])
+            if header_key not in measures_by_header:
+                measures_by_header[header_key] = []
+            measures_by_header[header_key].append(row)
+        
+        for header_key, measures in measures_by_header.items():
+            outcome_type, outcome_title, time_frame = header_key
+            header = f"  • [{_nz(outcome_type).title()}] {_nz(outcome_title)} [{_nz(time_frame)}]"
             lines.append(header)
-            parts = [
-                f"    - {row['group_title']}:",
-                (row.get("param_type") or ""),
-                _nz(row.get("value")),
-                _nz(row.get("units"), ""),
-            ]
-            if row.get("dispersion_type") and row.get("dispersion") is not None:
-                parts.append(f"({str(row['dispersion_type']).replace('_', ' ').title()} {row['dispersion']})")
-            ci = _fmt_ci(row.get("lower"), row.get("upper"), None)  # ci_percent lives in analyses, not measures
-            # Only add CI if present at measure level; most CIs live under analyses.
-            if ci:
-                parts.append(ci)
-            # classification (e.g., Baseline)
-            if row.get("classification"):
-                parts.append(f"[{row['classification']}]")
-            lines.append(" ".join([p for p in parts if p]).strip())
+            for row in measures:
+                parts = [
+                    f"    - {row['group_title']}:",
+                    (row.get("param_type") or ""),
+                    _nz(row.get("value")),
+                    _nz(row.get("units"), ""),
+                ]
+                if row.get("dispersion_type") and row.get("dispersion") is not None:
+                    parts.append(f"({str(row['dispersion_type']).replace('_', ' ').title()} {row['dispersion']})")
+                ci = _fmt_ci(row.get("lower"), row.get("upper"), None)  # ci_percent lives in analyses, not measures
+                # Only add CI if present at measure level; most CIs live under analyses.
+                if ci:
+                    parts.append(ci)
+                # classification (e.g., Baseline)
+                if row.get("classification"):
+                    parts.append(f"[{row['classification']}]")
+                lines.append(" ".join([p for p in parts if p]).strip())
 
-        # (b) count outcomes (e.g., number of participants)
+        # (b) count outcomes (e.g., number of participants) - group by header
+        counts_by_header = {}
         for row in _iter_outcome_counts(study_json):
-            header = f"  • [{_nz(row['outcome_type']).title()}] {_nz(row['outcome_title'])} [{_nz(row['time_frame'])}]"
+            header_key = (row['outcome_type'], row['outcome_title'], row['time_frame'])
+            if header_key not in counts_by_header:
+                counts_by_header[header_key] = []
+            counts_by_header[header_key].append(row)
+        
+        for header_key, counts in counts_by_header.items():
+            outcome_type, outcome_title, time_frame = header_key
+            header = f"  • [{_nz(outcome_type).title()}] {_nz(outcome_title)} [{_nz(time_frame)}]"
             lines.append(header)
-            lines.append(f"    - {row['group_title']}: {_nz(row['count'])} {_nz(row['units'])} (scope: {_nz(row['scope'])})")
+            for row in counts:
+                lines.append(f"    - {row['group_title']}: {_nz(row['count'])} {_nz(row['units'])} (scope: {_nz(row['scope'])})")
 
-        # (c) analyses (comparisons, p-values, CIs)
+        # (c) analyses (comparisons, p-values, CIs) - group by outcome
+        analyses_by_outcome = {}
         for a in _iter_outcome_analyses(study_json):
-            bits = [a.get("method") or "", a.get("comparison_groups") or ""]
-            if a.get("p_value") is not None:
-                bits.append(f"p={a['p_value']}")
-            ci = _fmt_ci(a.get("ci_lower"), a.get("ci_upper"), a.get("ci_percent"))
-            if ci:
-                bits.append(ci)
-            desc = a.get("description")
-            line = "    - Analysis: " + ", ".join([b for b in bits if b]).strip()
-            lines.append(line)
-            if desc:
-                lines.append(f"      {desc}")
+            outcome_key = (a['outcome_title'], a['time_frame'])
+            if outcome_key not in analyses_by_outcome:
+                analyses_by_outcome[outcome_key] = []
+            analyses_by_outcome[outcome_key].append(a)
+        
+        for outcome_key, analyses in analyses_by_outcome.items():
+            # Analyses typically follow the measures/counts for the same outcome,
+            # so we just print them without a header if they're already associated
+            for a in analyses:
+                bits = [a.get("method") or "", a.get("comparison_groups") or ""]
+                
+                # Add test statistic if available
+                if a.get("param_type") and a.get("param_value") is not None:
+                    bits.append(f"{a['param_type']}={a['param_value']}")
+                
+                # Add p-value
+                if a.get("p_value") is not None:
+                    bits.append(f"p={a['p_value']}")
+                
+                # Add confidence interval
+                ci = _fmt_ci(a.get("ci_lower"), a.get("ci_upper"), a.get("ci_percent"))
+                if ci:
+                    bits.append(ci)
+                
+                desc = a.get("description")
+                line = "    - Analysis: " + ", ".join([b for b in bits if b]).strip()
+                lines.append(line)
+                if desc:
+                    lines.append(f"      {desc}")
 
-    # 8) Adverse events
-    if aes:
+    # 8) Adverse events - group by term and event type
+    if output_adverse_effects and aes:
         lines.append("Adverse events (per group):")
+        aes_by_term = {}
         for ae in _iter_adverse_events(study_json):
-            lines.append(
-                f"  • { _nz(ae['term']) } [{ _nz(ae['event_type']) }] — "
-                f"{_nz(ae['group_title'])}: {_nz(ae['affected'])}/{_nz(ae['at_risk'])}"
-                + (f" ({_nz(ae['rate_pct'])}%)" if ae.get("rate_pct") is not None else "")
-            )
+            ae_key = (ae['term'], ae['event_type'])
+            if ae_key not in aes_by_term:
+                aes_by_term[ae_key] = []
+            aes_by_term[ae_key].append(ae)
+        
+        for ae_key, ae_list in aes_by_term.items():
+            term, event_type = ae_key
+            header = f"  • {_nz(term)} [{_nz(event_type)}]"
+            lines.append(header)
+            for ae in ae_list:
+                line = f"    - {_nz(ae['group_title'])}: {_nz(ae['affected'])}/{_nz(ae['at_risk'])}"
+                if ae.get("rate_pct") is not None:
+                    line += f" ({_nz(ae['rate_pct'])}%)"
+                lines.append(line)
 
     return "\n".join(lines)
 
@@ -443,7 +528,17 @@ async def clinical_trials_search_async(
         hits: list[TrialHit] = []
         for r in rows:
             sj = _as_json_dict(r.get("study_json"))
-            summary = render_study_text_full(sj, nct_id=r["nct_id"])  # use the full renderer
+            summary = render_study_text_full(
+                sj,
+                nct_id=r["nct_id"],
+                output_eligibility=search_input.output_eligibility,
+                output_groups=search_input.output_groups,
+                output_baseline_measurements=search_input.output_baseline_measurements,
+                output_results=search_input.output_results,
+                output_adverse_effects=search_input.output_adverse_effects,
+                output_sponsors=search_input.output_sponsors,
+                output_countries=search_input.output_countries,
+            )
             hits.append(
                 TrialHit(
                     nct_id=r["nct_id"],

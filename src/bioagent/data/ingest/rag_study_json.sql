@@ -309,6 +309,8 @@ select
               jsonb_build_object(
                 'method', oa.method,
                 'p_value', oa.p_value,
+                'param_type', oa.param_type,
+                'param_value', oa.param_value,
                 'ci_percent', oa.ci_percent,
                 'ci_lower', oa.ci_lower_limit,
                 'ci_upper', oa.ci_upper_limit,
@@ -325,7 +327,7 @@ select
                     on cg.nct_id = oag.nct_id and cg.group_idx = rgr.group_idx
                   where oag.outcome_analysis_id = oa.id
                 ),
-                'description', coalesce(oa.groups_description, oa.method_description)
+                'description', coalesce(oa.groups_description, oa.method_description, oa.estimate_description)
               )
             )
             from public.ctgov_outcome_analyses oa
@@ -715,38 +717,97 @@ WITH base AS (
   FROM public.rag_study_corpus c
 ),
 aliases AS (
+  -- Study acronyms
   SELECT s.nct_id, NULLIF(trim(s.acronym),'') AS alias_raw
   FROM public.ctgov_studies s
   UNION ALL
+  -- Secondary IDs (EudraCT, etc.)
   SELECT ii.nct_id, NULLIF(trim(ii.id_value),'')
   FROM public.ctgov_id_information ii
   UNION ALL
+  -- Keywords
   SELECT k.nct_id, NULLIF(trim(k.name),'')
   FROM public.ctgov_keywords k
   UNION ALL
+  -- Intervention aliases/brand names
   SELECT i.nct_id, NULLIF(trim(ion.name),'')
   FROM public.ctgov_interventions i
   JOIN public.ctgov_intervention_other_names ion ON ion.intervention_id = i.id
 ),
+-- MeSH intervention terms (standardized drug/procedure terminology)
+mesh_interventions AS (
+  SELECT bi.nct_id, NULLIF(trim(bi.mesh_term),'') AS intervention_raw
+  FROM public.ctgov_browse_interventions bi
+),
+-- MeSH condition terms (standardized disease terminology)
+mesh_conditions AS (
+  SELECT bc.nct_id, NULLIF(trim(bc.mesh_term),'') AS condition_raw
+  FROM public.ctgov_browse_conditions bc
+),
 all_rows AS (
-  SELECT nct_id, condition_raw, NULL::text AS intervention_raw, NULL::text AS alias_raw FROM base
+  -- Conditions from study JSON
+  SELECT nct_id, 
+         condition_raw, 
+         NULL::text AS intervention_raw, 
+         NULL::text AS alias_raw,
+         NULL::text AS mesh_condition_raw,
+         NULL::text AS mesh_intervention_raw
+  FROM base
   UNION ALL
-  SELECT nct_id, NULL, intervention_raw, NULL FROM base
+  -- Interventions from study JSON
+  SELECT nct_id, 
+         NULL, 
+         intervention_raw, 
+         NULL,
+         NULL,
+         NULL
+  FROM base
   UNION ALL
-  SELECT nct_id, NULL, NULL, alias_raw FROM aliases
+  -- Aliases (acronyms, IDs, keywords, intervention brand names)
+  SELECT nct_id, 
+         NULL, 
+         NULL, 
+         alias_raw,
+         NULL,
+         NULL
+  FROM aliases
+  UNION ALL
+  -- MeSH intervention terms → mesh_intervention_norm
+  SELECT nct_id, 
+         NULL, 
+         NULL, 
+         NULL,
+         NULL,
+         intervention_raw AS mesh_intervention_raw
+  FROM mesh_interventions
+  UNION ALL
+  -- MeSH condition terms → mesh_condition_norm
+  SELECT nct_id, 
+         NULL, 
+         NULL, 
+         NULL,
+         condition_raw AS mesh_condition_raw,
+         NULL
+  FROM mesh_conditions
 )
 SELECT DISTINCT
   nct_id,
   NULLIF(trim(condition_raw), '')      AS condition_name,
   NULLIF(trim(intervention_raw), '')   AS intervention_name,
   NULLIF(trim(alias_raw), '')          AS alias_name,
+  NULLIF(trim(mesh_condition_raw), '') AS mesh_condition_name,
+  NULLIF(trim(mesh_intervention_raw), '') AS mesh_intervention_name,
   lower(unaccent(NULLIF(trim(condition_raw),     ''))) AS condition_norm,
   lower(unaccent(NULLIF(trim(intervention_raw),  ''))) AS intervention_norm,
-  lower(unaccent(NULLIF(trim(alias_raw),         ''))) AS alias_norm
+  lower(unaccent(NULLIF(trim(alias_raw),         ''))) AS alias_norm,
+  lower(unaccent(NULLIF(trim(mesh_condition_raw),     ''))) AS mesh_condition_norm,
+  lower(unaccent(NULLIF(trim(mesh_intervention_raw),  ''))) AS mesh_intervention_norm
 FROM all_rows
 WHERE (condition_raw IS NOT NULL AND NULLIF(trim(condition_raw),'') IS NOT NULL)
    OR (intervention_raw IS NOT NULL AND NULLIF(trim(intervention_raw),'') IS NOT NULL)
    OR (alias_raw IS NOT NULL AND NULLIF(trim(alias_raw),'') IS NOT NULL)
+   OR (mesh_condition_raw IS NOT NULL AND NULLIF(trim(mesh_condition_raw),'') IS NOT NULL)
+   OR (mesh_intervention_raw IS NOT NULL AND NULLIF(trim(mesh_intervention_raw),'') IS NOT NULL)
 WITH NO DATA;
 
 -- First blocking populate (sets "populated" flag)
@@ -757,12 +818,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_keys_unique
   ON public.rag_study_keys (nct_id,
                             COALESCE(condition_name,''),
                             COALESCE(intervention_name,''),
-                            COALESCE(alias_name,''));
+                            COALESCE(alias_name,''),
+                            COALESCE(mesh_condition_name,''),
+                            COALESCE(mesh_intervention_name,''));
 
-CREATE INDEX IF NOT EXISTS idx_rag_keys_cond_norm_trgm  ON public.rag_study_keys USING gin (condition_norm    gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_rag_keys_intr_norm_trgm  ON public.rag_study_keys USING gin (intervention_norm gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_rag_keys_alias_norm_trgm ON public.rag_study_keys USING gin (alias_norm        gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_rag_keys_nct             ON public.rag_study_keys (nct_id);
+-- Trigram indexes for fuzzy text search
+CREATE INDEX IF NOT EXISTS idx_rag_keys_cond_norm_trgm       ON public.rag_study_keys USING gin (condition_norm       gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_rag_keys_intr_norm_trgm       ON public.rag_study_keys USING gin (intervention_norm    gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_rag_keys_alias_norm_trgm      ON public.rag_study_keys USING gin (alias_norm           gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_rag_keys_mesh_cond_norm_trgm  ON public.rag_study_keys USING gin (mesh_condition_norm  gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_rag_keys_mesh_intr_norm_trgm  ON public.rag_study_keys USING gin (mesh_intervention_norm gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_rag_keys_nct                  ON public.rag_study_keys (nct_id);
 DROP FUNCTION IF EXISTS public.search_trials(text, text, integer);
 CREATE OR REPLACE FUNCTION public.search_trials(
   p_kind  text,         -- 'nct' | 'condition' | 'intervention' | 'alias' | 'auto'
@@ -786,24 +852,44 @@ BEGIN
 
   ELSIF p_kind = 'condition' THEN
     RETURN QUERY
-      WITH q AS (SELECT lower(unaccent(p_query)) AS q)
-      SELECT k.nct_id, similarity(k.condition_norm, q.q), c.study_json
-      FROM public.rag_study_keys k
-      JOIN q ON TRUE
+      WITH q AS (SELECT lower(unaccent(p_query)) AS q),
+      results AS (
+        -- Search regular condition names
+        SELECT k.nct_id, similarity(k.condition_norm, q.q) AS score
+        FROM public.rag_study_keys k, q
+        WHERE k.condition_norm % q.q
+        UNION
+        -- Search MeSH condition terms
+        SELECT k.nct_id, similarity(k.mesh_condition_norm, q.q) AS score
+        FROM public.rag_study_keys k, q
+        WHERE k.mesh_condition_norm % q.q
+      )
+      SELECT r.nct_id, MAX(r.score)::real, c.study_json
+      FROM results r
       JOIN public.rag_study_corpus c USING (nct_id)
-      WHERE k.condition_norm % q.q
-      ORDER BY 2 DESC, k.nct_id
+      GROUP BY r.nct_id, c.study_json
+      ORDER BY 2 DESC, r.nct_id
       LIMIT p_limit;
 
   ELSIF p_kind = 'intervention' THEN
     RETURN QUERY
-      WITH q AS (SELECT lower(unaccent(p_query)) AS q)
-      SELECT k.nct_id, similarity(k.intervention_norm, q.q), c.study_json
-      FROM public.rag_study_keys k
-      JOIN q ON TRUE
+      WITH q AS (SELECT lower(unaccent(p_query)) AS q),
+      results AS (
+        -- Search regular intervention names
+        SELECT k.nct_id, similarity(k.intervention_norm, q.q) AS score
+        FROM public.rag_study_keys k, q
+        WHERE k.intervention_norm % q.q
+        UNION
+        -- Search MeSH intervention terms
+        SELECT k.nct_id, similarity(k.mesh_intervention_norm, q.q) AS score
+        FROM public.rag_study_keys k, q
+        WHERE k.mesh_intervention_norm % q.q
+      )
+      SELECT r.nct_id, MAX(r.score)::real, c.study_json
+      FROM results r
       JOIN public.rag_study_corpus c USING (nct_id)
-      WHERE k.intervention_norm % q.q
-      ORDER BY 2 DESC, k.nct_id
+      GROUP BY r.nct_id, c.study_json
+      ORDER BY 2 DESC, r.nct_id
       LIMIT p_limit;
 
   ELSIF p_kind = 'alias' THEN
@@ -828,15 +914,21 @@ BEGIN
       RETURN QUERY
         WITH q AS (SELECT lower(unaccent(p_query)) AS q),
         r AS (
-          SELECT k.nct_id, similarity(k.alias_norm, q.q)        AS score FROM public.rag_study_keys k, q WHERE k.alias_norm % q.q
+          SELECT k.nct_id, similarity(k.alias_norm, q.q)             AS score FROM public.rag_study_keys k, q WHERE k.alias_norm % q.q
           UNION
-          SELECT k.nct_id, similarity(k.intervention_norm, q.q) AS score FROM public.rag_study_keys k, q WHERE k.intervention_norm % q.q
+          SELECT k.nct_id, similarity(k.intervention_norm, q.q)      AS score FROM public.rag_study_keys k, q WHERE k.intervention_norm % q.q
           UNION
-          SELECT k.nct_id, similarity(k.condition_norm, q.q)    AS score FROM public.rag_study_keys k, q WHERE k.condition_norm % q.q
+          SELECT k.nct_id, similarity(k.condition_norm, q.q)         AS score FROM public.rag_study_keys k, q WHERE k.condition_norm % q.q
+          UNION
+          SELECT k.nct_id, similarity(k.mesh_intervention_norm, q.q) AS score FROM public.rag_study_keys k, q WHERE k.mesh_intervention_norm % q.q
+          UNION
+          SELECT k.nct_id, similarity(k.mesh_condition_norm, q.q)    AS score FROM public.rag_study_keys k, q WHERE k.mesh_condition_norm % q.q
         )
-        SELECT r.nct_id, r.score, c.study_json
-        FROM r JOIN public.rag_study_corpus c USING (nct_id)
-        ORDER BY r.score DESC, r.nct_id
+        SELECT r.nct_id, MAX(r.score)::real AS score, c.study_json
+        FROM r 
+        JOIN public.rag_study_corpus c USING (nct_id)
+        GROUP BY r.nct_id, c.study_json
+        ORDER BY score DESC, r.nct_id
         LIMIT p_limit;
     END IF;
 
@@ -874,42 +966,66 @@ qi AS (
               ELSE lower(unaccent(p_intervention)) END AS q
 ),
 
--- condition hits
+-- condition hits (regular + MeSH)
 cond AS (
   SELECT k.nct_id,
          similarity(k.condition_norm, qc.q) AS s_c
   FROM public.rag_study_keys k, qc
   WHERE qc.q IS NOT NULL
     AND k.condition_norm % qc.q
+  UNION
+  SELECT k.nct_id,
+         similarity(k.mesh_condition_norm, qc.q) AS s_c
+  FROM public.rag_study_keys k, qc
+  WHERE qc.q IS NOT NULL
+    AND k.mesh_condition_norm % qc.q
 ),
 
--- intervention hits
+-- intervention hits (regular + MeSH)
 intr AS (
   SELECT k.nct_id,
          similarity(k.intervention_norm, qi.q) AS s_i
   FROM public.rag_study_keys k, qi
   WHERE qi.q IS NOT NULL
     AND k.intervention_norm % qi.q
+  UNION
+  SELECT k.nct_id,
+         similarity(k.mesh_intervention_norm, qi.q) AS s_i
+  FROM public.rag_study_keys k, qi
+  WHERE qi.q IS NOT NULL
+    AND k.mesh_intervention_norm % qi.q
+),
+
+-- Aggregate to max score per study (if matched multiple times)
+cond_agg AS (
+  SELECT nct_id, MAX(s_c) AS s_c
+  FROM cond
+  GROUP BY nct_id
+),
+intr_agg AS (
+  SELECT nct_id, MAX(s_i) AS s_i
+  FROM intr
+  GROUP BY nct_id
 ),
 
 -- intersection & score (rename from "both" -> "both_hits" to avoid keyword)
 both_hits AS (
   SELECT c.nct_id,
          ((c.s_c + i.s_i) / 2.0)::real AS score
-  FROM cond c
-  JOIN intr i USING (nct_id)
+  FROM cond_agg c
+  JOIN intr_agg i USING (nct_id)
 ),
 
 -- single-key fallbacks if one side missing
 only_cond AS (
   SELECT c.nct_id, c.s_c::real AS score
-  FROM cond c
-  WHERE NOT EXISTS (SELECT 1 FROM intr)
+  FROM cond_agg c
+  WHERE NOT EXISTS (SELECT 1 FROM intr_agg)
 ),
 only_intr AS (
   SELECT i.nct_id, i.s_i::real AS score
-  FROM intr i
-  WHERE NOT EXISTS (SELECT 1 FROM cond)
+  FROM intr_agg i
+  WHERE NOT EXISTS (SELECT 1 FROM cond_agg)
 ),
 
 unioned AS (
