@@ -468,6 +468,112 @@ def create_rag_functionality_standalone(config: DatabaseConfig, sql_dir: Path) -
     print("✅ Standalone RAG functionality setup completed!")
 
 
+def populate_rag_corpus(config: DatabaseConfig, buckets: int = 16) -> None:
+    """
+    Populate the RAG study corpus by calling build_study_json for each study.
+    This version loops in Python to provide better progress feedback.
+    """
+    print(f"🧠 Starting RAG corpus population with {buckets} buckets...")
+    print("⚠️  This operation can take several hours on a full database!")
+
+    with get_connection(config) as con:
+        with con.cursor() as cur:
+            # Get total number of studies to process
+            cur.execute("SELECT COUNT(*) FROM ctgov_studies")
+            total_studies = cur.fetchone()[0]
+            print(f"📊 Total studies to process: {total_studies:,}")
+            
+            # Use tqdm for a progress bar
+            with tqdm(total=total_studies, unit=' study', desc="Populating RAG Corpus") as pbar:
+                for k in range(buckets):
+                    # Process one bucket at a time
+                    sql = f"""
+                        WITH ids AS (
+                            SELECT s.nct_id
+                            FROM public.ctgov_studies s
+                            WHERE (abs(hashtextextended(s.nct_id, 0)) % {buckets}) = {k}
+                        )
+                        INSERT INTO public.rag_study_corpus (nct_id, study_json)
+                        SELECT nct_id, public.build_study_json(nct_id)
+                        FROM ids
+                        ON CONFLICT (nct_id) DO UPDATE
+                        SET study_json = EXCLUDED.study_json,
+                            updated_at = now();
+                    """
+                    
+                    # Get number of studies in this bucket to update progress bar
+                    cur.execute(f"SELECT COUNT(*) FROM public.ctgov_studies WHERE (abs(hashtextextended(nct_id, 0)) % {buckets}) = {k}")
+                    num_in_bucket = cur.fetchone()[0]
+
+                    print(f"\n🔄 Processing bucket {k+1}/{buckets} ({num_in_bucket} studies)...")
+                    cur.execute(sql)
+                    con.commit()
+                    
+                    pbar.update(num_in_bucket)
+                    print(f"✅ Bucket {k+1}/{buckets} committed.")
+
+            # Final verification
+            cur.execute("SELECT COUNT(*) FROM public.rag_study_corpus")
+            populated_count = cur.fetchone()[0]
+            print(f"\n🎉 RAG corpus populated with {populated_count:,} studies!")
+
+
+def populate_rag_keys(config: DatabaseConfig) -> None:
+    """
+    Populate the RAG study keys materialized view and create indexes.
+    Should be run after populate_rag_corpus.
+    """
+    print("🔑 Starting RAG study keys population...")
+    print("⚠️  This operation can take 30+ minutes on a full database!")
+    
+    with get_connection(config) as con:
+        with con.cursor() as cur:
+            # Refresh the materialized view
+            print("🔄 Refreshing rag_study_keys materialized view...")
+            cur.execute("REFRESH MATERIALIZED VIEW public.rag_study_keys")
+            con.commit()
+            
+            # Check results
+            cur.execute("SELECT COUNT(*) FROM public.rag_study_keys")
+            keys_count = cur.fetchone()[0]
+            print(f"✅ Materialized view populated with {keys_count:,} key entries")
+            
+            # Create indexes
+            print("\n🔨 Creating indexes on rag_study_keys...")
+            
+            indexes = [
+                ("idx_rag_keys_unique", """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_keys_unique
+                    ON public.rag_study_keys (nct_id,
+                                              COALESCE(condition_name,''),
+                                              COALESCE(intervention_name,''),
+                                              COALESCE(alias_name,''),
+                                              COALESCE(mesh_condition_name,''),
+                                              COALESCE(mesh_intervention_name,''))
+                """),
+                ("idx_rag_keys_cond_norm_trgm", 
+                 "CREATE INDEX IF NOT EXISTS idx_rag_keys_cond_norm_trgm ON public.rag_study_keys USING gin (condition_norm gin_trgm_ops)"),
+                ("idx_rag_keys_intr_norm_trgm",
+                 "CREATE INDEX IF NOT EXISTS idx_rag_keys_intr_norm_trgm ON public.rag_study_keys USING gin (intervention_norm gin_trgm_ops)"),
+                ("idx_rag_keys_alias_norm_trgm",
+                 "CREATE INDEX IF NOT EXISTS idx_rag_keys_alias_norm_trgm ON public.rag_study_keys USING gin (alias_norm gin_trgm_ops)"),
+                ("idx_rag_keys_mesh_cond_norm_trgm",
+                 "CREATE INDEX IF NOT EXISTS idx_rag_keys_mesh_cond_norm_trgm ON public.rag_study_keys USING gin (mesh_condition_norm gin_trgm_ops)"),
+                ("idx_rag_keys_mesh_intr_norm_trgm",
+                 "CREATE INDEX IF NOT EXISTS idx_rag_keys_mesh_intr_norm_trgm ON public.rag_study_keys USING gin (mesh_intervention_norm gin_trgm_ops)"),
+                ("idx_rag_keys_nct",
+                 "CREATE INDEX IF NOT EXISTS idx_rag_keys_nct ON public.rag_study_keys (nct_id)"),
+            ]
+            
+            for idx_name, idx_sql in indexes:
+                print(f"  Creating {idx_name}...")
+                cur.execute(idx_sql)
+                con.commit()
+            
+            print("✅ All indexes created successfully!")
+            print("\n🎉 RAG keys setup complete!")
+
+
 def ingest_ctgov_full(config: DatabaseConfig, raw_dir: Path, n_max: int | None = None) -> None:
     """Ingest CTTI AACT PostgreSQL dump and move tables to public schema."""
     # Set up paths
@@ -584,8 +690,13 @@ def ingest_ctgov_full(config: DatabaseConfig, raw_dir: Path, n_max: int | None =
         print("✅ [CT.gov] Successfully ingested CTTI AACT data")
         print("🔍 Data available in public schema with ctgov_ prefix (tables and views)")
         print("🔍 Full-text search indexes created for enhanced search capabilities")
-        print("🧠 RAG functionality created for advanced trial search and analysis")
+        print("🧠 RAG functionality schema created (tables, views, functions)")
         print("🧹 Original ctgov schema cleaned up and removed")
+        print()
+        print("⚠️  NEXT STEPS: Populate RAG corpus (this can take hours!)")
+        print("   Run these commands separately:")
+        print("   1. python build_ctgov.py populate-corpus [buckets]  # Default: 16 buckets")
+        print("   2. python build_ctgov.py populate-keys              # After corpus is populated")
 
     except Exception as e:
         print(f"❌ [CT.gov] Error during ingestion: {e}")
@@ -607,6 +718,8 @@ if __name__ == "__main__":
         print("  python build_ctgov.py ingest <raw_dir>     - Full CT.gov ingestion with tsvector indexes and RAG functionality")
         print("  python build_ctgov.py tsvector             - Create tsvector indexes on existing tables")
         print("  python build_ctgov.py rag                  - Create RAG functionality (rag_study_json.sql)")
+        print("  python build_ctgov.py populate-corpus [n]  - Populate RAG corpus (long-running, optional buckets, default 16)")
+        print("  python build_ctgov.py populate-keys        - Populate RAG keys and create indexes (run after populate-corpus)")
         print("  python build_ctgov.py verify               - Verify database state")
         print("  python build_ctgov.py cleanup              - Verify and cleanup empty ctgov schema")
         sys.exit(1)
@@ -631,6 +744,24 @@ if __name__ == "__main__":
         print("🧠 Creating RAG functionality...")
         sql_dir = Path(__file__).parent
         create_rag_functionality_standalone(DEFAULT_CONFIG, sql_dir)
+
+    elif command == "populate-corpus":
+        buckets = 16  # default
+        if len(sys.argv) >= 3:
+            try:
+                buckets = int(sys.argv[2])
+                if buckets < 1:
+                    print("❌ Buckets must be >= 1")
+                    sys.exit(1)
+            except ValueError:
+                print("❌ Buckets must be an integer")
+                sys.exit(1)
+        print(f"🧠 Populating RAG corpus with {buckets} buckets...")
+        populate_rag_corpus(DEFAULT_CONFIG, buckets)
+
+    elif command == "populate-keys":
+        print("🔑 Populating RAG keys...")
+        populate_rag_keys(DEFAULT_CONFIG)
 
     elif command == "verify":
         print("🔍 Verifying database state...")

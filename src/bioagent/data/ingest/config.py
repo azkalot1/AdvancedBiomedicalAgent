@@ -84,6 +84,53 @@ def ensure_public_schema(config: DatabaseConfig) -> bool:
         return False
 
 
+def fix_user_permissions(config: DatabaseConfig) -> bool:
+    """
+    Fix user permissions for the public schema.
+    This function can be used to fix permission issues on existing databases.
+
+    Args:
+        config: Database configuration
+
+    Returns:
+        True if permissions were fixed successfully, False if failed
+    """
+    try:
+        print(f"🔧 Fixing permissions for user '{config.user}' on database '{config.database}'...")
+        
+        with get_connection(config) as con:
+            with con.cursor() as cur:
+                # Grant all privileges on public schema
+                cur.execute(f"GRANT ALL ON SCHEMA public TO {config.user}")
+                print("✅ Granted schema permissions")
+
+                # Grant privileges on all existing tables in public schema
+                cur.execute(f"GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {config.user}")
+                print("✅ Granted table permissions")
+
+                # Grant privileges on all existing sequences in public schema
+                cur.execute(f"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {config.user}")
+                print("✅ Granted sequence permissions")
+
+                # Grant default privileges for future tables and sequences
+                cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {config.user}")
+                cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO {config.user}")
+                print("✅ Set default privileges for future objects")
+
+                # Ensure user can create tables in public schema
+                cur.execute(f"GRANT CREATE ON SCHEMA public TO {config.user}")
+                print("✅ Granted CREATE permission on schema")
+
+                con.commit()
+
+        print("✅ All permissions fixed successfully!")
+        return True
+
+    except Exception as e:
+        print(f"❌ Failed to fix user permissions: {e}")
+        return False
+
+
 def get_all_tables(config: DatabaseConfig) -> list[str]:
     """Get list of all tables in the database (excluding system tables)."""
     with get_connection(config) as con:

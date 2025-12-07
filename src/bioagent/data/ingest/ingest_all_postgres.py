@@ -8,7 +8,9 @@ This script coordinates the ingestion of:
 3. ClinicalTrials.gov trials
 4. DailyMed SPL labels
 5. BindingDB molecular targets and binding affinity data
-6. DrugCentral molecular structures
+6. ChEMBL biochemical annotations
+7. dm_target canonical target mapping (combines ChEMBL + BindingDB)
+8. DrugCentral molecular structures
 
 All data goes into the same PostgreSQL database for integrated querying.
 """
@@ -23,11 +25,12 @@ try:
     # When run as module (through CLI)
     from .build_bindingdb import ingest_bindingdb_full
     from .build_chembl import ingest_chembl_full
-    from .build_ctgov import ingest_ctgov_full
+    from .build_ctgov import ingest_ctgov_full, populate_rag_corpus, populate_rag_keys
     from .build_dailymed import run_dailymed_ingestion_pipeline
     from .build_drugcentral import build_drugcentral
     from .build_openfda import build_fda_normalized
     from .build_orange_book import ingest_orange_book
+    from .create_and_populate_dm_target import main as populate_dm_target
     from .config import (
         DEFAULT_CONFIG,
         DatabaseConfig,
@@ -42,11 +45,12 @@ except ImportError:
     # When run directly
     from build_bindingdb import ingest_bindingdb_full
     from build_chembl import ingest_chembl_full
-    from build_ctgov import ingest_ctgov_full
+    from build_ctgov import ingest_ctgov_full, populate_rag_corpus, populate_rag_keys
     from build_dailymed import run_dailymed_ingestion_pipeline
     from build_drugcentral import build_drugcentral
     from build_openfda import build_fda_normalized
     from build_orange_book import ingest_orange_book
+    from create_and_populate_dm_target import main as populate_dm_target
     from config import (
         DEFAULT_CONFIG,
         DatabaseConfig,
@@ -76,10 +80,13 @@ def run_drugcentral_ingestion(config: DatabaseConfig, raw_dir: Path) -> bool:
         return False
 
 
-def run_openfda_ingestion(config: DatabaseConfig, raw_dir: Path, max_files: int | None = None, n_max: int | None = None) -> bool:
+def run_openfda_ingestion(config: DatabaseConfig, raw_dir: Path, max_files: int | None = None, 
+                          n_max: int | None = None, use_local_files: bool = False) -> bool:
     """Run OpenFDA normalized ingestion."""
     print("\n" + "=" * 60)
     print("🧬 OPENFDA DRUG LABELS INGESTION")
+    if use_local_files:
+        print("   (Using local files - skipping download)")
     if max_files:
         print(f"   (Limited to {max_files:,} files)")
     else:
@@ -92,7 +99,8 @@ def run_openfda_ingestion(config: DatabaseConfig, raw_dir: Path, max_files: int 
 
     try:
         start_time = time.time()
-        build_fda_normalized(config, raw_dir, max_label_files=max_files, n_max=n_max)
+        build_fda_normalized(config, raw_dir, max_label_files=max_files, n_max=n_max, 
+                            use_local_files=use_local_files)
         elapsed = time.time() - start_time
         print(f"✅ OpenFDA ingestion completed in {elapsed:.1f} seconds")
         return True
@@ -118,8 +126,18 @@ def run_orange_book_ingestion(config: DatabaseConfig, raw_dir: Path) -> bool:
         return False
 
 
-def run_ctgov_ingestion(config: DatabaseConfig, raw_dir: Path, n_max: int | None = None) -> bool:
-    """Run ClinicalTrials.gov ingestion."""
+def run_ctgov_ingestion(config: DatabaseConfig, raw_dir: Path, n_max: int | None = None, 
+                        populate_rag: bool = False, rag_buckets: int = 16) -> bool:
+    """
+    Run ClinicalTrials.gov ingestion.
+    
+    Args:
+        config: Database configuration
+        raw_dir: Directory for raw data
+        n_max: Maximum number of trials (not currently used for AACT dump)
+        populate_rag: Whether to populate RAG corpus after ingestion (can take hours!)
+        rag_buckets: Number of buckets for RAG corpus population
+    """
     print("\n" + "=" * 60)
     print("🔬 CLINICALTRIALS.GOV INGESTION")
     if n_max:
@@ -133,9 +151,70 @@ def run_ctgov_ingestion(config: DatabaseConfig, raw_dir: Path, n_max: int | None
         ingest_ctgov_full(config, raw_dir, n_max=n_max)
         elapsed = time.time() - start_time
         print(f"✅ ClinicalTrials.gov ingestion completed in {elapsed:.1f} seconds")
+        
+        if populate_rag:
+            print("\n⚠️  RAG corpus population requested (this can take hours!)")
+            if not run_ctgov_rag_corpus(config, rag_buckets):
+                print("⚠️  RAG corpus population failed, but base ingestion succeeded")
+            elif not run_ctgov_rag_keys(config):
+                print("⚠️  RAG keys population failed, but corpus was populated")
+        else:
+            print("\n💡 Note: RAG corpus not populated. To populate later, run:")
+            print(f"   python build_ctgov.py populate-corpus {rag_buckets}")
+            print("   python build_ctgov.py populate-keys")
+        
         return True
     except Exception as e:
         print(f"❌ ClinicalTrials.gov ingestion failed: {e}")
+        return False
+
+
+def run_ctgov_rag_corpus(config: DatabaseConfig, buckets: int = 16) -> bool:
+    """
+    Run ClinicalTrials.gov RAG corpus population (long-running operation).
+    
+    Args:
+        config: Database configuration
+        buckets: Number of buckets to partition studies into
+    """
+    print("\n" + "=" * 60)
+    print("🧠 CLINICALTRIALS.GOV RAG CORPUS POPULATION")
+    print("   (This can take several hours!)")
+    print(f"   (Processing in {buckets} buckets)")
+    print("=" * 60)
+    
+    try:
+        start_time = time.time()
+        populate_rag_corpus(config, buckets)
+        elapsed = time.time() - start_time
+        print(f"✅ RAG corpus population completed in {elapsed:.1f} seconds")
+        return True
+    except Exception as e:
+        print(f"❌ RAG corpus population failed: {e}")
+        return False
+
+
+def run_ctgov_rag_keys(config: DatabaseConfig) -> bool:
+    """
+    Run ClinicalTrials.gov RAG keys population and indexing.
+    Should be run after RAG corpus is populated.
+    
+    Args:
+        config: Database configuration
+    """
+    print("\n" + "=" * 60)
+    print("🔑 CLINICALTRIALS.GOV RAG KEYS POPULATION")
+    print("   (Creating materialized view and indexes)")
+    print("=" * 60)
+    
+    try:
+        start_time = time.time()
+        populate_rag_keys(config)
+        elapsed = time.time() - start_time
+        print(f"✅ RAG keys population completed in {elapsed:.1f} seconds")
+        return True
+    except Exception as e:
+        print(f"❌ RAG keys population failed: {e}")
         return False
 
 
@@ -217,6 +296,32 @@ def run_chembl_ingestion(config: DatabaseConfig, raw_dir: Path, force_recreate: 
         return True
     except Exception as e:
         print(f"❌ ChEMBL ingestion failed: {e}")
+        return False
+
+
+def run_dm_target_population(config: DatabaseConfig) -> bool:
+    """
+    Run dm_target population to combine ChEMBL and BindingDB annotations.
+    
+    This creates canonical target mappings with:
+    - Phase 1: ChEMBL base (human SINGLE_PROTEIN targets)
+    - Phase 2: BindingDB augmentation (new targets + consensus marking)
+    - Phase 3: Gene synonym consolidation
+    - Phase 4: UniProt accession mapping
+    """
+    print("\n" + "=" * 60)
+    print("🎯 DM_TARGET CANONICAL TARGET MAPPING")
+    print("   (Combining ChEMBL + BindingDB annotations)")
+    print("=" * 60)
+
+    try:
+        start_time = time.time()
+        populate_dm_target()
+        elapsed = time.time() - start_time
+        print(f"✅ dm_target population completed in {elapsed:.1f} seconds")
+        return True
+    except Exception as e:
+        print(f"❌ dm_target population failed: {e}")
         return False
 
 
@@ -437,6 +542,10 @@ Examples:
   %(prog)s --bindingdb-batch-size 5000      # Use smaller batch size for low memory
   %(prog)s --bindingdb-force-recreate       # Force recreate BindingDB tables
   %(prog)s --chembl-force-recreate          # Force recreate ChEMBL tables
+  %(prog)s --ctgov-populate-rag             # Populate CT.gov RAG during ingestion (slow!)
+  %(prog)s --ctgov-rag-corpus-only          # Only populate CT.gov RAG corpus
+  %(prog)s --ctgov-rag-keys-only            # Only populate CT.gov RAG keys
+  %(prog)s --ctgov-rag-buckets 32           # Use 32 buckets for RAG population
   %(prog)s --reset --force --vacuum         # Complete reset: drop all, reimport, optimize
   %(prog)s --dump-db backup.sql             # Create database dump
   %(prog)s --restore-db backup.sql          # Restore database from dump
@@ -450,11 +559,17 @@ Examples:
     parser.add_argument("--skip-bindingdb", action="store_true", help="Skip BindingDB ingestion")
     parser.add_argument("--skip-drugcentral", action="store_true", help="Skip DrugCentral ingestion")
     parser.add_argument("--skip-chembl", action="store_true", help="Skip ChEMBL ingestion")
+    parser.add_argument("--skip-dm-target", action="store_true", help="Skip dm_target population (requires ChEMBL + BindingDB)")
+    parser.add_argument("--ctgov-populate-rag", action="store_true", help="Populate CT.gov RAG corpus after ingestion (WARNING: takes hours!)")
+    parser.add_argument("--ctgov-rag-buckets", type=int, default=16, help="Number of buckets for CT.gov RAG corpus (default: 16)")
+    parser.add_argument("--ctgov-rag-corpus-only", action="store_true", help="Only populate CT.gov RAG corpus (requires prior ingestion)")
+    parser.add_argument("--ctgov-rag-keys-only", action="store_true", help="Only populate CT.gov RAG keys (requires corpus to be populated)")
     parser.add_argument("--bindingdb-all-organisms", action="store_true", help="Include all organisms in BindingDB (default: human only)")
     parser.add_argument("--bindingdb-batch-size", type=int, default=10000, help="Batch size for BindingDB processing (default: 10000)")
     parser.add_argument("--bindingdb-force-recreate", action="store_true", help="Force recreate BindingDB tables (WARNING: deletes existing data)")
     parser.add_argument("--chembl-force-recreate", action="store_true", help="Force recreate ChEMBL tables (WARNING: deletes existing data)")
     parser.add_argument("--openfda-files", type=int, help="Max OpenFDA files to process (default: all)")
+    parser.add_argument("--openfda-use-local-files", action="store_true", help="Use existing local files in raw_dir/openfda (skip download)")
     parser.add_argument("--n-max", type=int, help="Max entries to process")
     parser.add_argument("--vacuum", action="store_true", help="Run VACUUM after ingestion")
     parser.add_argument("--raw-dir", type=Path, help="Raw directory", default=Path("./raw"))
@@ -541,6 +656,29 @@ Examples:
             sys.exit(1)
         return
 
+    # Handle --ctgov-rag-corpus-only command (standalone)
+    if args.ctgov_rag_corpus_only:
+        print("🧠 ClinicalTrials.gov RAG Corpus Population (Standalone)")
+        print("=" * 50)
+        if run_ctgov_rag_corpus(config, args.ctgov_rag_buckets):
+            print("\n🎉 RAG corpus population completed!")
+            print("💡 Next step: Run with --ctgov-rag-keys-only to populate keys")
+        else:
+            print("\n❌ RAG corpus population failed!")
+            sys.exit(1)
+        return
+
+    # Handle --ctgov-rag-keys-only command (standalone)
+    if args.ctgov_rag_keys_only:
+        print("🔑 ClinicalTrials.gov RAG Keys Population (Standalone)")
+        print("=" * 50)
+        if run_ctgov_rag_keys(config):
+            print("\n🎉 RAG keys population completed!")
+        else:
+            print("\n❌ RAG keys population failed!")
+            sys.exit(1)
+        return
+
     # Show initial database info
     print("\n📊 Initial Database State:")
     show_database_info(config)
@@ -563,7 +701,10 @@ Examples:
     # 1. OpenFDA (normalized structure) - foundation for other data
     if not args.skip_openfda:
         max_files = args.openfda_files  # None means process all files
-        results["openfda"] = run_openfda_ingestion(config, raw_dir, max_files, args.n_max)
+        results["openfda"] = run_openfda_ingestion(
+            config, raw_dir, max_files, args.n_max, 
+            use_local_files=args.openfda_use_local_files
+        )
     else:
         print("\n⏭️  Skipping OpenFDA ingestion")
         results["openfda"] = True
@@ -577,7 +718,13 @@ Examples:
 
     # 3. ClinicalTrials.gov (clinical trials data)
     if not args.skip_ctgov:
-        results["ctgov"] = run_ctgov_ingestion(config, raw_dir, args.n_max)
+        results["ctgov"] = run_ctgov_ingestion(
+            config, 
+            raw_dir, 
+            args.n_max,
+            populate_rag=args.ctgov_populate_rag,
+            rag_buckets=args.ctgov_rag_buckets
+        )
     else:
         print("\n⏭️  Skipping ClinicalTrials.gov ingestion")
         results["ctgov"] = True
@@ -614,7 +761,19 @@ Examples:
         print("\n⏭️  Skipping ChEMBL ingestion")
         results["chembl"] = True
 
-    # 7. DrugCentral (molecular structures and chemical data)
+    # 7. dm_target (canonical target mapping combining ChEMBL + BindingDB)
+    if not args.skip_dm_target:
+        # Only run if both ChEMBL and BindingDB were successful
+        if results.get("chembl", False) and results.get("bindingdb", False):
+            results["dm_target"] = run_dm_target_population(config)
+        else:
+            print("\n⏭️  Skipping dm_target (requires successful ChEMBL + BindingDB)")
+            results["dm_target"] = False
+    else:
+        print("\n⏭️  Skipping dm_target population")
+        results["dm_target"] = True
+
+    # 8. DrugCentral (molecular structures and chemical data)
     if not args.skip_drugcentral:
         results["drugcentral"] = run_drugcentral_ingestion(config, raw_dir)
     else:
@@ -662,6 +821,9 @@ Examples:
         print("   - molecule_synonyms: ChEMBL alternative molecule names")
         print("   - target_dictionary: ChEMBL protein targets")
         print("   - activities: ChEMBL bioactivity measurements")
+        print("   - dm_target: Canonical target mappings (ChEMBL + BindingDB consensus)")
+        print("   - dm_target_gene_synonyms: Gene symbol synonyms for targets")
+        print("   - dm_target_uniprot_mappings: UniProt accession mappings")
         print("\nExample cross-source queries you can now run:")
         print("1. Find OpenFDA drugs with Orange Book therapeutic equivalents")
         print("2. Link clinical trials to FDA-approved drugs")
@@ -673,6 +835,8 @@ Examples:
         print("8. Use drug_mapping_summary for aggregated drug relationships")
         print("9. Find drugs targeting specific proteins using BindingDB data")
         print("10. Analyze binding affinity patterns across drug classes")
+        print("11. Query dm_target for unified ChEMBL+BindingDB target annotations")
+        print("12. Use dm_target_gene_synonyms to find targets by alternative names")
     else:
         print("\n⚠️  Some ingestions failed. Check the logs above.")
         sys.exit(1)

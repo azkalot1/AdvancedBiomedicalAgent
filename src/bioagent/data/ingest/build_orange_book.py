@@ -29,6 +29,7 @@ def _download(url: str, dest: Path) -> Path:
     """Download file with progress bar."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
+        print(f"🔄 Reusing existing {dest.name}")
         return dest
 
     with requests.get(url, stream=True, timeout=300) as r:

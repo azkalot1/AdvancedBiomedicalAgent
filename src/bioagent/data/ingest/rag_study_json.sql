@@ -1,4 +1,15 @@
 \echo === Building RAG study JSON objects ===
+\echo
+\echo NOTE: This script creates the RAG schema (tables, views, functions) but does NOT
+\echo populate the data. Data population is a long-running operation that should be
+\echo run separately using:
+\echo
+\echo   python build_ctgov.py populate-corpus [buckets]
+\echo   python build_ctgov.py populate-keys
+\echo
+\echo The commented-out sections at the end of this file show the operations that
+\echo were moved to separate commands for better progress monitoring.
+\echo
 
 \set ON_ERROR_STOP on
 SET client_min_messages = warning;
@@ -690,7 +701,13 @@ BEGIN
 END
 $$;
 
-CALL public.upsert_rag_study_corpus_all(16);
+-- NOTE: The following operation can take HOURS on a full database!
+-- It processes every clinical trial and builds JSON documents.
+-- Commented out to prevent hanging during initial ingestion.
+-- Run manually after setup:
+--   CALL public.upsert_rag_study_corpus_all(16);
+-- 
+-- CALL public.upsert_rag_study_corpus_all(16);
 DROP MATERIALIZED VIEW IF EXISTS public.rag_study_keys;
 
 CREATE MATERIALIZED VIEW public.rag_study_keys AS
@@ -811,24 +828,30 @@ WHERE (condition_raw IS NOT NULL AND NULLIF(trim(condition_raw),'') IS NOT NULL)
 WITH NO DATA;
 
 -- First blocking populate (sets "populated" flag)
-REFRESH MATERIALIZED VIEW public.rag_study_keys;
+-- NOTE: This also takes a long time and requires rag_study_corpus to be populated first!
+-- Run manually after populating rag_study_corpus:
+--   REFRESH MATERIALIZED VIEW public.rag_study_keys;
+-- 
+-- REFRESH MATERIALIZED VIEW public.rag_study_keys;
 
 -- Unique + search indexes (idempotent)
-CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_keys_unique
-  ON public.rag_study_keys (nct_id,
-                            COALESCE(condition_name,''),
-                            COALESCE(intervention_name,''),
-                            COALESCE(alias_name,''),
-                            COALESCE(mesh_condition_name,''),
-                            COALESCE(mesh_intervention_name,''));
-
--- Trigram indexes for fuzzy text search
-CREATE INDEX IF NOT EXISTS idx_rag_keys_cond_norm_trgm       ON public.rag_study_keys USING gin (condition_norm       gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_rag_keys_intr_norm_trgm       ON public.rag_study_keys USING gin (intervention_norm    gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_rag_keys_alias_norm_trgm      ON public.rag_study_keys USING gin (alias_norm           gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_rag_keys_mesh_cond_norm_trgm  ON public.rag_study_keys USING gin (mesh_condition_norm  gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_rag_keys_mesh_intr_norm_trgm  ON public.rag_study_keys USING gin (mesh_intervention_norm gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_rag_keys_nct                  ON public.rag_study_keys (nct_id);
+-- NOTE: These indexes can only be created after REFRESH MATERIALIZED VIEW is run
+-- They are commented out for now and should be run manually after data population:
+-- CREATE UNIQUE INDEX IF NOT EXISTS idx_rag_keys_unique
+--   ON public.rag_study_keys (nct_id,
+--                             COALESCE(condition_name,''),
+--                             COALESCE(intervention_name,''),
+--                             COALESCE(alias_name,''),
+--                             COALESCE(mesh_condition_name,''),
+--                             COALESCE(mesh_intervention_name,''));
+-- 
+-- -- Trigram indexes for fuzzy text search
+-- CREATE INDEX IF NOT EXISTS idx_rag_keys_cond_norm_trgm       ON public.rag_study_keys USING gin (condition_norm       gin_trgm_ops);
+-- CREATE INDEX IF NOT EXISTS idx_rag_keys_intr_norm_trgm       ON public.rag_study_keys USING gin (intervention_norm    gin_trgm_ops);
+-- CREATE INDEX IF NOT EXISTS idx_rag_keys_alias_norm_trgm      ON public.rag_study_keys USING gin (alias_norm           gin_trgm_ops);
+-- CREATE INDEX IF NOT EXISTS idx_rag_keys_mesh_cond_norm_trgm  ON public.rag_study_keys USING gin (mesh_condition_norm  gin_trgm_ops);
+-- CREATE INDEX IF NOT EXISTS idx_rag_keys_mesh_intr_norm_trgm  ON public.rag_study_keys USING gin (mesh_intervention_norm gin_trgm_ops);
+-- CREATE INDEX IF NOT EXISTS idx_rag_keys_nct                  ON public.rag_study_keys (nct_id);
 DROP FUNCTION IF EXISTS public.search_trials(text, text, integer);
 CREATE OR REPLACE FUNCTION public.search_trials(
   p_kind  text,         -- 'nct' | 'condition' | 'intervention' | 'alias' | 'auto'

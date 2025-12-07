@@ -52,9 +52,106 @@ def check_postgresql_installed() -> bool:
     return True
 
 
+def get_postgresql_version() -> str | None:
+    """Get the PostgreSQL server version number."""
+    try:
+        result = subprocess.run(
+            "psql --version", 
+            shell=True, 
+            capture_output=True, 
+            text=True
+        )
+        if result.returncode == 0:
+            # Parse version from output like "psql (PostgreSQL) 16.4"
+            import re
+            match = re.search(r'(\d+)\.', result.stdout)
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def install_pgvector_extension() -> bool:
+    """Install pgvector extension at the system level."""
+    print("\n🔧 Installing pgvector extension...")
+    
+    pg_version = get_postgresql_version()
+    if not pg_version:
+        print("⚠️  Could not detect PostgreSQL version, assuming version 16")
+        pg_version = "16"
+    
+    print(f"📦 Detected PostgreSQL version: {pg_version}")
+    
+    # Try to install pgvector package
+    install_commands = [
+        # Ubuntu/Debian with specific version
+        f"sudo apt-get update && sudo apt-get install -y postgresql-{pg_version}-pgvector",
+        # Fallback: try without version
+        "sudo apt-get install -y postgresql-pgvector",
+        # Alternative package name
+        f"sudo apt-get install -y postgresql-{pg_version}-vector",
+    ]
+    
+    for cmd in install_commands:
+        print(f"   Trying: {cmd.split('&&')[-1].strip()}")
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            print("✅ pgvector installed successfully!")
+            return True
+        elif "Unable to locate package" not in result.stderr:
+            # Some other error, might still have worked
+            if "is already the newest version" in result.stdout or "is already installed" in result.stdout:
+                print("✅ pgvector is already installed!")
+                return True
+    
+    # If apt failed, provide manual instructions
+    print("\n❌ Automatic installation failed. Please install pgvector manually:")
+    print(f"\n   For PostgreSQL {pg_version} on Ubuntu/Debian:")
+    print(f"   sudo apt-get install postgresql-{pg_version}-pgvector")
+    print("\n   For macOS with Homebrew:")
+    print("   brew install pgvector")
+    print("\n   For other systems, see: https://github.com/pgvector/pgvector#installation")
+    print("\n   After installation, restart PostgreSQL:")
+    print("   sudo systemctl restart postgresql")
+    
+    return False
+
+
+def create_vector_extension_in_database(database: str = "database") -> bool:
+    """Create the vector extension in a specific database using superuser privileges."""
+    print(f"\n🔧 Creating vector extension in database '{database}'...")
+    
+    # Run as postgres superuser
+    cmd = f"sudo -u postgres psql -d {database} -c 'CREATE EXTENSION IF NOT EXISTS vector;'"
+    
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    
+    if result.returncode == 0:
+        print(f"✅ Vector extension created in database '{database}'")
+        return True
+    else:
+        print(f"❌ Failed to create vector extension: {result.stderr}")
+        
+        # Check if it's because extension is not installed at system level
+        if "could not open extension control file" in result.stderr.lower():
+            print("\n💡 The pgvector package is not installed at the system level.")
+            print("   Run: biomedagent-db install-pgvector")
+        
+        return False
+
+
 def setup_database():
     """Set up the database and user."""
     print("\n🏗️  Setting up database...")
+
+    # First, ensure pgvector is installed at system level
+    if not install_pgvector_extension():
+        print("\n⚠️  pgvector installation failed or needs manual intervention.")
+        print("   You can continue, but vector-based features (semantic search) won't work.")
+        response = input("   Continue anyway? (yes/no): ").lower().strip()
+        if response not in ['yes', 'y']:
+            return False
 
     db_name = "database"
     user_name = "database_user"
@@ -510,6 +607,8 @@ def cli_main():
         print("  biomedagent-db create-schema            - Create public schema if missing")
         print("  biomedagent-db fix-permissions          - Fix user permissions on public schema")
         print("  biomedagent-db verify-deps              - Verify Python dependencies are installed")
+        print("  biomedagent-db install-pgvector         - Install pgvector extension (requires sudo)")
+        print("  biomedagent-db create-vector-ext        - Create vector extension in database (requires sudo)")
         sys.exit(1)
 
     command = sys.argv[1].lower()
@@ -534,10 +633,14 @@ def cli_main():
         fix_user_permissions(DEFAULT_CONFIG)
     elif command == "verify-deps":
         verify_python_dependencies()
+    elif command == "install-pgvector":
+        install_pgvector_extension()
+    elif command == "create-vector-ext":
+        create_vector_extension_in_database()
     else:
         print(f"❌ Unknown command: {command}")
         print("\nAvailable commands:")
-        print("  setup_postgres, info, reset, vacuum, tables, create-schema, fix-permissions, verify-deps")
+        print("  setup_postgres, info, reset, vacuum, tables, create-schema, fix-permissions, verify-deps, install-pgvector, create-vector-ext")
         sys.exit(1)
 
 

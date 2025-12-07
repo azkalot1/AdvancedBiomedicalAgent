@@ -96,11 +96,34 @@ def _download(url: str, dest: Path) -> None:
 # ----------------------------- schema -----------------------------------------
 
 
+def _ensure_vector_extension(con: psycopg2.extensions.connection) -> bool:
+    """Ensure pgvector extension is available."""
+    with con.cursor() as cur:
+        # Check if extension already exists
+        cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
+        if cur.fetchone():
+            print("✅ pgvector extension is available")
+            return True
+        
+        # Try to create it (requires superuser)
+        try:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            con.commit()
+            print("✅ pgvector extension created")
+            return True
+        except Exception as e:
+            if "permission denied" in str(e).lower():
+                print("❌ pgvector extension is not installed in this database.")
+                print("   Run as superuser: sudo -u postgres psql -d <database> -c 'CREATE EXTENSION vector;'")
+                print("   Or run: biomedagent-db setup_postgres")
+            raise
+
+
 def _init_schema(con: psycopg2.extensions.connection) -> None:
     """Initializes the complete schema required for the ingestion and semantic search."""
     with con.cursor() as cur:
         print("Initializing database schema...")
-        cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        _ensure_vector_extension(con)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS dailymed_products (

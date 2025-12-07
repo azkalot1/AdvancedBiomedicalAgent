@@ -796,11 +796,38 @@ def _insert_mapping_values(
 
 
 def ingest_drug_label_normalized(
-    config: DatabaseConfig, index: dict, raw_dir: Path, max_files: int | None, n_max: int | None
+    config: DatabaseConfig, index: dict | None, raw_dir: Path, max_files: int | None, n_max: int | None,
+    use_local_files: bool = False
 ) -> int:
-    """Ingest openFDA drug labels into normalized PostgreSQL schema."""
-    urls = _select_files(index, "drug/label", max_files)
-    _log_selection(index, "drug/label", urls)
+    """Ingest openFDA drug labels into normalized PostgreSQL schema.
+    
+    Args:
+        config: Database configuration
+        index: OpenFDA index (can be None if use_local_files=True)
+        raw_dir: Directory for raw data files
+        max_files: Maximum number of files to process
+        n_max: Maximum number of records to process
+        use_local_files: If True, skip download and use existing files in raw_dir/openfda
+    """
+    openfda_dir = raw_dir / "openfda"
+    
+    if use_local_files:
+        # Use existing local files instead of downloading
+        local_files = sorted(openfda_dir.glob("*.zip"))
+        if not local_files:
+            print(f"❌ No .zip files found in {openfda_dir}")
+            return 0
+        if max_files is not None and max_files >= 0:
+            local_files = local_files[:max_files]
+        print(f"[openFDA_postgres] Using {len(local_files)} local files from {openfda_dir}")
+        for f in local_files:
+            print(f"  - {f.name}")
+        file_paths = local_files
+    else:
+        # Download from index
+        urls = _select_files(index, "drug/label", max_files)
+        _log_selection(index, "drug/label", urls)
+        file_paths = None  # Will download on demand
 
     total_sections = 0
     total_records = 0
@@ -812,10 +839,21 @@ def ingest_drug_label_normalized(
 
             # First pass: collect all records for accurate progress tracking
             print("🔍 Scanning files to count total records...")
-            with tqdm(urls, desc="Scanning files", unit="file") as scan_pbar:
-                for url in scan_pbar:
-                    scan_pbar.set_postfix_str(f"Scanning {Path(url).name}")
-                    path = _download(url, raw_dir / "openfda")
+            
+            # Get list of paths to scan
+            if use_local_files:
+                paths_to_scan = file_paths
+            else:
+                paths_to_scan = urls
+            
+            with tqdm(paths_to_scan, desc="Scanning files", unit="file") as scan_pbar:
+                for item in scan_pbar:
+                    if use_local_files:
+                        path = item  # Already a Path object
+                        scan_pbar.set_postfix_str(f"Scanning {path.name}")
+                    else:
+                        scan_pbar.set_postfix_str(f"Scanning {Path(item).name}")
+                        path = _download(item, openfda_dir)
 
                     with zipfile.ZipFile(path, "r") as zf:
                         json_files = [info for info in zf.infolist() if info.filename.endswith(".json")]
@@ -826,7 +864,7 @@ def ingest_drug_label_normalized(
                                     of = rec.get("openfda") or {}
                                     set_id = rec.get("set_id") or (_dedup_list(of.get("spl_set_id"))[:1] or [None])[0]
                                     if set_id:
-                                        all_records.append((url, info.filename, rec))
+                                        all_records.append((str(path), info.filename, rec))
 
             print(f"📊 Found {len(all_records):,} total records to process")
 
@@ -918,10 +956,18 @@ def ingest_drug_label_normalized(
 
 
 def build_fda_normalized(
-    config: DatabaseConfig, raw_dir: Path, max_label_files: int | None = None, n_max: int | None = None
+    config: DatabaseConfig, raw_dir: Path, max_label_files: int | None = None, n_max: int | None = None,
+    use_local_files: bool = False
 ) -> None:
     """
     Ingest openFDA labels into normalized PostgreSQL schema. Pass max_label_files=None for all partitions.
+    
+    Args:
+        config: Database configuration
+        raw_dir: Directory for raw data files
+        max_label_files: Maximum number of label files to process (None for all)
+        n_max: Maximum number of records to process
+        use_local_files: If True, skip downloading and use existing .zip files in raw_dir/openfda
     """
     try:
         con = get_connection(config)
@@ -939,9 +985,19 @@ def build_fda_normalized(
         print(f"Make sure PostgreSQL is running and database '{config.database}' exists")
         return
 
-    index = _fetch_index()
+    index = None
+    if not use_local_files:
+        print("\n🔍 Fetching openFDA index...")
+        index = _fetch_index()
+        print(f"✅ Fetched {len(index)} openFDA drug labels")
+    else:
+        print("\n📂 Using local files (skipping openFDA index fetch)")
 
-    label_rows = ingest_drug_label_normalized(config, index, raw_dir=raw_dir, max_files=max_label_files, n_max=n_max)
+    print("\n🔍 Ingesting openFDA drug labels...")
+    label_rows = ingest_drug_label_normalized(
+        config, index, raw_dir=raw_dir, max_files=max_label_files, n_max=n_max,
+        use_local_files=use_local_files
+    )
 
     print("\n🎉 [openFDA_postgres] Normalized ingestion complete!")
     print(f"📊 Total sections processed: {label_rows:,}")
