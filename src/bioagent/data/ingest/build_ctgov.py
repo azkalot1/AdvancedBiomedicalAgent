@@ -465,11 +465,6 @@ def create_rag_functionality_standalone(config: DatabaseConfig, sql_dir: Path) -
     """
     print("🧠 Starting standalone RAG functionality setup...")
     create_rag_functionality(config, sql_dir)
-    
-    # Refresh rag_study_json materialized view (it's created empty)
-    print("\n📄 Refreshing rag_study_json materialized view...")
-    refresh_rag_study_json(config)
-    
     print("✅ Standalone RAG functionality setup completed!")
 
 
@@ -521,27 +516,6 @@ def populate_rag_corpus(config: DatabaseConfig, buckets: int = 16) -> None:
             cur.execute("SELECT COUNT(*) FROM public.rag_study_corpus")
             populated_count = cur.fetchone()[0]
             print(f"\n🎉 RAG corpus populated with {populated_count:,} studies!")
-
-
-def refresh_rag_study_json(config: DatabaseConfig) -> None:
-    """
-    Refresh the rag_study_json materialized view.
-    This materialized view contains JSON documents for all studies.
-    """
-    print("📄 Refreshing rag_study_json materialized view...")
-    print("⚠️  This operation can take 30+ minutes on a full database!")
-    
-    with get_connection(config) as con:
-        with con.cursor() as cur:
-            # Refresh the materialized view
-            print("🔄 Refreshing rag_study_json...")
-            cur.execute("REFRESH MATERIALIZED VIEW public.rag_study_json")
-            con.commit()
-            
-            # Check results
-            cur.execute("SELECT COUNT(*) FROM public.rag_study_json")
-            json_count = cur.fetchone()[0]
-            print(f"✅ Materialized view populated with {json_count:,} study JSON documents")
 
 
 def populate_rag_keys(config: DatabaseConfig) -> None:
@@ -647,10 +621,6 @@ def ingest_ctgov_full(config: DatabaseConfig, raw_dir: Path, n_max: int | None =
         print("\n🧠 Setting up RAG functionality...")
         sql_dir = Path(__file__).parent  # Directory containing this script and rag_study_json.sql
         create_rag_functionality(config, sql_dir)
-        
-        # Step 6.1: Refresh rag_study_json materialized view (it's created empty)
-        print("\n📄 Refreshing rag_study_json materialized view...")
-        refresh_rag_study_json(config)
 
         print("\n🔍 After move and indexing:")
         with get_connection(config) as con:
@@ -721,7 +691,6 @@ def ingest_ctgov_full(config: DatabaseConfig, raw_dir: Path, n_max: int | None =
         print("🔍 Data available in public schema with ctgov_ prefix (tables and views)")
         print("🔍 Full-text search indexes created for enhanced search capabilities")
         print("🧠 RAG functionality schema created (tables, views, functions)")
-        print("📄 rag_study_json materialized view created and populated")
         print("🧹 Original ctgov schema cleaned up and removed")
         print()
         print("⚠️  NEXT STEPS: Populate RAG corpus (this can take hours!)")
@@ -749,7 +718,6 @@ if __name__ == "__main__":
         print("  python build_ctgov.py ingest <raw_dir>     - Full CT.gov ingestion with tsvector indexes and RAG functionality")
         print("  python build_ctgov.py tsvector             - Create tsvector indexes on existing tables")
         print("  python build_ctgov.py rag                  - Create RAG functionality (rag_study_json.sql)")
-        print("  python build_ctgov.py refresh-json          - Refresh rag_study_json materialized view")
         print("  python build_ctgov.py populate-corpus [n]  - Populate RAG corpus (long-running, optional buckets, default 16)")
         print("  python build_ctgov.py populate-keys        - Populate RAG keys and create indexes (run after populate-corpus)")
         print("  python build_ctgov.py verify               - Verify database state")
@@ -776,10 +744,6 @@ if __name__ == "__main__":
         print("🧠 Creating RAG functionality...")
         sql_dir = Path(__file__).parent
         create_rag_functionality_standalone(DEFAULT_CONFIG, sql_dir)
-
-    elif command == "refresh-json":
-        print("📄 Refreshing rag_study_json materialized view...")
-        refresh_rag_study_json(DEFAULT_CONFIG)
 
     elif command == "populate-corpus":
         buckets = 16  # default
