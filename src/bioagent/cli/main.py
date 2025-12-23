@@ -18,6 +18,8 @@ def show_help() -> None:
     print("  setup_postgres           - Run full PostgreSQL setup")
     print("  install-pgvector         - Install pgvector extension (requires sudo)")
     print("  create-vector-ext        - Create vector extension in database (requires sudo)")
+    print("  install-rdkit            - Install RDKit extension (requires sudo)")
+    print("  create-rdkit-ext         - Create RDKit extension in database (requires sudo)")
     print("  info                     - Show database information")
     print("  reset                    - Reset database (with confirmation)")
     print("  reset --force            - Reset database (no confirmation)")
@@ -41,6 +43,7 @@ def show_help() -> None:
     print("  ingest --vacuum          - Run VACUUM after ingestion")
     print("  ingest --dump-db file.sql - Create database backup")
     print("  ingest --restore-db file.sql - Restore database from backup")
+    print("  extract-schema           - Extract database schema and sample data to a text file")
     print()
     print("  Data Source Selection:")
     print("  ingest --skip-openfda    - Skip OpenFDA ingestion")
@@ -50,6 +53,7 @@ def show_help() -> None:
     print("  ingest --skip-bindingdb  - Skip BindingDB ingestion")
     print("  ingest --skip-chembl     - Skip ChEMBL ingestion")
     print("  ingest --skip-dm-target  - Skip dm_target population (requires ChEMBL + BindingDB)")
+    print("  ingest --skip-dm-molecule - Skip dm_molecule/molecular mappings (requires all sources)")
     print("  ingest --skip-drugcentral - Skip DrugCentral ingestion")
     print()
     print("  General Options:")
@@ -103,6 +107,7 @@ def show_help() -> None:
     print("  biomedagent-db ingest --dump-db backup.sql")
     print("  biomedagent-db ingest --restore-db backup.sql")
     print("  biomedagent-db generate-search")
+    print("  biomedagent-db extract-schema --output schema.txt --sample-rows 5")
 
 
 def route_setup_postgres() -> NoReturn:
@@ -160,6 +165,28 @@ def route_generate_search() -> NoReturn:
     sys.exit(0)
 
 
+def route_extract_schema() -> NoReturn:
+    """Route to schema and examples extraction utility."""
+    try:
+        from bioagent.data.ingest.extract_schema_and_examples import main as extract_main
+        # Preserve original argv while forwarding only subcommand args
+        original_argv = sys.argv.copy()
+        # Replace the script name so argparse help looks correct
+        sys.argv = ["extract_schema_and_examples.py"] + sys.argv[2:]
+        exit_code = extract_main()
+        sys.exit(exit_code)
+    except ImportError as e:
+        print(f"❌ Error importing extract_schema_and_examples: {e}")
+        print("Make sure all dependencies are installed with: pip install -e .")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error running schema extraction: {e}")
+        sys.exit(1)
+    finally:
+        if "original_argv" in locals():
+            sys.argv = original_argv
+
+
 
 
 
@@ -181,6 +208,8 @@ def route_db_command(command: str, args: list[str]) -> NoReturn:
             verify_python_dependencies,
             install_pgvector_extension,
             create_vector_extension_in_database,
+            install_rdkit_extension,
+            create_rdkit_extension_in_database,
         )
         
         if command == "info":
@@ -207,6 +236,12 @@ def route_db_command(command: str, args: list[str]) -> NoReturn:
             sys.exit(0 if success else 1)
         elif command == "create-vector-ext":
             success = create_vector_extension_in_database()
+            sys.exit(0 if success else 1)
+        elif command == "install-rdkit":
+            success = install_rdkit_extension()
+            sys.exit(0 if success else 1)
+        elif command == "create-rdkit-ext":
+            success = create_rdkit_extension_in_database()
             sys.exit(0 if success else 1)
         else:
             print(f"❌ Unknown database command: {command}")
@@ -237,9 +272,11 @@ def main() -> NoReturn:
         route_setup_postgres()
     elif command == "ingest":
         route_ingest_command()
+    elif command == "extract-schema":
+        route_extract_schema()
     elif command == "generate-search":
         route_generate_search()
-    elif command in ["info", "reset", "vacuum", "tables", "create-schema", "fix-permissions", "verify-deps", "install-pgvector", "create-vector-ext"]:
+    elif command in ["info", "reset", "vacuum", "tables", "create-schema", "fix-permissions", "verify-deps", "install-pgvector", "create-vector-ext", "install-rdkit", "create-rdkit-ext"]:
         route_db_command(command, args)
     elif command in ["help", "--help", "-h"]:
         show_help()

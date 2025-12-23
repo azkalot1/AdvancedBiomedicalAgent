@@ -165,8 +165,7 @@ biomedagent-db ingest --bindingdb-batch-size 5000  # Lower memory usage
 biomedagent-db ingest --bindingdb-force-recreate   # Drop and recreate
 ```
 
----
-
+--- 
 ### 6. ChEMBL Biochemical Annotations
 
 **Script:** `build_chembl.py`  

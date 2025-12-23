@@ -21,7 +21,8 @@ except ImportError:
 
 def extract_schema_and_examples(
     config: DatabaseConfig, output_file: Path, sample_rows: int = 2, table_names_suffix: str = "",
-    max_value_length: int = 150, include_summary_stats: bool = True
+    max_value_length: int = 150, include_summary_stats: bool = True,
+    table_names: list[str] | None = None
 ) -> None:
     """
     Extract table definitions and sample rows to a text file.
@@ -33,9 +34,12 @@ def extract_schema_and_examples(
         table_names_suffix: suffix to subset of tables to extract (default: '')
         max_value_length: Maximum length for displayed values (default: 150 chars)
         include_summary_stats: Include data summary statistics (default: True)
+        table_names: List of specific table names to extract (default: None = all tables)
     """
     print(f"🔍 Extracting table definitions and {sample_rows} sample rows per table...")
     print(f"📁 Output file: {output_file}")
+    if table_names:
+        print(f"📋 Filtering to tables: {', '.join(table_names)}")
 
     def format_value(value, max_length: int = max_value_length) -> str:
         """Format a value for display with optional truncation."""
@@ -77,90 +81,188 @@ def extract_schema_and_examples(
         
         return stats
 
+    def _rollback_to_savepoint_or_full(cur, con, savepoint_name: str, savepoint_created: bool) -> None:
+        """Helper to rollback to savepoint, or do full rollback if that fails."""
+        if savepoint_created:
+            try:
+                cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+                return
+            except Exception:
+                pass
+        # If savepoint rollback fails or savepoint wasn't created, do full rollback
+        try:
+            con.rollback()
+        except Exception:
+            pass
+
     try:
         with get_connection(config) as con:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Get all tables in the database
+                # Get all tables in the public schema
                 cur.execute(
                     """
                     SELECT
                         schemaname,
-                        tablename
+                        tablename,
+                        'TABLE' as object_type
                     FROM pg_tables
-                    WHERE schemaname NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+                    WHERE schemaname = 'public'
                     ORDER BY schemaname, tablename
                 """
                 )
                 tables = cur.fetchall()
 
-                # Get all views in the database
+                # Get all views in the public schema
                 cur.execute(
                     """
                     SELECT
                         schemaname,
-                        viewname as tablename
+                        viewname as tablename,
+                        'VIEW' as object_type
                     FROM pg_views
-                    WHERE schemaname NOT IN ('information_schema', 'pg_catalog')
+                    WHERE schemaname = 'public'
                     ORDER BY schemaname, viewname
                 """
                 )
                 views = cur.fetchall()
 
-                # Combine tables and views
-                all_objects = list(tables) + list(views)
+                # Get all materialized views in the public schema
+                cur.execute(
+                    """
+                    SELECT
+                        schemaname,
+                        matviewname AS tablename,
+                        'MATERIALIZED VIEW' AS object_type
+                    FROM pg_matviews
+                    WHERE schemaname = 'public'
+                    ORDER BY schemaname, matviewname
+                """
+                )
+                matviews = cur.fetchall()
 
-                print(f"📊 Found {len(tables)} tables and {len(views)} views")
+                # Combine tables, views and materialized views
+                all_objects = list(tables) + list(views) + list(matviews)
+
+                print(f"📊 Found {len(tables)} tables, {len(views)} views and {len(matviews)} materialized views")
 
                 # Process each table/view
                 output_lines = []
+                
+                # Filter tables if specific names provided
+                if table_names:
+                    # Normalize table names (handle schema.table or just table)
+                    normalized_names = set()
+                    for name in table_names:
+                        name = name.strip()
+                        if '.' in name:
+                            normalized_names.add(name.lower())
+                        else:
+                            normalized_names.add(name.lower())
+                    
+                    filtered_objects = []
+                    for obj in all_objects:
+                        schema_name = obj['schemaname']
+                        tbl_name = obj['tablename']
+                        full_name = f"{schema_name}.{tbl_name}"
+                        # Match either full name or just table name
+                        if full_name.lower() in normalized_names or tbl_name.lower() in normalized_names:
+                            filtered_objects.append(obj)
+                    all_objects = filtered_objects
+                    print(f"📋 Filtered to {len(all_objects)} tables/views")
+                
                 for i, obj in enumerate(all_objects, 1):
                     schema_name = obj['schemaname']
                     table_name = obj['tablename']
+                    object_type = obj.get('object_type', 'TABLE')
                     if table_names_suffix and table_names_suffix not in table_name:
                         continue
                     full_name = f"{schema_name}.{table_name}"
 
                     print(f"   [{i}/{len(all_objects)}] Processing {full_name}...")
 
+                    # Use a savepoint for each object so one failure doesn't abort the whole transaction
+                    savepoint_name = f"sp_{i}"
+                    savepoint_created = False
+                    try:
+                        cur.execute(f"SAVEPOINT {savepoint_name}")
+                        savepoint_created = True
+                    except Exception as e:
+                        # If savepoint fails, try to rollback and continue
+                        try:
+                            con.rollback()
+                            cur.execute(f"SAVEPOINT {savepoint_name}")
+                            savepoint_created = True
+                        except Exception as e2:
+                            print(f"⚠️ Could not create savepoint for {full_name}: {e2}, continuing...")
+                            continue
+
                     # Add table header
                     output_lines.append(f"\n{'='*60}")
-                    output_lines.append(f"TABLE: {full_name}")
+                    output_lines.append(f"{object_type}: {full_name}")
                     output_lines.append(f"{'='*60}")
 
-                    # Get column information
-                    cur.execute(
-                        """
-                        SELECT
-                            column_name,
-                            data_type,
-                            is_nullable
-                        FROM information_schema.columns
-                        WHERE table_schema = %s AND table_name = %s
-                        ORDER BY ordinal_position
-                    """,
-                        (schema_name, table_name),
-                    )
+                    # Process this object - wrap in try-except to handle transaction errors
+                    try:
+                        # Get column information
+                        cur.execute(
+                            """
+                            SELECT
+                                column_name,
+                                data_type,
+                                is_nullable
+                            FROM information_schema.columns
+                            WHERE table_schema = %s AND table_name = %s
+                            ORDER BY ordinal_position
+                        """,
+                            (schema_name, table_name),
+                        )
 
-                    columns = cur.fetchall()
+                        columns = cur.fetchall()
 
-                    # Add column definitions
-                    output_lines.append("\nCOLUMNS:")
-                    for col in columns:
-                        nullable = "NULL" if col['is_nullable'] == 'YES' else "NOT NULL"
-                        output_lines.append(f"  {col['column_name']}: {col['data_type']} {nullable}")
+                        # Add column definitions
+                        output_lines.append("\nCOLUMNS:")
+                        for col in columns:
+                            nullable = "NULL" if col['is_nullable'] == 'YES' else "NOT NULL"
+                            output_lines.append(f"  {col['column_name']}: {col['data_type']} {nullable}")
+                    except Exception as e:
+                        # If we can't read column metadata, log and continue with empty columns
+                        print(f"❌ Error retrieving column info for {full_name}: {e}")
+                        output_lines.append("\nCOLUMNS: Error retrieving column information")
+                        output_lines.append(f"  Details: {e}")
+                        columns = []
+                        # Rollback to savepoint to clear the error
+                        _rollback_to_savepoint_or_full(cur, con, savepoint_name, savepoint_created)
 
                     # Get sample data
                     try:
                         # Get total row count
                         try:
                             cur.execute(f'SELECT COUNT(*) as cnt FROM "{schema_name}"."{table_name}"')
-                            total_rows = cur.fetchone()['cnt']
+                            total_rows = cur.fetchone()
+                            try:
+                                total_rows = total_rows['cnt']
+                            except Exception as e:
+                                print(
+                                    f"⚠️ Error fetching total rows via dict access for {full_name}: {e}; "
+                                    "trying tuple access..."
+                                )
+                                total_rows = total_rows[0]
                             output_lines.append(f"\nTOTAL ROWS: {total_rows}")
                         except Exception as e:
+                            print(f"❌ Error retrieving row count for {full_name}: {e}")
                             output_lines.append(f"\nTOTAL ROWS: Error retrieving count: {str(e)}")
+                            # Rollback to savepoint to clear the error
+                            _rollback_to_savepoint_or_full(cur, con, savepoint_name, savepoint_created)
 
-                        cur.execute(f'SELECT * FROM "{schema_name}"."{table_name}" LIMIT {sample_rows}')
-                        sample_rows_data = cur.fetchall()
+                        try:
+                            cur.execute(f'SELECT * FROM "{schema_name}"."{table_name}" LIMIT {sample_rows}')
+                            sample_rows_data = cur.fetchall()
+                        except Exception as e:
+                            print(f"❌ Error retrieving sample rows for {full_name}: {e}")
+                            output_lines.append(f"\nSAMPLE DATA: Error retrieving rows: {str(e)}")
+                            sample_rows_data = []
+                            # Rollback to savepoint to clear the error
+                            _rollback_to_savepoint_or_full(cur, con, savepoint_name, savepoint_created)
 
                         if sample_rows_data:
                             output_lines.append(f"\nSAMPLE DATA ({len(sample_rows_data)} rows):")
@@ -191,7 +293,17 @@ def extract_schema_and_examples(
                             output_lines.append("\nSAMPLE DATA: No data found")
 
                     except Exception as e:
+                        print(f"❌ Unexpected error while processing sample data for {full_name}: {e}")
                         output_lines.append(f"\nSAMPLE DATA: Error retrieving data: {str(e)}")
+                        # Rollback to savepoint to clear the error and continue with next object
+                        _rollback_to_savepoint_or_full(cur, con, savepoint_name, savepoint_created)
+                    else:
+                        # Release savepoint on successful completion
+                        if savepoint_created:
+                            try:
+                                cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                            except Exception:
+                                pass
 
                 # Write to file
                 output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -231,6 +343,10 @@ def main():
         "--table-names-suffix", "-t", type=str, default="", help="suffix to subset of tables to extract (default: '')"
     )
     parser.add_argument(
+        "--tables", type=str, default="",
+        help="Comma-separated list of specific table names to extract (e.g., 'ctgov_studies,bindingdb_targets')"
+    )
+    parser.add_argument(
         "--max-value-length", "-m", type=int, default=150,
         help="Maximum length for displayed values before truncation (default: 150 chars)"
     )
@@ -239,6 +355,9 @@ def main():
         help="Disable summary statistics in output (default: False)"
     )
     args = parser.parse_args()
+    
+    # Parse comma-separated table names
+    table_names_list = [t.strip() for t in args.tables.split(',') if t.strip()] if args.tables else None
 
     print("🔍 Database Schema Extraction")
     print("=" * 50)
@@ -248,6 +367,8 @@ def main():
     print(f"📊 Sample rows: {args.sample_rows}")
     print(f"📏 Max value length: {args.max_value_length} chars")
     print(f"📈 Summary stats: {not args.no_summary_stats}")
+    if table_names_list:
+        print(f"📋 Tables filter: {', '.join(table_names_list)}")
 
     try:
         extract_schema_and_examples(
@@ -256,7 +377,8 @@ def main():
             args.sample_rows,
             args.table_names_suffix,
             args.max_value_length,
-            not args.no_summary_stats
+            not args.no_summary_stats,
+            table_names_list
         )
         print("\n🎉 Schema extraction completed successfully!")
     except Exception as e:

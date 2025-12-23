@@ -11,6 +11,7 @@ This script coordinates the ingestion of:
 6. ChEMBL biochemical annotations
 7. dm_target canonical target mapping (combines ChEMBL + BindingDB)
 8. DrugCentral molecular structures
+9. dm_molecule unified molecule table + CT.gov mappings (combines all sources)
 
 All data goes into the same PostgreSQL database for integrated querying.
 """
@@ -28,6 +29,7 @@ try:
     from .build_ctgov import ingest_ctgov_full, populate_rag_corpus, populate_rag_keys
     from .build_dailymed import run_dailymed_ingestion_pipeline
     from .build_drugcentral import build_drugcentral
+    from .build_molecular_mappings import main as build_molecular_mappings
     from .build_openfda import build_fda_normalized
     from .build_orange_book import ingest_orange_book
     from .create_and_populate_dm_target import main as populate_dm_target
@@ -48,6 +50,7 @@ except ImportError:
     from build_ctgov import ingest_ctgov_full, populate_rag_corpus, populate_rag_keys
     from build_dailymed import run_dailymed_ingestion_pipeline
     from build_drugcentral import build_drugcentral
+    from build_molecular_mappings import main as build_molecular_mappings
     from build_openfda import build_fda_normalized
     from build_orange_book import ingest_orange_book
     from create_and_populate_dm_target import main as populate_dm_target
@@ -325,22 +328,34 @@ def run_dm_target_population(config: DatabaseConfig) -> bool:
         return False
 
 
-# TODO: Implement drug mapping combination across all data sources
-# def run_combine_mapping(config: DatabaseConfig) -> bool:
-#     """Run drug mapping combination across all data sources."""
-#     print("\n" + "=" * 60)
-#     print("🔗 DRUG MAPPING COMBINATION")
-#     print("=" * 60)
-#
-#     try:
-#         start_time = time.time()
-#         create_mapping(config)  # Function not yet implemented
-#         elapsed = time.time() - start_time
-#         print(f"✅ Drug mapping combination completed in {elapsed:.1f} seconds")
-#         return True
-#     except Exception as e:
-#         print(f"❌ Drug mapping combination failed: {e}")
-#         return False
+def run_molecular_mappings(config: DatabaseConfig) -> bool:
+    """
+    Run molecular mapping pipeline to consolidate molecules and map to clinical trials.
+    
+    This creates:
+    - dm_molecule: Unified molecule table (ChEMBL + DrugCentral + BindingDB)
+    - dm_molecule_synonyms: Synonym dictionary for molecule matching
+    - map_ctgov_molecules: CT.gov intervention to molecule mappings
+    - map_product_molecules: OpenFDA/DailyMed to molecule mappings
+    - dm_compound_target_activity: Unified activity view
+    
+    Requires: ChEMBL, DrugCentral, BindingDB, dm_target, and CT.gov tables
+    """
+    print("\n" + "=" * 60)
+    print("🧬 DM_MOLECULE UNIFIED MOLECULAR MAPPINGS")
+    print("   (Consolidating ChEMBL + DrugCentral + BindingDB)")
+    print("   (Mapping CT.gov interventions to molecules)")
+    print("=" * 60)
+
+    try:
+        start_time = time.time()
+        build_molecular_mappings()
+        elapsed = time.time() - start_time
+        print(f"✅ Molecular mappings completed in {elapsed:.1f} seconds")
+        return True
+    except Exception as e:
+        print(f"❌ Molecular mappings failed: {e}")
+        return False
 
 
 def dump_database(config: DatabaseConfig, dump_file: Path) -> bool:
@@ -560,6 +575,7 @@ Examples:
     parser.add_argument("--skip-drugcentral", action="store_true", help="Skip DrugCentral ingestion")
     parser.add_argument("--skip-chembl", action="store_true", help="Skip ChEMBL ingestion")
     parser.add_argument("--skip-dm-target", action="store_true", help="Skip dm_target population (requires ChEMBL + BindingDB)")
+    parser.add_argument("--skip-dm-molecule", action="store_true", help="Skip dm_molecule/molecular mappings (requires all molecule sources + dm_target)")
     parser.add_argument("--ctgov-populate-rag", action="store_true", help="Populate CT.gov RAG corpus after ingestion (WARNING: takes hours!)")
     parser.add_argument("--ctgov-rag-buckets", type=int, default=16, help="Number of buckets for CT.gov RAG corpus (default: 16)")
     parser.add_argument("--ctgov-rag-corpus-only", action="store_true", help="Only populate CT.gov RAG corpus (requires prior ingestion)")
@@ -780,6 +796,22 @@ Examples:
         print("\n⏭️  Skipping DrugCentral ingestion")
         results["drugcentral"] = True
 
+    # 9. dm_molecule (unified molecular mappings + CT.gov intervention mapping)
+    if not args.skip_dm_molecule:
+        # Only run if all required sources were successful
+        required_sources = ["chembl", "drugcentral", "bindingdb", "dm_target", "ctgov"]
+        all_required_ok = all(results.get(src, False) for src in required_sources)
+        
+        if all_required_ok:
+            results["dm_molecule"] = run_molecular_mappings(config)
+        else:
+            missing = [src for src in required_sources if not results.get(src, False)]
+            print(f"\n⏭️  Skipping dm_molecule (requires: {', '.join(missing)})")
+            results["dm_molecule"] = False
+    else:
+        print("\n⏭️  Skipping dm_molecule/molecular mappings")
+        results["dm_molecule"] = True
+
     # Post-processing
     if args.vacuum:
         print("\n🧹 Running database vacuum...")
@@ -810,8 +842,6 @@ Examples:
         print("\n🎉 All ingestions completed successfully!")
         print("🔍 Your PostgreSQL database is ready for advanced queries.")
         print("\n📊 Key tables created:")
-        print("   - drug_mapping_final: Cross-source drug mappings with match types")
-        print("   - drug_mapping_summary: Aggregated view of drug mappings")
         print("   - bindingdb_molecules: Molecular structures and identifiers")
         print("   - bindingdb_targets: Protein targets and gene information")
         print("   - bindingdb_activities: Binding affinity measurements")
@@ -824,6 +854,11 @@ Examples:
         print("   - dm_target: Canonical target mappings (ChEMBL + BindingDB consensus)")
         print("   - dm_target_gene_synonyms: Gene symbol synonyms for targets")
         print("   - dm_target_uniprot_mappings: UniProt accession mappings")
+        print("   - dm_molecule: Unified molecules (ChEMBL + DrugCentral + BindingDB)")
+        print("   - dm_molecule_synonyms: Comprehensive synonym dictionary")
+        print("   - map_ctgov_molecules: CT.gov intervention to molecule mappings")
+        print("   - map_product_molecules: OpenFDA/DailyMed to molecule mappings")
+        print("   - dm_compound_target_activity: Unified molecule-target activity view")
         print("\nExample cross-source queries you can now run:")
         print("1. Find OpenFDA drugs with Orange Book therapeutic equivalents")
         print("2. Link clinical trials to FDA-approved drugs")
@@ -831,12 +866,16 @@ Examples:
         print("4. Cross-reference DrugCentral molecular structures with FDA data")
         print("5. Analyze trial outcomes for specific drug classes")
         print("6. Find chemical similarities using DrugCentral SMILES data")
-        print("7. Query drug_mapping_final for exact matches across all sources")
-        print("8. Use drug_mapping_summary for aggregated drug relationships")
-        print("9. Find drugs targeting specific proteins using BindingDB data")
-        print("10. Analyze binding affinity patterns across drug classes")
-        print("11. Query dm_target for unified ChEMBL+BindingDB target annotations")
-        print("12. Use dm_target_gene_synonyms to find targets by alternative names")
+        print("7. Find drugs targeting specific proteins using BindingDB data")
+        print("8. Analyze binding affinity patterns across drug classes")
+        print("9. Query dm_target for unified ChEMBL+BindingDB target annotations")
+        print("10. Use dm_target_gene_synonyms to find targets by alternative names")
+        print("11. Query dm_molecule for unified molecule structures by InChIKey")
+        print("12. Find clinical trials for molecules targeting specific genes:")
+        print("    SELECT m.pref_name, c.nct_id FROM dm_compound_target_activity a")
+        print("    JOIN map_ctgov_molecules map ON a.mol_id = map.mol_id")
+        print("    JOIN ctgov_studies c ON map.nct_id = c.nct_id")
+        print("    WHERE a.gene_symbol = 'EGFR' AND a.pchembl_value > 7;")
     else:
         print("\n⚠️  Some ingestions failed. Check the logs above.")
         sys.exit(1)
