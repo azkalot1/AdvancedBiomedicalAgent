@@ -1,26 +1,16 @@
 #!/usr/bin/env python3
 # target_search.py
 """
-Unified Pharmacology Search Module
+Unified Pharmacology Search Module - v2
 
-Single entry point for all drug-target, structure, and clinical trial searches.
-
-Usage:
-    from bioagent.search import PharmacologySearch, SearchInput, SearchMode
-    
-    search = PharmacologySearch(db_config)
-    
-    # All searches go through one function
-    results = await search.search(SearchInput(
-        mode=SearchMode.TARGETS_FOR_DRUG,
-        query="imatinib",
-        min_pchembl=6.0
-    ))
+Key changes from v1:
+- Integrates drug mechanism data (curated MOA) alongside activity data (IC50/Ki)
+- Groups results by compound with nested target/mechanism lists
+- Cleaner output representation
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Literal, Optional, List, Dict, Union
@@ -30,8 +20,8 @@ from pydantic import BaseModel, Field, field_validator
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from rich.tree import Tree
 
-# Adjust imports based on your project structure
 try:
     from bioagent.data.ingest.async_config import AsyncDatabaseConfig, get_async_connection
     from bioagent.data.ingest.config import DatabaseConfig, DEFAULT_CONFIG
@@ -47,26 +37,26 @@ except ImportError:
 class SearchMode(str, Enum):
     """All available search modes."""
     # Drug-centric searches
-    TARGETS_FOR_DRUG = "targets_for_drug"          # Drug name → all targets
-    TRIALS_FOR_DRUG = "trials_for_drug"            # Drug name → clinical trials
-    DRUG_PROFILE = "drug_profile"                  # Drug name → full profile
-    DRUG_FORMS = "drug_forms"                      # Drug name → all salt/stereo forms
+    TARGETS_FOR_DRUG = "targets_for_drug"
+    TRIALS_FOR_DRUG = "trials_for_drug"
+    DRUG_PROFILE = "drug_profile"
+    DRUG_FORMS = "drug_forms"
     
     # Target-centric searches
-    DRUGS_FOR_TARGET = "drugs_for_target"          # Target → all drugs
-    SELECTIVE_DRUGS = "selective_drugs"            # Target + off-targets → selective drugs
+    DRUGS_FOR_TARGET = "drugs_for_target"
+    SELECTIVE_DRUGS = "selective_drugs"
     
     # Structure-based searches
-    SIMILAR_MOLECULES = "similar_molecules"        # SMILES → similar structures
-    EXACT_STRUCTURE = "exact_structure"            # SMILES → exact match
-    SUBSTRUCTURE = "substructure"                  # SMARTS → containing structures
+    SIMILAR_MOLECULES = "similar_molecules"
+    EXACT_STRUCTURE = "exact_structure"
+    SUBSTRUCTURE = "substructure"
     
     # Comparison searches
-    COMPARE_DRUGS = "compare_drugs"                # Multiple drugs + target → comparison
+    COMPARE_DRUGS = "compare_drugs"
     
-    # Activity searches (raw, not deduplicated)
-    ACTIVITIES_FOR_DRUG = "activities_for_drug"    # Drug → all activity measurements
-    ACTIVITIES_FOR_TARGET = "activities_for_target" # Target → all activity measurements
+    # Raw activity searches
+    ACTIVITIES_FOR_DRUG = "activities_for_drug"
+    ACTIVITIES_FOR_TARGET = "activities_for_target"
 
 
 class ActivityType(str, Enum):
@@ -84,222 +74,33 @@ class DataConfidence(str, Enum):
     ANY = "ANY"
 
 
-class TrialPhase(str, Enum):
-    PHASE1 = "PHASE1"
-    PHASE2 = "PHASE2"
-    PHASE3 = "PHASE3"
-    PHASE4 = "PHASE4"
-    ANY = "ANY"
-
-
-class SortOrder(str, Enum):
-    POTENCY_DESC = "potency_desc"       # Most potent first
-    POTENCY_ASC = "potency_asc"         # Least potent first
-    SIMILARITY_DESC = "similarity_desc"  # Most similar first
-    NAME_ASC = "name_asc"               # Alphabetical
-    MEASUREMENTS_DESC = "measurements_desc"  # Most data first
-    SELECTIVITY_DESC = "selectivity_desc"    # Most selective first
+class DataSource(str, Enum):
+    """Source of target interaction data."""
+    ACTIVITY = "activity"      # Quantitative assay data (IC50, Ki, etc.)
+    MECHANISM = "mechanism"    # Curated drug mechanism (MOA)
+    BOTH = "both"
 
 
 # =============================================================================
-# INPUT MODEL
+# NEW RESULT MODELS - Hierarchical Structure
 # =============================================================================
 
-class TargetSearchInput(BaseModel):
-    """
-    Unified input for all search types.
-    
-    Required fields depend on the search mode:
-    
-    Mode                    | Required              | Optional
-    ------------------------|-----------------------|---------------------------
-    TARGETS_FOR_DRUG        | query (drug name)     | min_pchembl, activity_type, confidence
-    DRUGS_FOR_TARGET        | query (gene symbol)   | min_pchembl, activity_type, confidence
-    SIMILAR_MOLECULES       | smiles                | similarity_threshold, min_pchembl
-    EXACT_STRUCTURE         | smiles                | -
-    SUBSTRUCTURE            | smarts                | -
-    TRIALS_FOR_DRUG         | query (drug name)     | trial_phase, trial_status
-    DRUG_PROFILE            | query (drug name)     | include_trials, include_forms
-    DRUG_FORMS              | query (drug name)     | -
-    COMPARE_DRUGS           | drug_names, target    | activity_type
-    SELECTIVE_DRUGS         | target, off_targets   | min_selectivity_fold, min_pchembl
-    ACTIVITIES_FOR_DRUG     | query (drug name)     | activity_type, min_pchembl
-    ACTIVITIES_FOR_TARGET   | query (gene symbol)   | activity_type, min_pchembl
-    
-    Examples:
-        # Find all targets for imatinib
-        SearchInput(mode=SearchMode.TARGETS_FOR_DRUG, query="imatinib")
-        
-        # Find JAK2 inhibitors with IC50 < 100nM
-        SearchInput(mode=SearchMode.DRUGS_FOR_TARGET, query="JAK2", min_pchembl=7.0)
-        
-        # Similarity search
-        SearchInput(mode=SearchMode.SIMILAR_MOLECULES, smiles="CCO", similarity_threshold=0.7)
-        
-        # Compare drugs on target
-        SearchInput(
-            mode=SearchMode.COMPARE_DRUGS, 
-            target="ABL1",
-            drug_names=["imatinib", "dasatinib", "nilotinib"]
-        )
-    """
-    
-    # Core parameters
-    mode: SearchMode
-    query: str | None = None  # Drug name, gene symbol, or general query
-    
-    # Structure parameters
-    smiles: str | None = None
-    smarts: str | None = None
-    similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
-    
-    # Activity filters
-    min_pchembl: float = Field(default=5.0, ge=0.0, le=15.0)
-    max_pchembl: float | None = None
-    activity_type: ActivityType = ActivityType.ALL
-    min_confidence: DataConfidence = DataConfidence.ANY
-    
-    # Target parameters (for selectivity searches)
-    target: str | None = None  # Primary target gene symbol
-    off_targets: list[str] = Field(default_factory=list)
-    min_selectivity_fold: float = Field(default=10.0, ge=1.0)
-    
-    # Drug list (for comparison)
-    drug_names: list[str] = Field(default_factory=list)
-    
-    # Clinical trial filters
-    trial_phase: TrialPhase = TrialPhase.ANY
-    trial_status: str | None = None  # e.g., "RECRUITING", "COMPLETED"
-    
-    # Profile options
-    include_trials: bool = True
-    include_forms: bool = True
-    include_activities: bool = True
-    
-    # Output control
-    limit: int = Field(default=100, ge=1, le=1000)
-    offset: int = Field(default=0, ge=0)
-    sort_by: SortOrder = SortOrder.POTENCY_DESC
-    
-    # Organism filter
-    organism: str = "Homo sapiens"
-    include_all_organisms: bool = False
-
-    @field_validator('query', 'smiles', 'smarts', 'target', mode='before')
-    @classmethod
-    def strip_strings(cls, v):
-        """Strip whitespace from string inputs."""
-        if isinstance(v, str):
-            return v.strip()
-        return v
-
-    @field_validator('off_targets', 'drug_names', mode='before')
-    @classmethod
-    def uppercase_gene_lists(cls, v):
-        """Uppercase gene symbols in lists."""
-        if isinstance(v, list):
-            return [x.upper() if isinstance(x, str) else x for x in v]
-        return v
-
-    def validate_for_mode(self) -> list[str]:
-        """Validate that required fields are present for the search mode."""
-        errors = []
-        
-        if self.mode in [
-            SearchMode.TARGETS_FOR_DRUG,
-            SearchMode.TRIALS_FOR_DRUG,
-            SearchMode.DRUG_PROFILE,
-            SearchMode.DRUG_FORMS,
-            SearchMode.ACTIVITIES_FOR_DRUG
-        ]:
-            if not self.query:
-                errors.append(f"'query' (drug name) is required for {self.mode.value}")
-        
-        elif self.mode in [
-            SearchMode.DRUGS_FOR_TARGET,
-            SearchMode.ACTIVITIES_FOR_TARGET
-        ]:
-            if not self.query:
-                errors.append(f"'query' (gene symbol) is required for {self.mode.value}")
-        
-        elif self.mode in [SearchMode.SIMILAR_MOLECULES, SearchMode.EXACT_STRUCTURE]:
-            if not self.smiles:
-                errors.append(f"'smiles' is required for {self.mode.value}")
-        
-        elif self.mode == SearchMode.SUBSTRUCTURE:
-            if not self.smarts and not self.smiles:
-                errors.append(f"'smarts' or 'smiles' is required for {self.mode.value}")
-        
-        elif self.mode == SearchMode.COMPARE_DRUGS:
-            if not self.drug_names:
-                errors.append("'drug_names' list is required for compare_drugs")
-            if not self.target and not self.query:
-                errors.append("'target' or 'query' (gene symbol) is required for compare_drugs")
-        
-        elif self.mode == SearchMode.SELECTIVE_DRUGS:
-            if not self.target and not self.query:
-                errors.append("'target' or 'query' (gene symbol) is required for selective_drugs")
-            if not self.off_targets:
-                errors.append("'off_targets' list is required for selective_drugs")
-        
-        return errors
-
-    @property
-    def effective_target(self) -> str | None:
-        """Get the target gene symbol from either 'target' or 'query' field."""
-        return self.target or self.query
-
-    @property
-    def effective_smarts(self) -> str | None:
-        """Get SMARTS pattern, falling back to SMILES if not provided."""
-        return self.smarts or self.smiles
-
-
-# =============================================================================
-# RESULT MODELS
-# =============================================================================
-
-class DrugTargetHit(BaseModel):
-    """A single drug-target interaction result."""
-    # Drug info
-    concept_id: int | None = None
-    concept_name: str | None = None
-    mol_id: int | None = None
-    molecule_name: str | None = None
-    canonical_smiles: str | None = None
-    chembl_id: str | None = None
-    
-    # Target info
-    target_id: int | None = None
-    gene_symbol: str = "N/A"
+class TargetActivity(BaseModel):
+    """A single quantitative activity measurement for a target."""
+    gene_symbol: str
     target_name: str | None = None
-    target_organism: str | None = "Homo sapiens"
+    target_organism: str = "Homo sapiens"
     
-    # Activity info
-    activity_type: str = "N/A"
-    activity_value_nm: float = 0.0
+    # Activity values
+    activity_type: str  # IC50, Ki, Kd, EC50
+    activity_value_nm: float
     pchembl: float | None = None
     
     # Quality metrics
-    n_measurements: int | None = None
+    n_measurements: int = 1
     data_confidence: str | None = None
-    sources: list[str] | None = None
+    sources: list[str] = []
     
-    # Similarity (for structure searches)
-    tanimoto_similarity: float | None = None
-    
-    # Selectivity (for selectivity searches)
-    selectivity_fold: float | None = None
-
-    @property
-    def display_name(self) -> str:
-        """Best available name for display."""
-        return self.concept_name or self.molecule_name or self.chembl_id or f"MOL_{self.mol_id}"
-
-    @property
-    def activity_value_um(self) -> float:
-        return self.activity_value_nm / 1000
-
     @property
     def potency_category(self) -> str:
         if not self.pchembl:
@@ -316,6 +117,103 @@ class DrugTargetHit(BaseModel):
             return "Very Weak (>1 μM)"
 
 
+class TargetMechanism(BaseModel):
+    """A curated drug mechanism of action for a target."""
+    mechanism_of_action: str
+    action_type: str  # INHIBITOR, AGONIST, ANTAGONIST, etc.
+    
+    # Target info
+    target_name: str | None = None
+    target_type: str | None = None  # SINGLE PROTEIN, PROTEIN FAMILY, etc.
+    target_organism: str = "Homo sapiens"
+    
+    # Components (for protein complexes/families)
+    gene_symbols: list[str] = []
+    uniprot_accessions: list[str] = []
+    n_components: int = 1
+    
+    # Flags
+    direct_interaction: bool = False
+    molecular_mechanism: bool = False
+    disease_efficacy: bool = False
+    
+    # Reference
+    ref_type: str | None = None
+    ref_id: str | None = None
+    ref_url: str | None = None
+
+
+class CompoundTargetProfile(BaseModel):
+    """
+    Complete target profile for a single compound.
+    Groups all activities and mechanisms under one compound.
+    """
+    # Compound identification
+    concept_id: int
+    concept_name: str
+    chembl_id: str | None = None
+    canonical_smiles: str | None = None
+    
+    # Aggregated target data
+    activities: list[TargetActivity] = []
+    mechanisms: list[TargetMechanism] = []
+    
+    # Summary counts
+    n_activity_targets: int = 0
+    n_mechanism_targets: int = 0
+    best_pchembl: float | None = None
+    
+    # For similarity/structure searches
+    tanimoto_similarity: float | None = None
+    
+    @property
+    def has_activity_data(self) -> bool:
+        return len(self.activities) > 0
+    
+    @property
+    def has_mechanism_data(self) -> bool:
+        return len(self.mechanisms) > 0
+    
+    @property
+    def all_target_genes(self) -> set[str]:
+        """All unique gene symbols from both activities and mechanisms."""
+        genes = {a.gene_symbol for a in self.activities}
+        for m in self.mechanisms:
+            genes.update(m.gene_symbols)
+        return genes
+
+
+class DrugForTargetHit(BaseModel):
+    """A drug that hits a specific target (for DRUGS_FOR_TARGET mode)."""
+    concept_id: int
+    concept_name: str
+    chembl_id: str | None = None
+    canonical_smiles: str | None = None
+    
+    # Activity on the queried target
+    activity_type: str | None = None
+    activity_value_nm: float | None = None
+    pchembl: float | None = None
+    n_measurements: int = 0
+    data_confidence: str | None = None
+    sources: list[str] = []
+    
+    # Mechanism on the queried target (if any)
+    mechanism_of_action: str | None = None
+    action_type: str | None = None
+    
+    # Selectivity info (for selectivity searches)
+    selectivity_fold: float | None = None
+    
+    @property
+    def has_activity(self) -> bool:
+        return self.activity_value_nm is not None
+    
+    @property
+    def has_mechanism(self) -> bool:
+        return self.mechanism_of_action is not None
+
+
 class ClinicalTrialHit(BaseModel):
     """A clinical trial result."""
     nct_id: str
@@ -325,13 +223,12 @@ class ClinicalTrialHit(BaseModel):
     concept_id: int | None = None
     concept_name: str | None = None
     molecule_form: str | None = None
-    salt_form: str | None = None
     match_type: str | None = None
     confidence: float | None = None
 
 
 class MoleculeForm(BaseModel):
-    """A specific form of a drug."""
+    """A specific form of a drug (salt, stereoisomer, etc.)."""
     mol_id: int
     form_name: str | None = None
     inchi_key: str | None = None
@@ -340,38 +237,104 @@ class MoleculeForm(BaseModel):
     salt_form: str | None = None
     stereo_type: str | None = None
     chembl_id: str | None = None
-    drugcentral_id: int | None = None
-
-
-class DrugComparisonHit(BaseModel):
-    """Result of comparing drugs on a target."""
-    drug_name: str
-    activity_value_nm: float | None = None
-    median_value_nm: float | None = None
-    n_measurements: int = 0
-    fold_vs_best: float | None = None
-    data_confidence: str | None = None
-    sources: list[str] | None = None
 
 
 class DrugProfileResult(BaseModel):
-    """Complete drug profile."""
+    """Complete drug profile with all data."""
     concept_id: int
     concept_name: str
-    parent_inchi_key_14: str | None = None
+    canonical_smiles: str | None = None
+    
+    # Counts
     n_forms: int = 0
-    n_stereo_variants: int = 0
-    n_salt_forms: int = 0
+    has_salt_forms: bool = False  # Changed from n_salt_forms
     n_clinical_trials: int = 0
-    n_targets: int = 0
+    n_activity_targets: int = 0
+    n_mechanism_targets: int = 0
+    
+    # Nested data
     forms: list[MoleculeForm] = []
-    top_targets: list[DrugTargetHit] = []
+    target_profile: CompoundTargetProfile | None = None
     recent_trials: list[ClinicalTrialHit] = []
 
 
-# Union type for all possible hit types
-SearchHit = Union[DrugTargetHit, ClinicalTrialHit, MoleculeForm, DrugComparisonHit, DrugProfileResult]
+# =============================================================================
+# INPUT MODEL
+# =============================================================================
 
+class TargetSearchInput(BaseModel):
+    """Unified input for all search types."""
+    
+    mode: SearchMode
+    query: str | None = None
+    
+    # Structure parameters
+    smiles: str | None = None
+    smarts: str | None = None
+    similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    
+    # Activity filters
+    min_pchembl: float = Field(default=5.0, ge=0.0, le=15.0)
+    activity_type: ActivityType = ActivityType.ALL
+    min_confidence: DataConfidence = DataConfidence.ANY
+    
+    # Data source filter
+    data_source: DataSource = DataSource.BOTH
+    
+    # Target parameters
+    target: str | None = None
+    off_targets: list[str] = Field(default_factory=list)
+    min_selectivity_fold: float = Field(default=10.0, ge=1.0)
+    
+    # Drug list (for comparison)
+    drug_names: list[str] = Field(default_factory=list)
+    
+    # Output control
+    limit: int = Field(default=50, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+    
+    # Organism filter
+    organism: str = "Homo sapiens"
+    include_all_organisms: bool = False
+    
+    # Include options
+    include_trials: bool = True
+    include_forms: bool = True
+
+    def validate_for_mode(self) -> list[str]:
+        """Validate required fields for the search mode."""
+        errors = []
+        
+        if self.mode in [SearchMode.TARGETS_FOR_DRUG, SearchMode.TRIALS_FOR_DRUG,
+                         SearchMode.DRUG_PROFILE, SearchMode.DRUG_FORMS,
+                         SearchMode.ACTIVITIES_FOR_DRUG]:
+            if not self.query:
+                errors.append(f"'query' (drug name) is required for {self.mode.value}")
+        
+        elif self.mode in [SearchMode.DRUGS_FOR_TARGET, SearchMode.ACTIVITIES_FOR_TARGET]:
+            if not self.query:
+                errors.append(f"'query' (gene symbol) is required for {self.mode.value}")
+        
+        elif self.mode in [SearchMode.SIMILAR_MOLECULES, SearchMode.EXACT_STRUCTURE]:
+            if not self.smiles:
+                errors.append(f"'smiles' is required for {self.mode.value}")
+        
+        elif self.mode == SearchMode.SELECTIVE_DRUGS:
+            if not self.target and not self.query:
+                errors.append("'target' is required for selective_drugs")
+            if not self.off_targets:
+                errors.append("'off_targets' list is required for selective_drugs")
+        
+        return errors
+
+    @property
+    def effective_target(self) -> str | None:
+        return self.target or self.query
+
+
+# =============================================================================
+# OUTPUT MODEL
+# =============================================================================
 
 class TargetSearchOutput(BaseModel):
     """Universal search results container."""
@@ -382,30 +345,28 @@ class TargetSearchOutput(BaseModel):
     hits: list[Any] = []
     error: str | None = None
     warnings: list[str] = []
-    
-    # Input echo
     input_params: dict = {}
-    
-    # Metadata
     execution_time_ms: float | None = None
 
     def pretty_print(self, console: Console | None = None, max_hits: int = 20):
-        """Pretty print results."""
+        """Pretty print results with improved formatting."""
         console = console or Console()
         
         status_color = {
-            "success": "green", 
-            "not_found": "yellow", 
+            "success": "green",
+            "not_found": "yellow",
             "error": "red",
             "invalid_input": "red"
         }[self.status]
         
+        # Header
         console.print(Panel(
             f"[bold {status_color}]{self.status.upper()}[/bold {status_color}] | "
             f"Mode: [cyan]{self.mode.value}[/cyan] | "
             f"Query: [yellow]{self.query_summary}[/yellow] | "
-            f"Hits: [bold]{self.total_hits}[/bold]",
-            title="🔬 Search Results",
+            f"Hits: [bold]{self.total_hits}[/bold]"
+            + (f" | Time: {self.execution_time_ms:.0f}ms" if self.execution_time_ms else ""),
+            title="🔬 Pharmacology Search Results",
             border_style=status_color
         ))
         
@@ -420,6 +381,7 @@ class TargetSearchOutput(BaseModel):
             console.print("[dim]No results found.[/dim]")
             return
         
+        # Route to appropriate formatter
         for i, hit in enumerate(self.hits[:max_hits], 1):
             self._print_hit(console, i, hit)
         
@@ -428,114 +390,133 @@ class TargetSearchOutput(BaseModel):
 
     def _print_hit(self, console: Console, rank: int, hit: Any):
         """Print a single hit based on type."""
-        if isinstance(hit, DrugTargetHit):
-            # Build display components
-            name = hit.display_name
-            
-            # Similarity badge
-            sim_str = f"[blue](Sim: {hit.tanimoto_similarity:.2f})[/blue] " if hit.tanimoto_similarity else ""
-            
-            # Selectivity badge
-            sel_str = f"[magenta](Sel: {hit.selectivity_fold:.1f}x)[/magenta] " if hit.selectivity_fold else ""
-            
-            # Sources badge
-            src_str = f" [dim][{', '.join(hit.sources)}][/dim]" if hit.sources else ""
-            
-            # Target info
-            if hit.gene_symbol and hit.gene_symbol != "N/A":
-                target_str = f" → [bold magenta]{hit.gene_symbol}[/bold magenta]"
-            else:
-                target_str = ""
-            
-            # Activity info
-            if hit.pchembl and hit.activity_value_nm > 0:
-                p_color = "green" if hit.pchembl >= 8 else "yellow" if hit.pchembl >= 6 else "white"
-                activity_str = f" | {hit.activity_type}: [{p_color}]{hit.activity_value_nm:.2f} nM[/{p_color}] (pChEMBL: [{p_color}]{hit.pchembl:.2f}[/{p_color}])"
-            elif hit.pchembl:
-                p_color = "green" if hit.pchembl >= 8 else "yellow" if hit.pchembl >= 6 else "white"
-                activity_str = f" | pChEMBL: [{p_color}]{hit.pchembl:.2f}[/{p_color}]"
-            else:
-                activity_str = ""
-            
-            # SMILES preview (for structure searches)
-            smiles_str = ""
-            if not target_str and hit.canonical_smiles:
-                smiles_preview = hit.canonical_smiles[:50] + "..." if len(hit.canonical_smiles) > 50 else hit.canonical_smiles
-                smiles_str = f"\n      [dim]{smiles_preview}[/dim]"
-            
-            console.print(
-                f"  {rank}. {sim_str}{sel_str}[bold cyan]{name}[/bold cyan]"
-                f"{target_str}{activity_str}{src_str}{smiles_str}"
-            )
         
-        elif isinstance(hit, ClinicalTrialHit):
-            phase_color = {"PHASE1": "yellow", "PHASE2": "cyan", "PHASE3": "green", "PHASE4": "blue"}.get(hit.phase or "", "white")
-            status_str = f"[{hit.trial_status}]" if hit.trial_status else ""
-            console.print(
-                f"  {rank}. [bold]{hit.nct_id}[/bold] [{phase_color}]{hit.phase or 'N/A'}[/{phase_color}] "
-                f"{status_str}\n      {hit.trial_title[:80]}..."
-            )
-        
-        elif isinstance(hit, DrugComparisonHit):
-            fold_str = f"{hit.fold_vs_best:.1f}x" if hit.fold_vs_best else "best"
-            val_str = f"{hit.activity_value_nm:.2f} nM" if hit.activity_value_nm else "N/A"
-            console.print(
-                f"  {rank}. [bold cyan]{hit.drug_name}[/bold cyan]: {val_str} "
-                f"(fold vs best: {fold_str}, n={hit.n_measurements})"
-            )
-        
-        elif isinstance(hit, MoleculeForm):
-            name = hit.form_name or hit.chembl_id or f"MOL_{hit.mol_id}"
-            salt_str = f" [yellow]({hit.salt_form})[/yellow]" if hit.salt_form else ""
-            stereo_str = f" [dim][{hit.stereo_type}][/dim]" if hit.stereo_type else ""
-            smiles_preview = ""
-            if hit.canonical_smiles:
-                s = hit.canonical_smiles[:50] + "..." if len(hit.canonical_smiles) > 50 else hit.canonical_smiles
-                smiles_preview = f"\n      [dim]{s}[/dim]"
-            console.print(
-                f"  {rank}. [cyan]{name}[/cyan]{salt_str}{stereo_str}{smiles_preview}"
-            )
-        
+        if isinstance(hit, CompoundTargetProfile):
+            self._print_compound_profile(console, rank, hit)
+        elif isinstance(hit, DrugForTargetHit):
+            self._print_drug_for_target(console, rank, hit)
         elif isinstance(hit, DrugProfileResult):
-            console.print(f"\n[bold cyan]{hit.concept_name}[/bold cyan]")
-            console.print(f"  Forms: {hit.n_forms} ({hit.n_salt_forms} salts, {hit.n_stereo_variants} stereoisomers)")
-            console.print(f"  Targets: {hit.n_targets}")
-            console.print(f"  Clinical Trials: {hit.n_clinical_trials}")
-            if hit.top_targets:
-                console.print("  Top Targets:")
-                for t in hit.top_targets[:5]:
-                    val_str = f"{t.activity_value_nm:.1f} nM" if t.activity_value_nm else "N/A"
-                    console.print(f"    • {t.gene_symbol}: {val_str}")
-        
+            self._print_drug_profile(console, rank, hit)
+        elif isinstance(hit, ClinicalTrialHit):
+            self._print_trial(console, rank, hit)
+        elif isinstance(hit, MoleculeForm):
+            self._print_form(console, rank, hit)
         else:
             console.print(f"  {rank}. {hit}")
 
-    def to_json(self, indent: int = 2) -> str:
-        return self.model_dump_json(indent=indent)
+    def _print_compound_profile(self, console: Console, rank: int, hit: CompoundTargetProfile):
+        """Print a compound with its targets grouped."""
+        # Compound header
+        sim_badge = f" [blue](Sim: {hit.tanimoto_similarity:.2f})[/blue]" if hit.tanimoto_similarity else ""
+        pchembl_badge = ""
+        if hit.best_pchembl:
+            p_color = "green" if hit.best_pchembl >= 8 else "yellow" if hit.best_pchembl >= 6 else "white"
+            pchembl_badge = f" [{p_color}]pChEMBL={hit.best_pchembl:.2f}[/{p_color}]"
+        
+        console.print(f"\n[bold cyan]{rank}. {hit.concept_name}[/bold cyan]{sim_badge}{pchembl_badge}")
+        
+        if hit.chembl_id:
+            console.print(f"   [dim]ChEMBL: {hit.chembl_id}[/dim]")
+        
+        if hit.canonical_smiles:
+            smiles_preview = hit.canonical_smiles[:60] + "..." if len(hit.canonical_smiles) > 60 else hit.canonical_smiles
+            console.print(f"   [dim]{smiles_preview}[/dim]")
+        
+        # Drug Mechanisms (curated)
+        if hit.mechanisms:
+            console.print(f"\n   [bold magenta]📋 Drug Mechanisms ({len(hit.mechanisms)}):[/bold magenta]")
+            for m in hit.mechanisms[:5]:
+                genes_str = ", ".join(m.gene_symbols[:3])
+                if len(m.gene_symbols) > 3:
+                    genes_str += f" (+{len(m.gene_symbols) - 3})"
+                
+                flags = []
+                if m.disease_efficacy:
+                    flags.append("✓efficacy")
+                if m.direct_interaction:
+                    flags.append("direct")
+                flags_str = f" [dim][{', '.join(flags)}][/dim]" if flags else ""
+                
+                console.print(f"      • [magenta]{m.action_type}[/magenta]: {m.mechanism_of_action}")
+                if genes_str:
+                    console.print(f"        Target: {m.target_name or 'Unknown'} ({genes_str}){flags_str}")
+            
+            if len(hit.mechanisms) > 5:
+                console.print(f"      [dim]... and {len(hit.mechanisms) - 5} more mechanisms[/dim]")
+        
+        # Activity Data (quantitative)
+        if hit.activities:
+            console.print(f"\n   [bold green]📊 Activity Data ({len(hit.activities)} targets):[/bold green]")
+            for a in hit.activities[:8]:
+                p_color = "green" if a.pchembl and a.pchembl >= 8 else "yellow" if a.pchembl and a.pchembl >= 6 else "white"
+                pchembl_str = f" [{p_color}](pChEMBL={a.pchembl:.2f})[/{p_color}]" if a.pchembl else ""
+                conf_str = f" [{a.data_confidence}]" if a.data_confidence else ""
+                
+                console.print(
+                    f"      • [green]{a.gene_symbol}[/green]: "
+                    f"{a.activity_type} = [{p_color}]{a.activity_value_nm:.1f} nM[/{p_color}]"
+                    f"{pchembl_str}{conf_str}"
+                )
+            
+            if len(hit.activities) > 8:
+                console.print(f"      [dim]... and {len(hit.activities) - 8} more targets[/dim]")
 
-    def to_dataframe(self):
-        """Convert to pandas DataFrame if pandas is available."""
-        try:
-            import pandas as pd
-            if self.hits and hasattr(self.hits[0], 'model_dump'):
-                return pd.DataFrame([h.model_dump() for h in self.hits])
-            return pd.DataFrame(self.hits)
-        except ImportError:
-            raise ImportError("pandas is required for to_dataframe()")
-
-    def filter_by_potency(self, min_pchembl: float) -> "TargetSearchOutput":
-        """Return filtered results."""
-        if not self.hits:
-            return self
-        filtered = [h for h in self.hits if hasattr(h, 'pchembl') and h.pchembl and h.pchembl >= min_pchembl]
-        return TargetSearchOutput(
-            status=self.status,
-            mode=self.mode,
-            query_summary=self.query_summary,
-            total_hits=len(filtered),
-            hits=filtered,
-            input_params={**self.input_params, "filter_min_pchembl": min_pchembl}
+    def _print_drug_for_target(self, console: Console, rank: int, hit: DrugForTargetHit):
+        """Print a drug hit for a target search."""
+        # Activity info
+        if hit.has_activity:
+            p_color = "green" if hit.pchembl and hit.pchembl >= 8 else "yellow" if hit.pchembl and hit.pchembl >= 6 else "white"
+            activity_str = f" | {hit.activity_type}: [{p_color}]{hit.activity_value_nm:.1f} nM[/{p_color}]"
+            if hit.pchembl:
+                activity_str += f" [{p_color}](pChEMBL={hit.pchembl:.2f})[/{p_color}]"
+        else:
+            activity_str = ""
+        
+        # Mechanism info
+        mech_str = ""
+        if hit.has_mechanism:
+            mech_str = f" | [magenta]{hit.action_type}: {hit.mechanism_of_action}[/magenta]"
+        
+        # Selectivity badge
+        sel_str = f" [blue](Sel: {hit.selectivity_fold:.1f}x)[/blue]" if hit.selectivity_fold else ""
+        
+        console.print(
+            f"  {rank}. [bold cyan]{hit.concept_name}[/bold cyan]"
+            f"{sel_str}{activity_str}{mech_str}"
         )
+        
+        if hit.chembl_id:
+            console.print(f"      [dim]ChEMBL: {hit.chembl_id}[/dim]")
+
+    def _print_drug_profile(self, console: Console, rank: int, hit: DrugProfileResult):
+        """Print complete drug profile."""
+        console.print(f"\n[bold cyan]{hit.concept_name}[/bold cyan]")
+        console.print(f"  Concept ID: {hit.concept_id}")
+        
+        # Forms display - updated for has_salt_forms
+        salt_info = " (includes salts)" if hit.has_salt_forms else ""
+        console.print(f"  Forms: {hit.n_forms}{salt_info}")
+        
+        console.print(f"  Activity targets: {hit.n_activity_targets}")
+        console.print(f"  Mechanism targets: {hit.n_mechanism_targets}")
+        console.print(f"  Clinical Trials: {hit.n_clinical_trials}")
+        
+        if hit.target_profile:
+            self._print_compound_profile(console, 0, hit.target_profile)
+
+    def _print_trial(self, console: Console, rank: int, hit: ClinicalTrialHit):
+        """Print clinical trial."""
+        phase_color = {"PHASE1": "yellow", "PHASE2": "cyan", "PHASE3": "green", "PHASE4": "blue"}.get(hit.phase or "", "white")
+        console.print(
+            f"  {rank}. [bold]{hit.nct_id}[/bold] [{phase_color}]{hit.phase or 'N/A'}[/{phase_color}] "
+            f"[{hit.trial_status}]\n      {hit.trial_title[:80]}..."
+        )
+
+    def _print_form(self, console: Console, rank: int, hit: MoleculeForm):
+        """Print molecule form."""
+        name = hit.form_name or hit.chembl_id or f"MOL_{hit.mol_id}"
+        salt_str = f" [yellow]({hit.salt_form})[/yellow]" if hit.salt_form else ""
+        console.print(f"  {rank}. [cyan]{name}[/cyan]{salt_str}")
 
 
 # =============================================================================
@@ -543,27 +524,40 @@ class TargetSearchOutput(BaseModel):
 # =============================================================================
 
 class PharmacologySearch:
-    """
-    Unified pharmacology search interface.
+    """Unified pharmacology search interface."""
     
-    All searches go through the single `search()` method with a `SearchInput` object.
-    
-    Usage:
-        search = PharmacologySearch(db_config)
-        
-        # Find targets for a drug
-        results = await search.search(SearchInput(
-            mode=SearchMode.TARGETS_FOR_DRUG,
-            query="imatinib",
-            min_pchembl=6.0
-        ))
-        
-        # Find similar molecules
-        results = await search.search(SearchInput(
-            mode=SearchMode.SIMILAR_MOLECULES,
-            smiles="Cc1ccc(cc1)NC(=O)c2ccc(cc2)CN3CCN(CC3)C",
-            similarity_threshold=0.7
-        ))
+    # Reusable CTE for fast concept lookup
+    CONCEPT_LOOKUP_CTE = """
+        WITH 
+        exact_synonym AS (
+            SELECT DISTINCT dm.concept_id
+            FROM dm_molecule_synonyms dms
+            JOIN dm_molecule dm ON dms.mol_id = dm.mol_id
+            WHERE dms.synonym_lower = LOWER($1)
+            LIMIT 5
+        ),
+        exact_name AS (
+            SELECT concept_id
+            FROM dm_molecule_concept
+            WHERE LOWER(preferred_name) = LOWER($1)
+            LIMIT 5
+        ),
+        trgm_match AS (
+            SELECT DISTINCT dm.concept_id
+            FROM dm_molecule_synonyms dms
+            JOIN dm_molecule dm ON dms.mol_id = dm.mol_id
+            WHERE dms.synonym_lower ILIKE $2
+              AND NOT EXISTS (SELECT 1 FROM exact_synonym)
+              AND NOT EXISTS (SELECT 1 FROM exact_name)
+            LIMIT 10
+        ),
+        matched_concepts AS (
+            SELECT concept_id FROM exact_synonym
+            UNION
+            SELECT concept_id FROM exact_name
+            UNION
+            SELECT concept_id FROM trgm_match
+        )
     """
     
     def __init__(self, db_config: DatabaseConfig):
@@ -575,33 +569,33 @@ class PharmacologySearch:
             self._async_config = await get_async_connection(self.db_config)
         return self._async_config
 
+    async def _find_concept_ids(self, conn, query: str) -> list[int]:
+        """Reusable helper to find concept_ids from a drug name/synonym."""
+        query_exact = query.strip()
+        query_pattern = f"%{query}%"
+        
+        sql = f"""
+            {self.CONCEPT_LOOKUP_CTE}
+            SELECT concept_id FROM matched_concepts LIMIT 10
+        """
+        rows = await conn.execute_query(sql, query_exact, query_pattern)
+        return [r['concept_id'] for r in rows]
+
     async def search(self, input: TargetSearchInput) -> TargetSearchOutput:
-        """
-        Execute a search based on the input parameters.
-        
-        This is the main entry point for all searches.
-        
-        Args:
-            input: TargetSearchInput object specifying the search mode and parameters
-            
-        Returns:
-            TargetSearchOutput containing the hits and metadata
-        """
+        """Execute a search based on input parameters."""
         import time
         start_time = time.time()
         
-        # Validate input
         validation_errors = input.validate_for_mode()
         if validation_errors:
             return TargetSearchOutput(
                 status="invalid_input",
                 mode=input.mode,
-                query_summary=input.query or input.smiles or str(input.drug_names) or "N/A",
+                query_summary=input.query or input.smiles or "N/A",
                 error="; ".join(validation_errors),
                 input_params=input.model_dump(exclude_none=True)
             )
         
-        # Route to appropriate handler
         try:
             handler = self._get_handler(input.mode)
             results = await handler(input)
@@ -609,17 +603,19 @@ class PharmacologySearch:
             results.input_params = input.model_dump(exclude_none=True)
             return results
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             return TargetSearchOutput(
                 status="error",
                 mode=input.mode,
                 query_summary=input.query or input.smiles or "N/A",
-                error=str(e),
+                error=f"{type(e).__name__}: {str(e)}",
                 input_params=input.model_dump(exclude_none=True),
                 execution_time_ms=(time.time() - start_time) * 1000
             )
 
     def _get_handler(self, mode: SearchMode):
-        """Get the handler function for a search mode."""
+        """Get handler function for a search mode."""
         handlers = {
             SearchMode.TARGETS_FOR_DRUG: self._search_targets_for_drug,
             SearchMode.DRUGS_FOR_TARGET: self._search_drugs_for_target,
@@ -637,435 +633,391 @@ class PharmacologySearch:
         return handlers[mode]
 
     # =========================================================================
-    # HANDLER: TARGETS_FOR_DRUG
+    # HANDLER: TARGETS_FOR_DRUG (optimized)
     # =========================================================================
     
     async def _search_targets_for_drug(self, input: TargetSearchInput) -> TargetSearchOutput:
         """Find all targets for a drug."""
         conn = await self._get_conn()
         
-        sql = """
+        query_exact = input.query.strip()
+        query_pattern = f"%{input.query}%"
+        
+        concept_sql = f"""
+            {self.CONCEPT_LOOKUP_CTE}
             SELECT 
-                mts.concept_id,
-                mts.concept_name,
-                mts.representative_mol_id as mol_id,
-                mts.representative_smiles as canonical_smiles,
-                mts.target_id,
-                mts.gene_symbol,
-                mts.target_name,
-                mts.target_organism,
-                COALESCE(mts.best_ic50_nm, mts.best_ki_nm, mts.best_kd_nm, mts.best_ec50_nm) as activity_value_nm,
-                CASE 
-                    WHEN mts.best_ic50_nm IS NOT NULL THEN 'IC50'
-                    WHEN mts.best_ki_nm IS NOT NULL THEN 'Ki'
-                    WHEN mts.best_kd_nm IS NOT NULL THEN 'Kd'
-                    WHEN mts.best_ec50_nm IS NOT NULL THEN 'EC50'
-                END as activity_type,
-                mts.best_pchembl as pchembl,
-                mts.n_total_measurements,
-                mts.data_confidence,
-                mts.sources
-            FROM dm_molecule_target_summary mts
-            WHERE (
-                mts.concept_name ILIKE $1
-                OR mts.concept_id IN (
-                    SELECT DISTINCT dm.concept_id
-                    FROM dm_molecule_synonyms dms
-                    JOIN dm_molecule dm ON dms.mol_id = dm.mol_id
-                    WHERE dms.synonym_lower ILIKE LOWER($1)
-                )
-            )
-            AND mts.best_pchembl >= $2
+                mc.concept_id,
+                mc.preferred_name as concept_name,
+                dm.chembl_id,
+                dm.canonical_smiles
+            FROM matched_concepts m
+            JOIN dm_molecule_concept mc ON mc.concept_id = m.concept_id
+            JOIN dm_molecule dm ON dm.concept_id = m.concept_id AND dm.is_salt = FALSE
+            LIMIT 10
         """
         
-        params = [f"%{input.query}%", input.min_pchembl]
-        param_idx = 3
+        concept_rows = await conn.execute_query(concept_sql, query_exact, query_pattern)
         
-        # Activity type filter
-        if input.activity_type != ActivityType.ALL:
-            col_map = {
-                ActivityType.IC50: "best_ic50_nm",
-                ActivityType.KI: "best_ki_nm",
-                ActivityType.KD: "best_kd_nm",
-                ActivityType.EC50: "best_ec50_nm"
-            }
-            sql += f" AND mts.{col_map[input.activity_type]} IS NOT NULL"
+        if not concept_rows:
+            return TargetSearchOutput(
+                status="not_found",
+                mode=input.mode,
+                query_summary=f"targets for '{input.query}'",
+                total_hits=0,
+                hits=[]
+            )
         
-        # Confidence filter
-        if input.min_confidence != DataConfidence.ANY:
-            if input.min_confidence == DataConfidence.HIGH:
-                sql += " AND mts.data_confidence = 'HIGH'"
-            elif input.min_confidence == DataConfidence.MEDIUM:
-                sql += " AND mts.data_confidence IN ('HIGH', 'MEDIUM')"
+        profiles = []
         
-        # Organism filter
-        if not input.include_all_organisms:
-            sql += f" AND mts.target_organism = ${param_idx}"
-            params.append(input.organism)
-            param_idx += 1
-        
-        sql += f" ORDER BY mts.best_pchembl DESC NULLS LAST LIMIT ${param_idx}"
-        params.append(input.limit)
-        
-        rows = await conn.execute_query(sql, *params)
-        hits = [self._row_to_drug_target_hit(r) for r in rows]
+        for concept_row in concept_rows:
+            concept_id = concept_row['concept_id']
+            
+            # Get activity data
+            activities = []
+            if input.data_source in [DataSource.ACTIVITY, DataSource.BOTH]:
+                activity_sql = """
+                    SELECT 
+                        gene_symbol, target_name, target_organism,
+                        COALESCE(best_ic50_nm, best_ki_nm, best_kd_nm, best_ec50_nm) as activity_value_nm,
+                        CASE 
+                            WHEN best_ic50_nm IS NOT NULL THEN 'IC50'
+                            WHEN best_ki_nm IS NOT NULL THEN 'Ki'
+                            WHEN best_kd_nm IS NOT NULL THEN 'Kd'
+                            ELSE 'EC50'
+                        END as activity_type,
+                        best_pchembl as pchembl,
+                        n_total_measurements,
+                        data_confidence,
+                        sources
+                    FROM dm_molecule_target_summary
+                    WHERE concept_id = $1 AND best_pchembl >= $2
+                    ORDER BY best_pchembl DESC NULLS LAST
+                    LIMIT $3
+                """
+                activity_rows = await conn.execute_query(
+                    activity_sql, concept_id, input.min_pchembl, input.limit
+                )
+                
+                activities = [
+                    TargetActivity(
+                        gene_symbol=r['gene_symbol'],
+                        target_name=r['target_name'],
+                        target_organism=r['target_organism'] or "Homo sapiens",
+                        activity_type=r['activity_type'] or "Unknown",
+                        activity_value_nm=float(r['activity_value_nm']) if r['activity_value_nm'] else 0,
+                        pchembl=float(r['pchembl']) if r['pchembl'] else None,
+                        n_measurements=r['n_total_measurements'] or 1,
+                        data_confidence=r['data_confidence'],
+                        sources=r['sources'] or []
+                    )
+                    for r in activity_rows
+                ]
+            
+            # Get mechanism data
+            mechanisms = []
+            if input.data_source in [DataSource.MECHANISM, DataSource.BOTH]:
+                mechanism_sql = """
+                    SELECT 
+                        mechanism_of_action, action_type, target_name, target_type,
+                        target_organism, gene_symbols, uniprot_accessions, n_components,
+                        direct_interaction, molecular_mechanism, disease_efficacy,
+                        ref_type, ref_id, ref_url
+                    FROM dm_drug_mechanism
+                    WHERE concept_id = $1
+                    ORDER BY action_type, target_name
+                    LIMIT $2
+                """
+                mechanism_rows = await conn.execute_query(mechanism_sql, concept_id, input.limit)
+                
+                mechanisms = [
+                    TargetMechanism(
+                        mechanism_of_action=r['mechanism_of_action'] or "Unknown",
+                        action_type=r['action_type'] or "Unknown",
+                        target_name=r['target_name'],
+                        target_type=r['target_type'],
+                        target_organism=r['target_organism'] or "Homo sapiens",
+                        gene_symbols=r['gene_symbols'] or [],
+                        uniprot_accessions=r['uniprot_accessions'] or [],
+                        n_components=r['n_components'] or 1,
+                        direct_interaction=r['direct_interaction'] or False,
+                        molecular_mechanism=r['molecular_mechanism'] or False,
+                        disease_efficacy=r['disease_efficacy'] or False,
+                        ref_type=r['ref_type'],
+                        ref_id=r['ref_id'],
+                        ref_url=r['ref_url']
+                    )
+                    for r in mechanism_rows
+                ]
+            
+            if activities or mechanisms:
+                best_pchembl = max((a.pchembl for a in activities if a.pchembl), default=None)
+                
+                profiles.append(CompoundTargetProfile(
+                    concept_id=concept_id,
+                    concept_name=concept_row['concept_name'],
+                    chembl_id=concept_row['chembl_id'],
+                    canonical_smiles=concept_row['canonical_smiles'],
+                    activities=activities,
+                    mechanisms=mechanisms,
+                    n_activity_targets=len(activities),
+                    n_mechanism_targets=len(mechanisms),
+                    best_pchembl=best_pchembl
+                ))
         
         return TargetSearchOutput(
-            status="success" if hits else "not_found",
+            status="success" if profiles else "not_found",
             mode=input.mode,
             query_summary=f"targets for '{input.query}'",
-            total_hits=len(hits),
-            hits=hits
+            total_hits=len(profiles),
+            hits=profiles
         )
 
     # =========================================================================
-    # HANDLER: DRUGS_FOR_TARGET
+    # HANDLER: DRUGS_FOR_TARGET (optimized)
     # =========================================================================
     
     async def _search_drugs_for_target(self, input: TargetSearchInput) -> TargetSearchOutput:
         """Find all drugs for a target."""
         conn = await self._get_conn()
         
-        # Build value column based on activity type
-        if input.activity_type == ActivityType.ALL:
-            value_col = "COALESCE(mts.best_ic50_nm, mts.best_ki_nm, mts.best_kd_nm, mts.best_ec50_nm)"
-            type_expr = """CASE 
-                WHEN mts.best_ic50_nm IS NOT NULL THEN 'IC50'
-                WHEN mts.best_ki_nm IS NOT NULL THEN 'Ki'
-                WHEN mts.best_kd_nm IS NOT NULL THEN 'Kd'
-                WHEN mts.best_ec50_nm IS NOT NULL THEN 'EC50'
-            END"""
-        else:
-            col_map = {
-                ActivityType.IC50: "best_ic50_nm",
-                ActivityType.KI: "best_ki_nm",
-                ActivityType.KD: "best_kd_nm",
-                ActivityType.EC50: "best_ec50_nm"
-            }
-            value_col = f"mts.{col_map[input.activity_type]}"
-            type_expr = f"'{input.activity_type.value}'"
+        gene_symbol = input.query.upper()
         
-        sql = f"""
+        activity_sql = """
             SELECT 
-                mts.concept_id,
-                mts.concept_name,
-                mts.representative_mol_id as mol_id,
-                mts.representative_smiles as canonical_smiles,
-                mts.target_id,
-                mts.gene_symbol,
-                mts.target_name,
-                mts.target_organism,
-                {value_col} as activity_value_nm,
-                {type_expr} as activity_type,
-                mts.best_pchembl as pchembl,
-                mts.n_total_measurements,
-                mts.data_confidence,
-                mts.sources
-            FROM dm_molecule_target_summary mts
-            WHERE mts.gene_symbol = UPPER($1)
-              AND mts.best_pchembl >= $2
+                concept_id, concept_name,
+                representative_smiles as canonical_smiles,
+                COALESCE(best_ic50_nm, best_ki_nm, best_kd_nm, best_ec50_nm) as activity_value_nm,
+                CASE 
+                    WHEN best_ic50_nm IS NOT NULL THEN 'IC50'
+                    WHEN best_ki_nm IS NOT NULL THEN 'Ki'
+                    WHEN best_kd_nm IS NOT NULL THEN 'Kd'
+                    WHEN best_ec50_nm IS NOT NULL THEN 'EC50'
+                END as activity_type,
+                best_pchembl as pchembl,
+                n_total_measurements,
+                data_confidence,
+                sources
+            FROM dm_molecule_target_summary
+            WHERE gene_symbol = $1 AND best_pchembl >= $2
+            ORDER BY best_pchembl DESC NULLS LAST
+            LIMIT $3
         """
         
-        params = [input.query, input.min_pchembl]
-        param_idx = 3
+        activity_rows = await conn.execute_query(activity_sql, gene_symbol, input.min_pchembl, input.limit)
         
-        # Activity type filter
-        if input.activity_type != ActivityType.ALL:
-            sql += f" AND mts.{col_map[input.activity_type]} IS NOT NULL"
-        
-        # Confidence filter
-        if input.min_confidence != DataConfidence.ANY:
-            if input.min_confidence == DataConfidence.HIGH:
-                sql += " AND mts.data_confidence = 'HIGH'"
-            elif input.min_confidence == DataConfidence.MEDIUM:
-                sql += " AND mts.data_confidence IN ('HIGH', 'MEDIUM')"
-        
-        sql += f" ORDER BY mts.best_pchembl DESC NULLS LAST LIMIT ${param_idx}"
-        params.append(input.limit)
-        
-        rows = await conn.execute_query(sql, *params)
-        hits = [self._row_to_drug_target_hit(r) for r in rows]
-        
-        return TargetSearchOutput(
-            status="success" if hits else "not_found",
-            mode=input.mode,
-            query_summary=f"drugs for '{input.query}'",
-            total_hits=len(hits),
-            hits=hits
-        )
-
-    # =========================================================================
-    # HANDLER: SIMILAR_MOLECULES
-    # =========================================================================
-    
-    async def _search_similar_molecules(self, input: TargetSearchInput) -> TargetSearchOutput:
-        """Find molecules similar to a query structure."""
-        conn = await self._get_conn()
-        
-        if input.include_activities:
-            sql = f"""
-                WITH query_fp AS (
-                    SELECT morganbv_fp(mol_from_smiles($1::cstring)) as fp
-                ),
-                similar_mols AS (
-                    SELECT 
-                        dm.mol_id,
-                        dm.concept_id,
-                        dm.pref_name as molecule_name,
-                        dm.canonical_smiles,
-                        dm.chembl_id,
-                        tanimoto_sml(q.fp, dm.mfp2)::float as similarity
-                    FROM dm_molecule dm
-                    CROSS JOIN query_fp q
-                    WHERE dm.mfp2 % q.fp
-                      AND tanimoto_sml(q.fp, dm.mfp2) >= $2
-                    ORDER BY similarity DESC
-                    LIMIT $3
-                )
-                SELECT DISTINCT ON (sm.mol_id, mts.gene_symbol)
-                    sm.mol_id,
-                    sm.concept_id,
-                    COALESCE(mts.concept_name, sm.molecule_name) as concept_name,
-                    sm.molecule_name,
-                    sm.canonical_smiles,
-                    sm.chembl_id,
-                    sm.similarity as tanimoto_similarity,
-                    mts.gene_symbol,
-                    mts.target_name,
-                    mts.target_organism,
-                    COALESCE(mts.best_ic50_nm, mts.best_ki_nm) as activity_value_nm,
-                    CASE WHEN mts.best_ic50_nm IS NOT NULL THEN 'IC50' ELSE 'Ki' END as activity_type,
-                    mts.best_pchembl as pchembl,
-                    mts.n_total_measurements,
-                    mts.data_confidence,
-                    mts.sources
-                FROM similar_mols sm
-                LEFT JOIN dm_molecule_target_summary mts ON sm.concept_id = mts.concept_id
-                WHERE (mts.best_pchembl >= $4 OR mts.best_pchembl IS NULL)
-                ORDER BY sm.mol_id, mts.gene_symbol, mts.best_pchembl DESC NULLS LAST
-            """
-            params = [input.smiles, input.similarity_threshold, input.limit * 3, input.min_pchembl]
-        else:
-            sql = """
-                WITH query_fp AS (
-                    SELECT morganbv_fp(mol_from_smiles($1::cstring)) as fp
-                )
-                SELECT 
-                    dm.mol_id,
-                    dm.concept_id,
-                    mc.preferred_name as concept_name,
-                    dm.pref_name as molecule_name,
-                    dm.canonical_smiles,
-                    dm.chembl_id,
-                    tanimoto_sml(q.fp, dm.mfp2)::float as tanimoto_similarity,
-                    NULL as gene_symbol,
-                    NULL as target_name,
-                    NULL as target_organism,
-                    NULL::numeric as activity_value_nm,
-                    NULL as activity_type,
-                    NULL::numeric as pchembl,
-                    NULL::int as n_total_measurements,
-                    NULL as data_confidence,
-                    NULL::text[] as sources
-                FROM dm_molecule dm
-                CROSS JOIN query_fp q
-                LEFT JOIN dm_molecule_concept mc ON dm.concept_id = mc.concept_id
-                WHERE dm.mfp2 % q.fp
-                  AND tanimoto_sml(q.fp, dm.mfp2) >= $2
-                ORDER BY tanimoto_sml(q.fp, dm.mfp2) DESC
-                LIMIT $3
-            """
-            params = [input.smiles, input.similarity_threshold, input.limit]
-        
-        rows = await conn.execute_query(sql, *params)
-        hits = [self._row_to_drug_target_hit(r) for r in rows]
-        
-        # Deduplicate and limit
-        seen = set()
-        unique_hits = []
-        for h in hits:
-            key = (h.mol_id, h.gene_symbol)
-            if key not in seen:
-                seen.add(key)
-                unique_hits.append(h)
-                if len(unique_hits) >= input.limit:
-                    break
-        
-        smiles_display = input.smiles[:40] + "..." if len(input.smiles) > 40 else input.smiles
-        
-        return TargetSearchOutput(
-            status="success" if unique_hits else "not_found",
-            mode=input.mode,
-            query_summary=f"similar to '{smiles_display}'",
-            total_hits=len(unique_hits),
-            hits=unique_hits
-        )
-
-    # =========================================================================
-    # HANDLER: EXACT_STRUCTURE
-    # =========================================================================
-    
-    async def _search_exact_structure(self, input: TargetSearchInput) -> TargetSearchOutput:
-        """Find exact structure match."""
-        conn = await self._get_conn()
-        
-        sql = """
-            SELECT 
-                dm.mol_id,
-                dm.concept_id,
-                mc.preferred_name as concept_name,
-                dm.pref_name as molecule_name,
-                dm.canonical_smiles,
-                dm.chembl_id,
-                1.0::float as tanimoto_similarity,
-                NULL as gene_symbol,
-                NULL as target_name,
-                NULL as target_organism,
-                NULL::numeric as activity_value_nm,
-                NULL as activity_type,
-                NULL::numeric as pchembl,
-                NULL::int as n_total_measurements,
-                NULL as data_confidence,
-                NULL::text[] as sources
-            FROM dm_molecule dm
-            LEFT JOIN dm_molecule_concept mc ON dm.concept_id = mc.concept_id
-            WHERE dm.inchi_key = mol_inchikey(mol_from_smiles($1::cstring))::text
+        # Mechanism lookup using GIN index on gene_symbols array
+        mechanism_sql = """
+            SELECT DISTINCT
+                concept_id, concept_name, chembl_id,
+                mechanism_of_action, action_type
+            FROM dm_drug_mechanism
+            WHERE $1 = ANY(gene_symbols)
             LIMIT $2
         """
         
-        rows = await conn.execute_query(sql, input.smiles, input.limit)
-        hits = [self._row_to_drug_target_hit(r) for r in rows]
+        mechanism_rows = await conn.execute_query(mechanism_sql, gene_symbol, input.limit)
+        
+        mechanism_lookup = {
+            r['concept_id']: (r['mechanism_of_action'], r['action_type'])
+            for r in mechanism_rows
+        }
+        
+        hits_by_concept = {}
+        
+        for r in activity_rows:
+            concept_id = r['concept_id']
+            mech = mechanism_lookup.get(concept_id, (None, None))
+            
+            hits_by_concept[concept_id] = DrugForTargetHit(
+                concept_id=concept_id,
+                concept_name=r['concept_name'],
+                canonical_smiles=r['canonical_smiles'],
+                activity_type=r['activity_type'],
+                activity_value_nm=float(r['activity_value_nm']) if r['activity_value_nm'] else None,
+                pchembl=float(r['pchembl']) if r['pchembl'] else None,
+                n_measurements=r['n_total_measurements'] or 0,
+                data_confidence=r['data_confidence'],
+                sources=r['sources'] or [],
+                mechanism_of_action=mech[0],
+                action_type=mech[1]
+            )
+        
+        for r in mechanism_rows:
+            concept_id = r['concept_id']
+            if concept_id not in hits_by_concept:
+                hits_by_concept[concept_id] = DrugForTargetHit(
+                    concept_id=concept_id,
+                    concept_name=r['concept_name'],
+                    chembl_id=r['chembl_id'],
+                    mechanism_of_action=r['mechanism_of_action'],
+                    action_type=r['action_type']
+                )
+        
+        hits = sorted(
+            hits_by_concept.values(),
+            key=lambda h: (h.pchembl is None, -(h.pchembl or 0))
+        )
         
         return TargetSearchOutput(
             status="success" if hits else "not_found",
             mode=input.mode,
-            query_summary=f"exact match for SMILES",
+            query_summary=f"drugs for '{gene_symbol}'",
             total_hits=len(hits),
-            hits=hits
+            hits=hits[:input.limit]
         )
 
     # =========================================================================
-    # HANDLER: SUBSTRUCTURE
+    # HANDLER: DRUG_PROFILE (optimized)
     # =========================================================================
     
-    # =========================================================================
-    # HANDLER: SUBSTRUCTURE
-    # =========================================================================
-    
-    async def _search_substructure(self, input: TargetSearchInput) -> TargetSearchOutput:
-        """Find molecules containing a substructure."""
+    async def _search_drug_profile(self, input: TargetSearchInput) -> TargetSearchOutput:
+        """Get complete drug profile."""
         conn = await self._get_conn()
         
-        pattern = input.effective_smarts
+        query_exact = input.query.strip()
+        query_pattern = f"%{input.query}%"
         
-        if input.include_activities:
-            # Include activity data for matched molecules
-            sql = """
-                WITH matched_mols AS (
-                    SELECT 
-                        dm.mol_id,
-                        dm.concept_id,
-                        COALESCE(mc.preferred_name, dm.pref_name, dm.chembl_id) as concept_name,
-                        dm.pref_name as molecule_name,
-                        dm.canonical_smiles,
-                        dm.chembl_id,
-                        dm.is_salt,
-                        dm.salt_form
-                    FROM dm_molecule dm
-                    LEFT JOIN dm_molecule_concept mc ON dm.concept_id = mc.concept_id
-                    WHERE dm.mol @> qmol_from_smarts($1::cstring)
-                    LIMIT $2
+        concept_sql = f"""
+            {self.CONCEPT_LOOKUP_CTE}
+            SELECT 
+                mc.concept_id,
+                mc.preferred_name as concept_name,
+                dm.canonical_smiles,
+                mc.n_forms,
+                mc.has_salt_forms,
+                (SELECT COUNT(DISTINCT nct_id) FROM map_ctgov_molecules WHERE concept_id = mc.concept_id) as n_clinical_trials,
+                (SELECT COUNT(DISTINCT gene_symbol) FROM dm_molecule_target_summary WHERE concept_id = mc.concept_id) as n_activity_targets,
+                (SELECT COUNT(*) FROM dm_drug_mechanism WHERE concept_id = mc.concept_id) as n_mechanism_targets
+            FROM matched_concepts m
+            JOIN dm_molecule_concept mc ON mc.concept_id = m.concept_id
+            JOIN dm_molecule dm ON dm.concept_id = m.concept_id AND dm.is_salt = FALSE
+            LIMIT 1
+        """
+        
+        rows = await conn.execute_query(concept_sql, query_exact, query_pattern)
+        
+        if not rows:
+            return TargetSearchOutput(
+                status="not_found",
+                mode=input.mode,
+                query_summary=f"profile for '{input.query}'"
+            )
+        
+        r = rows[0]
+        concept_id = r['concept_id']
+        
+        # Get target profile using exact name for speed
+        target_input = TargetSearchInput(
+            mode=SearchMode.TARGETS_FOR_DRUG,
+            query=r['concept_name'],
+            min_pchembl=input.min_pchembl,
+            data_source=input.data_source,
+            limit=30
+        )
+        target_results = await self._search_targets_for_drug(target_input)
+        target_profile = target_results.hits[0] if target_results.hits else None
+        
+        # Get forms
+        forms = []
+        if input.include_forms:
+            forms_sql = """
+                SELECT mol_id, pref_name, inchi_key, canonical_smiles, 
+                       is_salt, salt_form, stereo_type, chembl_id
+                FROM dm_molecule
+                WHERE concept_id = $1
+                ORDER BY is_salt, stereo_type
+                LIMIT 20
+            """
+            form_rows = await conn.execute_query(forms_sql, concept_id)
+            forms = [
+                MoleculeForm(
+                    mol_id=fr['mol_id'],
+                    form_name=fr['pref_name'],
+                    inchi_key=fr['inchi_key'],
+                    canonical_smiles=fr['canonical_smiles'],
+                    is_salt=fr['is_salt'],
+                    salt_form=fr['salt_form'],
+                    stereo_type=fr['stereo_type'],
+                    chembl_id=fr['chembl_id']
                 )
-                SELECT DISTINCT ON (mm.mol_id, mts.gene_symbol)
-                    mm.mol_id,
-                    mm.concept_id,
-                    mm.concept_name,
-                    mm.molecule_name,
-                    mm.canonical_smiles,
-                    mm.chembl_id,
-                    NULL::float as tanimoto_similarity,
-                    mts.gene_symbol,
-                    mts.target_name,
-                    mts.target_organism,
-                    COALESCE(mts.best_ic50_nm, mts.best_ki_nm, mts.best_kd_nm, mts.best_ec50_nm) as activity_value_nm,
-                    CASE 
-                        WHEN mts.best_ic50_nm IS NOT NULL THEN 'IC50'
-                        WHEN mts.best_ki_nm IS NOT NULL THEN 'Ki'
-                        WHEN mts.best_kd_nm IS NOT NULL THEN 'Kd'
-                        WHEN mts.best_ec50_nm IS NOT NULL THEN 'EC50'
-                        ELSE NULL
-                    END as activity_type,
-                    mts.best_pchembl as pchembl,
-                    mts.n_total_measurements,
-                    mts.data_confidence,
-                    mts.sources
-                FROM matched_mols mm
-                LEFT JOIN dm_molecule_target_summary mts ON mm.concept_id = mts.concept_id
-                WHERE (mts.best_pchembl >= $3 OR mts.best_pchembl IS NULL)
-                ORDER BY mm.mol_id, mts.gene_symbol, mts.best_pchembl DESC NULLS LAST
+                for fr in form_rows
+            ]
+        
+        # Get trials using concept_id directly
+        trials = []
+        if input.include_trials:
+            trial_sql = """
+                SELECT DISTINCT
+                    s.nct_id,
+                    s.brief_title as trial_title,
+                    s.overall_status as trial_status,
+                    s.phase,
+                    map.match_type,
+                    map.confidence
+                FROM map_ctgov_molecules map
+                JOIN ctgov_studies s ON map.nct_id = s.nct_id
+                WHERE map.concept_id = $1
+                ORDER BY s.nct_id DESC
+                LIMIT 10
             """
-            params = [pattern, input.limit * 5, input.min_pchembl]  # Multiply limit to account for multiple targets
-        else:
-            # Just return molecules without activity data
-            sql = """
-                SELECT 
-                    dm.mol_id,
-                    dm.concept_id,
-                    COALESCE(mc.preferred_name, dm.pref_name, dm.chembl_id, 'MOL_' || dm.mol_id::TEXT) as concept_name,
-                    dm.pref_name as molecule_name,
-                    dm.canonical_smiles,
-                    dm.chembl_id,
-                    NULL::float as tanimoto_similarity,
-                    NULL as gene_symbol,
-                    NULL as target_name,
-                    NULL as target_organism,
-                    NULL::numeric as activity_value_nm,
-                    NULL as activity_type,
-                    NULL::numeric as pchembl,
-                    NULL::int as n_total_measurements,
-                    NULL as data_confidence,
-                    NULL::text[] as sources
-                FROM dm_molecule dm
-                LEFT JOIN dm_molecule_concept mc ON dm.concept_id = mc.concept_id
-                WHERE dm.mol @> qmol_from_smarts($1::cstring)
-                LIMIT $2
-            """
-            params = [pattern, input.limit]
+            trial_rows = await conn.execute_query(trial_sql, concept_id)
+            trials = [
+                ClinicalTrialHit(
+                    nct_id=tr['nct_id'],
+                    trial_title=tr['trial_title'],
+                    trial_status=tr['trial_status'],
+                    phase=tr['phase'],
+                    concept_id=concept_id,
+                    concept_name=r['concept_name'],
+                    match_type=tr['match_type'],
+                    confidence=tr['confidence']
+                )
+                for tr in trial_rows
+            ]
         
-        rows = await conn.execute_query(sql, *params)
-        hits = [self._row_to_drug_target_hit(r) for r in rows]
-        
-        # Deduplicate if we included activities (one hit per mol_id for non-activity searches)
-        if input.include_activities:
-            seen = set()
-            unique_hits = []
-            for h in hits:
-                key = (h.mol_id, h.gene_symbol)
-                if key not in seen:
-                    seen.add(key)
-                    unique_hits.append(h)
-                    if len(unique_hits) >= input.limit:
-                        break
-            hits = unique_hits
-        
-        pattern_display = pattern[:30] + "..." if len(pattern) > 30 else pattern
+        profile = DrugProfileResult(
+            concept_id=concept_id,
+            concept_name=r['concept_name'],
+            canonical_smiles=r['canonical_smiles'],
+            n_forms=r['n_forms'] or 0,
+            has_salt_forms=r['has_salt_forms'] or False,
+            n_clinical_trials=r['n_clinical_trials'] or 0,
+            n_activity_targets=r['n_activity_targets'] or 0,
+            n_mechanism_targets=r['n_mechanism_targets'] or 0,
+            forms=forms,
+            target_profile=target_profile,
+            recent_trials=trials
+        )
         
         return TargetSearchOutput(
-            status="success" if hits else "not_found",
+            status="success",
             mode=input.mode,
-            query_summary=f"substructure '{pattern_display}'",
-            total_hits=len(hits),
-            hits=hits
+            query_summary=f"profile for '{input.query}'",
+            total_hits=1,
+            hits=[profile]
         )
 
     # =========================================================================
-    # HANDLER: TRIALS_FOR_DRUG
+    # HANDLER: TRIALS_FOR_DRUG (optimized - two-step lookup)
     # =========================================================================
     
     async def _search_trials_for_drug(self, input: TargetSearchInput) -> TargetSearchOutput:
         """Find clinical trials for a drug."""
         conn = await self._get_conn()
         
+        # Step 1: Find concept_ids efficiently
+        concept_ids = await self._find_concept_ids(conn, input.query)
+        
+        if not concept_ids:
+            return TargetSearchOutput(
+                status="not_found",
+                mode=input.mode,
+                query_summary=f"trials for '{input.query}'",
+                total_hits=0,
+                hits=[]
+            )
+        
+        # Step 2: Get trials using indexed concept_id lookup
         sql = """
             SELECT DISTINCT
                 s.nct_id,
@@ -1075,39 +1027,19 @@ class PharmacologySearch:
                 mc.concept_id,
                 mc.preferred_name as concept_name,
                 dm.pref_name as molecule_form,
-                dm.salt_form,
                 map.match_type,
                 map.confidence
-            FROM dm_molecule_concept mc
-            JOIN map_ctgov_molecules map ON map.concept_id = mc.concept_id
-            LEFT JOIN dm_molecule dm ON map.mol_id = dm.mol_id
+            FROM map_ctgov_molecules map
             JOIN ctgov_studies s ON map.nct_id = s.nct_id
-            WHERE mc.preferred_name ILIKE $1
-               OR mc.concept_id IN (
-                   SELECT DISTINCT dm2.concept_id
-                   FROM dm_molecule_synonyms dms
-                   JOIN dm_molecule dm2 ON dms.mol_id = dm2.mol_id
-                   WHERE dms.synonym_lower ILIKE LOWER($1)
-               )
+            JOIN dm_molecule_concept mc ON map.concept_id = mc.concept_id
+            LEFT JOIN dm_molecule dm ON map.mol_id = dm.mol_id
+            WHERE map.concept_id = ANY($1::bigint[])
+            ORDER BY s.nct_id DESC
+            LIMIT $2
         """
         
-        params = [f"%{input.query}%"]
-        param_idx = 2
+        rows = await conn.execute_query(sql, concept_ids, input.limit)
         
-        if input.trial_phase != TrialPhase.ANY:
-            sql += f" AND s.phase ILIKE ${param_idx}"
-            params.append(f"%{input.trial_phase.value}%")
-            param_idx += 1
-        
-        if input.trial_status:
-            sql += f" AND s.overall_status ILIKE ${param_idx}"
-            params.append(f"%{input.trial_status}%")
-            param_idx += 1
-        
-        sql += f" ORDER BY s.nct_id DESC LIMIT ${param_idx}"
-        params.append(input.limit)
-        
-        rows = await conn.execute_query(sql, *params)
         hits = [
             ClinicalTrialHit(
                 nct_id=r['nct_id'],
@@ -1117,7 +1049,6 @@ class PharmacologySearch:
                 concept_id=r['concept_id'],
                 concept_name=r['concept_name'],
                 molecule_form=r['molecule_form'],
-                salt_form=r['salt_form'],
                 match_type=r['match_type'],
                 confidence=r['confidence']
             )
@@ -1133,155 +1064,47 @@ class PharmacologySearch:
         )
 
     # =========================================================================
-    # HANDLER: DRUG_PROFILE
-    # =========================================================================
-    
-    async def _search_drug_profile(self, input: TargetSearchInput) -> TargetSearchOutput:
-        """Get complete drug profile."""
-        conn = await self._get_conn()
-        
-        # Get concept info
-        sql = """
-            SELECT DISTINCT ON (mc.concept_id)
-                mc.concept_id,
-                mc.preferred_name as concept_name,
-                mc.parent_inchi_key_14,
-                mc.n_forms,
-                (SELECT COUNT(DISTINCT stereo_id) FROM dm_molecule WHERE concept_id = mc.concept_id) as n_stereo_variants,
-                (SELECT COUNT(*) FROM dm_molecule WHERE concept_id = mc.concept_id AND is_salt = TRUE) as n_salt_forms,
-                (SELECT COUNT(DISTINCT nct_id) FROM map_ctgov_molecules WHERE concept_id = mc.concept_id) as n_clinical_trials,
-                (SELECT COUNT(DISTINCT gene_symbol) FROM dm_molecule_target_summary WHERE concept_id = mc.concept_id) as n_targets
-            FROM dm_molecule_concept mc
-            LEFT JOIN dm_molecule_synonyms dms ON mc.concept_id = (
-                SELECT dm.concept_id FROM dm_molecule dm WHERE dm.mol_id = dms.mol_id LIMIT 1
-            )
-            WHERE mc.preferred_name ILIKE $1
-               OR dms.synonym_lower ILIKE LOWER($1)
-            LIMIT 1
-        """
-        
-        rows = await conn.execute_query(sql, f"%{input.query}%")
-        
-        if not rows:
-            return TargetSearchOutput(
-                status="not_found",
-                mode=input.mode,
-                query_summary=f"profile for '{input.query}'"
-            )
-        
-        r = rows[0]
-        concept_id = r['concept_id']
-        
-        profile = DrugProfileResult(
-            concept_id=concept_id,
-            concept_name=r['concept_name'],
-            parent_inchi_key_14=r['parent_inchi_key_14'],
-            n_forms=r['n_forms'] or 0,
-            n_stereo_variants=r['n_stereo_variants'] or 0,
-            n_salt_forms=r['n_salt_forms'] or 0,
-            n_clinical_trials=r['n_clinical_trials'] or 0,
-            n_targets=r['n_targets'] or 0
-        )
-        
-        # Get top targets
-        if input.include_activities:
-            target_input = TargetSearchInput(
-                mode=SearchMode.TARGETS_FOR_DRUG,
-                query=input.query,
-                min_pchembl=input.min_pchembl,
-                limit=20
-            )
-            target_results = await self._search_targets_for_drug(target_input)
-            profile.top_targets = target_results.hits
-        
-        # Get forms
-        if input.include_forms:
-            forms_sql = """
-                SELECT mol_id, pref_name, inchi_key, canonical_smiles, 
-                       is_salt, salt_form, stereo_type, chembl_id, drugcentral_id
-                FROM dm_molecule
-                WHERE concept_id = $1
-                ORDER BY is_salt, stereo_type
-                LIMIT 50
-            """
-            form_rows = await conn.execute_query(forms_sql, concept_id)
-            profile.forms = [
-                MoleculeForm(
-                    mol_id=fr['mol_id'],
-                    form_name=fr['pref_name'],
-                    inchi_key=fr['inchi_key'],
-                    canonical_smiles=fr['canonical_smiles'],
-                    is_salt=fr['is_salt'],
-                    salt_form=fr['salt_form'],
-                    stereo_type=fr['stereo_type'],
-                    chembl_id=fr['chembl_id'],
-                    drugcentral_id=fr['drugcentral_id']
-                )
-                for fr in form_rows
-            ]
-        
-        # Get recent trials
-        if input.include_trials:
-            trial_input = TargetSearchInput(
-                mode=SearchMode.TRIALS_FOR_DRUG,
-                query=input.query,
-                limit=10
-            )
-            trial_results = await self._search_trials_for_drug(trial_input)
-            profile.recent_trials = trial_results.hits
-        
-        return TargetSearchOutput(
-            status="success",
-            mode=input.mode,
-            query_summary=f"profile for '{input.query}'",
-            total_hits=1,
-            hits=[profile]
-        )
-
-    # =========================================================================
-    # HANDLER: DRUG_FORMS
+    # HANDLER: DRUG_FORMS (optimized - two-step lookup)
     # =========================================================================
     
     async def _search_drug_forms(self, input: TargetSearchInput) -> TargetSearchOutput:
         """Find all forms of a drug."""
         conn = await self._get_conn()
         
+        # Step 1: Find concept_ids
+        concept_ids = await self._find_concept_ids(conn, input.query)
+        
+        if not concept_ids:
+            return TargetSearchOutput(
+                status="not_found",
+                mode=input.mode,
+                query_summary=f"forms of '{input.query}'",
+                total_hits=0,
+                hits=[]
+            )
+        
+        # Step 2: Get forms using indexed concept_id lookup
         sql = """
-            SELECT 
-                dm.mol_id,
-                dm.pref_name as form_name,
-                dm.inchi_key,
-                dm.canonical_smiles,
-                dm.is_salt,
-                dm.salt_form,
-                dm.stereo_type,
-                dm.chembl_id,
-                dm.drugcentral_id
-            FROM dm_molecule dm
-            JOIN dm_molecule_concept mc ON dm.concept_id = mc.concept_id
-            WHERE mc.preferred_name ILIKE $1
-               OR mc.concept_id IN (
-                   SELECT DISTINCT dm2.concept_id
-                   FROM dm_molecule_synonyms dms
-                   JOIN dm_molecule dm2 ON dms.mol_id = dm2.mol_id
-                   WHERE dms.synonym_lower ILIKE LOWER($1)
-               )
-            ORDER BY dm.is_salt, dm.stereo_type
+            SELECT mol_id, pref_name, inchi_key, canonical_smiles,
+                   is_salt, salt_form, stereo_type, chembl_id
+            FROM dm_molecule
+            WHERE concept_id = ANY($1::bigint[])
+            ORDER BY is_salt, stereo_type
             LIMIT $2
         """
         
-        rows = await conn.execute_query(sql, f"%{input.query}%", input.limit)
+        rows = await conn.execute_query(sql, concept_ids, input.limit)
+        
         hits = [
             MoleculeForm(
                 mol_id=r['mol_id'],
-                form_name=r['form_name'],
+                form_name=r['pref_name'],
                 inchi_key=r['inchi_key'],
                 canonical_smiles=r['canonical_smiles'],
                 is_salt=r['is_salt'],
                 salt_form=r['salt_form'],
                 stereo_type=r['stereo_type'],
-                chembl_id=r['chembl_id'],
-                drugcentral_id=r['drugcentral_id']
+                chembl_id=r['chembl_id']
             )
             for r in rows
         ]
@@ -1295,67 +1118,248 @@ class PharmacologySearch:
         )
 
     # =========================================================================
-    # HANDLER: COMPARE_DRUGS
+    # HANDLER: SIMILAR_MOLECULES (optimized - batch activity lookup)
     # =========================================================================
     
+    async def _search_similar_molecules(self, input: TargetSearchInput) -> TargetSearchOutput:
+        """Find molecules similar to a query structure."""
+        conn = await self._get_conn()
+        
+        # Get similar molecules
+        sql = """
+            WITH query_fp AS (
+                SELECT morganbv_fp(mol_from_smiles($1::cstring)) as fp
+            ),
+            similar_mols AS (
+                SELECT 
+                    dm.mol_id,
+                    dm.concept_id,
+                    dm.pref_name as molecule_name,
+                    dm.canonical_smiles,
+                    dm.chembl_id,
+                    tanimoto_sml(q.fp, dm.mfp2)::float as similarity
+                FROM dm_molecule dm
+                CROSS JOIN query_fp q
+                WHERE dm.mfp2 % q.fp
+                  AND tanimoto_sml(q.fp, dm.mfp2) >= $2
+                ORDER BY similarity DESC
+                LIMIT $3
+            )
+            SELECT DISTINCT ON (sm.concept_id)
+                sm.concept_id,
+                COALESCE(mc.preferred_name, sm.molecule_name) as concept_name,
+                sm.chembl_id,
+                sm.canonical_smiles,
+                sm.similarity as tanimoto_similarity
+            FROM similar_mols sm
+            LEFT JOIN dm_molecule_concept mc ON sm.concept_id = mc.concept_id
+            ORDER BY sm.concept_id, sm.similarity DESC
+        """
+        
+        rows = await conn.execute_query(sql, input.smiles, input.similarity_threshold, input.limit * 3)
+        
+        if not rows:
+            smiles_display = input.smiles[:40] + "..." if len(input.smiles) > 40 else input.smiles
+            return TargetSearchOutput(
+                status="not_found",
+                mode=input.mode,
+                query_summary=f"similar to '{smiles_display}'",
+                total_hits=0,
+                hits=[]
+            )
+        
+        # Get concept_ids for batch activity lookup
+        concept_ids = [r['concept_id'] for r in rows[:input.limit] if r['concept_id']]
+        
+        # Batch activity lookup (fixes N+1 problem)
+        activities_by_concept: dict[int, list[TargetActivity]] = {}
+        if concept_ids:
+            activity_sql = """
+                SELECT 
+                    concept_id,
+                    gene_symbol, target_name, target_organism,
+                    COALESCE(best_ic50_nm, best_ki_nm) as activity_value_nm,
+                    CASE WHEN best_ic50_nm IS NOT NULL THEN 'IC50' ELSE 'Ki' END as activity_type,
+                    best_pchembl as pchembl, n_total_measurements, data_confidence, sources
+                FROM dm_molecule_target_summary
+                WHERE concept_id = ANY($1::bigint[]) AND best_pchembl >= $2
+                ORDER BY concept_id, best_pchembl DESC NULLS LAST
+            """
+            activity_rows = await conn.execute_query(activity_sql, concept_ids, input.min_pchembl)
+            
+            for ar in activity_rows:
+                cid = ar['concept_id']
+                if cid not in activities_by_concept:
+                    activities_by_concept[cid] = []
+                if len(activities_by_concept[cid]) < 10:
+                    activities_by_concept[cid].append(
+                        TargetActivity(
+                            gene_symbol=ar['gene_symbol'],
+                            target_name=ar['target_name'],
+                            target_organism=ar['target_organism'] or "Homo sapiens",
+                            activity_type=ar['activity_type'] or "Unknown",
+                            activity_value_nm=float(ar['activity_value_nm']) if ar['activity_value_nm'] else 0,
+                            pchembl=float(ar['pchembl']) if ar['pchembl'] else None,
+                            n_measurements=ar['n_total_measurements'] or 1,
+                            data_confidence=ar['data_confidence'],
+                            sources=ar['sources'] or []
+                        )
+                    )
+        
+        # Build profiles
+        profiles = []
+        for r in rows[:input.limit]:
+            concept_id = r['concept_id']
+            activities = activities_by_concept.get(concept_id, [])
+            best_pchembl = max((a.pchembl for a in activities if a.pchembl), default=None)
+            
+            profiles.append(CompoundTargetProfile(
+                concept_id=concept_id,
+                concept_name=r['concept_name'],
+                chembl_id=r['chembl_id'],
+                canonical_smiles=r['canonical_smiles'],
+                tanimoto_similarity=r['tanimoto_similarity'],
+                activities=activities,
+                mechanisms=[],
+                n_activity_targets=len(activities),
+                best_pchembl=best_pchembl
+            ))
+        
+        # Sort by similarity
+        profiles.sort(key=lambda p: -(p.tanimoto_similarity or 0))
+        
+        smiles_display = input.smiles[:40] + "..." if len(input.smiles) > 40 else input.smiles
+        
+        return TargetSearchOutput(
+            status="success",
+            mode=input.mode,
+            query_summary=f"similar to '{smiles_display}'",
+            total_hits=len(profiles),
+            hits=profiles
+        )
+
+    # =========================================================================
+    # REMAINING HANDLERS (unchanged)
+    # =========================================================================
+    
+    async def _search_exact_structure(self, input: TargetSearchInput) -> TargetSearchOutput:
+        """Find exact structure match - uses similarity search and filters for high match."""
+        # Use default similarity threshold (0.7) for speed, but limit to 1
+        input_copy = input.model_copy()
+        input_copy.limit = 1
+        # Keep default threshold for fast index scan
+        
+        result = await self._search_similar_molecules(input_copy)
+        
+        # Check if top hit is close enough to be "exact"
+        if result.hits:
+            hit = result.hits[0]
+            if hit.tanimoto_similarity and hit.tanimoto_similarity >= 0.98:
+                # Found exact/near-exact match
+                smiles_display = input.smiles[:30] + "..." if len(input.smiles) > 30 else input.smiles
+                match_type = "exact" if hit.tanimoto_similarity >= 0.9999 else f"near-exact ({hit.tanimoto_similarity:.3f})"
+                result.mode = input.mode
+                result.query_summary = f"{match_type} match for '{smiles_display}' → {hit.concept_name}"
+                return result
+        
+        # No exact match found
+        smiles_display = input.smiles[:50] + "..." if len(input.smiles) > 50 else input.smiles
+        return TargetSearchOutput(
+            status="not_found",
+            mode=input.mode,
+            query_summary=f"exact structure '{smiles_display}'",
+            total_hits=0,
+            hits=[]
+    )
+
+    async def _search_substructure(self, input: TargetSearchInput) -> TargetSearchOutput:
+        """Find molecules containing a substructure."""
+        conn = await self._get_conn()
+        
+        pattern = input.smarts or input.smiles
+        
+        sql = """
+            SELECT DISTINCT ON (dm.concept_id)
+                dm.concept_id,
+                COALESCE(mc.preferred_name, dm.pref_name) as concept_name,
+                dm.chembl_id,
+                dm.canonical_smiles
+            FROM dm_molecule dm
+            LEFT JOIN dm_molecule_concept mc ON dm.concept_id = mc.concept_id
+            WHERE dm.mol @> qmol_from_smarts($1::cstring)
+            ORDER BY dm.concept_id
+            LIMIT $2
+        """
+        
+        rows = await conn.execute_query(sql, pattern, input.limit)
+        
+        profiles = [
+            CompoundTargetProfile(
+                concept_id=r['concept_id'],
+                concept_name=r['concept_name'],
+                chembl_id=r['chembl_id'],
+                canonical_smiles=r['canonical_smiles'],
+                activities=[],
+                mechanisms=[]
+            )
+            for r in rows
+        ]
+        
+        pattern_display = pattern[:30] + "..." if len(pattern) > 30 else pattern
+        
+        return TargetSearchOutput(
+            status="success" if profiles else "not_found",
+            mode=input.mode,
+            query_summary=f"substructure '{pattern_display}'",
+            total_hits=len(profiles),
+            hits=profiles
+        )
+
     async def _search_compare_drugs(self, input: TargetSearchInput) -> TargetSearchOutput:
         """Compare drugs on a target."""
         conn = await self._get_conn()
         
-        target = input.effective_target
-        
-        col_map = {
-            ActivityType.IC50: ("best_ic50_nm", "median_ic50_nm", "n_ic50_measurements"),
-            ActivityType.KI: ("best_ki_nm", "median_ki_nm", "n_ki_measurements"),
-            ActivityType.KD: ("best_kd_nm", "median_kd_nm", "n_kd_measurements"),
-            ActivityType.EC50: ("best_ec50_nm", "median_ec50_nm", "n_ec50_measurements"),
-        }
-        
-        act_type = input.activity_type if input.activity_type != ActivityType.ALL else ActivityType.IC50
-        best_col, median_col, count_col = col_map[act_type]
-        
+        target = input.effective_target.upper()
         drug_patterns = [f"%{name}%" for name in input.drug_names]
         
-        sql = f"""
+        sql = """
             WITH drug_data AS (
                 SELECT 
-                    mts.concept_name,
-                    mts.{best_col} as best_value,
-                    mts.{median_col} as median_value,
-                    mts.{count_col} as n_measurements,
-                    mts.data_confidence,
-                    mts.sources
-                FROM dm_molecule_target_summary mts
-                WHERE mts.gene_symbol = UPPER($1)
-                  AND mts.concept_name ILIKE ANY($2::text[])
-                  AND mts.{best_col} IS NOT NULL
+                    concept_id, concept_name,
+                    representative_smiles as canonical_smiles,
+                    COALESCE(best_ic50_nm, best_ki_nm) as activity_value_nm,
+                    CASE WHEN best_ic50_nm IS NOT NULL THEN 'IC50' ELSE 'Ki' END as activity_type,
+                    best_pchembl as pchembl,
+                    n_total_measurements,
+                    data_confidence,
+                    sources
+                FROM dm_molecule_target_summary
+                WHERE gene_symbol = $1
+                  AND concept_name ILIKE ANY($2::text[])
             ),
-            best_overall AS (
-                SELECT MIN(best_value) as min_value FROM drug_data
+            with_rank AS (
+                SELECT *,
+                       activity_value_nm / NULLIF(MIN(activity_value_nm) OVER (), 0) as fold_vs_best
+                FROM drug_data
             )
-            SELECT 
-                d.concept_name as drug_name,
-                d.best_value as activity_value_nm,
-                d.median_value as median_value_nm,
-                d.n_measurements,
-                ROUND((d.best_value / NULLIF(b.min_value, 0))::numeric, 2) as fold_vs_best,
-                d.data_confidence,
-                d.sources
-            FROM drug_data d
-            CROSS JOIN best_overall b
-            ORDER BY d.best_value ASC NULLS LAST
+            SELECT * FROM with_rank
+            ORDER BY activity_value_nm ASC NULLS LAST
         """
         
         rows = await conn.execute_query(sql, target, drug_patterns)
+        
         hits = [
-            DrugComparisonHit(
-                drug_name=r['drug_name'],
+            DrugForTargetHit(
+                concept_id=r['concept_id'],
+                concept_name=r['concept_name'],
+                canonical_smiles=r['canonical_smiles'],
+                activity_type=r['activity_type'],
                 activity_value_nm=float(r['activity_value_nm']) if r['activity_value_nm'] else None,
-                median_value_nm=float(r['median_value_nm']) if r['median_value_nm'] else None,
-                n_measurements=r['n_measurements'] or 0,
-                fold_vs_best=float(r['fold_vs_best']) if r['fold_vs_best'] else None,
+                pchembl=float(r['pchembl']) if r['pchembl'] else None,
+                n_measurements=r['n_total_measurements'] or 0,
                 data_confidence=r['data_confidence'],
-                sources=r['sources']
+                sources=r['sources'] or [],
+                selectivity_fold=float(r['fold_vs_best']) if r['fold_vs_best'] else None
             )
             for r in rows
         ]
@@ -1368,24 +1372,21 @@ class PharmacologySearch:
             hits=hits
         )
 
-    # =========================================================================
-    # HANDLER: SELECTIVE_DRUGS
-    # =========================================================================
-    
     async def _search_selective_drugs(self, input: TargetSearchInput) -> TargetSearchOutput:
-        """Find selective drugs."""
+        """Find selective drugs for a target vs off-targets."""
         conn = await self._get_conn()
         
-        target = input.effective_target
+        target = input.effective_target.upper()
+        off_targets = [g.upper() for g in input.off_targets]
         
         sql = """
             WITH on_target AS (
                 SELECT concept_id, concept_name, best_pchembl,
                        COALESCE(best_ic50_nm, best_ki_nm) as on_target_nm,
+                       representative_smiles as canonical_smiles,
                        data_confidence, sources
                 FROM dm_molecule_target_summary
-                WHERE gene_symbol = UPPER($1)
-                  AND best_pchembl >= $2
+                WHERE gene_symbol = $1 AND best_pchembl >= $2
             ),
             off_target AS (
                 SELECT concept_id, 
@@ -1395,41 +1396,35 @@ class PharmacologySearch:
                 GROUP BY concept_id
             )
             SELECT 
-                ot.concept_id,
-                ot.concept_name,
+                ot.concept_id, ot.concept_name, ot.canonical_smiles,
                 ot.best_pchembl as pchembl,
                 ot.on_target_nm as activity_value_nm,
-                oft.best_off_target_nm,
                 ROUND((oft.best_off_target_nm / NULLIF(ot.on_target_nm, 0))::numeric, 1) as selectivity_fold,
-                ot.data_confidence,
-                ot.sources
+                ot.data_confidence, ot.sources
             FROM on_target ot
             LEFT JOIN off_target oft ON ot.concept_id = oft.concept_id
             WHERE oft.best_off_target_nm IS NULL 
                OR (oft.best_off_target_nm / NULLIF(ot.on_target_nm, 0)) >= $4
             ORDER BY 
                 CASE WHEN oft.best_off_target_nm IS NULL THEN 1 ELSE 0 END,
-                (oft.best_off_target_nm / NULLIF(ot.on_target_nm, 0)) DESC NULLS LAST,
+                selectivity_fold DESC NULLS LAST,
                 ot.best_pchembl DESC
             LIMIT $5
         """
         
-        off_targets_upper = [g.upper() for g in input.off_targets]
-        rows = await conn.execute_query(
-            sql, target, input.min_pchembl, off_targets_upper, 
-            input.min_selectivity_fold, input.limit
-        )
+        rows = await conn.execute_query(sql, target, input.min_pchembl, off_targets,
+                                        input.min_selectivity_fold, input.limit)
         
         hits = [
-            DrugTargetHit(
+            DrugForTargetHit(
                 concept_id=r['concept_id'],
                 concept_name=r['concept_name'],
-                gene_symbol=target.upper(),
+                canonical_smiles=r['canonical_smiles'],
                 activity_type="IC50/Ki",
-                activity_value_nm=float(r['activity_value_nm']) if r['activity_value_nm'] else 0,
+                activity_value_nm=float(r['activity_value_nm']) if r['activity_value_nm'] else None,
                 pchembl=float(r['pchembl']) if r['pchembl'] else None,
                 data_confidence=r['data_confidence'],
-                sources=r['sources'],
+                sources=r['sources'] or [],
                 selectivity_fold=float(r['selectivity_fold']) if r['selectivity_fold'] else None
             )
             for r in rows
@@ -1438,153 +1433,24 @@ class PharmacologySearch:
         return TargetSearchOutput(
             status="success" if hits else "not_found",
             mode=input.mode,
-            query_summary=f"selective for {target} vs {', '.join(input.off_targets)}",
+            query_summary=f"selective for {target} vs {', '.join(off_targets)}",
             total_hits=len(hits),
             hits=hits
         )
 
-    # =========================================================================
-    # HANDLER: ACTIVITIES_FOR_DRUG (raw measurements)
-    # =========================================================================
-    
     async def _search_activities_for_drug(self, input: TargetSearchInput) -> TargetSearchOutput:
         """Get raw activity measurements for a drug."""
-        conn = await self._get_conn()
-        
-        sql = """
-            SELECT 
-                cta.mol_id,
-                m.concept_id,
-                cta.molecule_name,
-                m.canonical_smiles,
-                m.chembl_id,
-                cta.target_id,
-                cta.gene_symbol,
-                t.protein_name as target_name,
-                t.organism as target_organism,
-                cta.activity_value as activity_value_nm,
-                cta.activity_type,
-                cta.pchembl_value as pchembl,
-                1 as n_total_measurements,
-                NULL as data_confidence,
-                ARRAY[cta.source] as sources
-            FROM dm_compound_target_activity cta
-            JOIN dm_molecule m ON cta.mol_id = m.mol_id
-            LEFT JOIN dm_target t ON cta.target_id = t.target_id
-            WHERE (
-                cta.molecule_name ILIKE $1
-                OR m.concept_id IN (
-                    SELECT DISTINCT dm2.concept_id
-                    FROM dm_molecule_synonyms dms
-                    JOIN dm_molecule dm2 ON dms.mol_id = dm2.mol_id
-                    WHERE dms.synonym_lower ILIKE LOWER($1)
-                )
-            )
-            AND cta.pchembl_value >= $2
-        """
-        
-        params = [f"%{input.query}%", input.min_pchembl]
-        param_idx = 3
-        
-        if input.activity_type != ActivityType.ALL:
-            sql += f" AND cta.activity_type = ${param_idx}"
-            params.append(input.activity_type.value)
-            param_idx += 1
-        
-        sql += f" ORDER BY cta.pchembl_value DESC NULLS LAST LIMIT ${param_idx}"
-        params.append(input.limit)
-        
-        rows = await conn.execute_query(sql, *params)
-        hits = [self._row_to_drug_target_hit(r) for r in rows]
-        
-        return TargetSearchOutput(
-            status="success" if hits else "not_found",
-            mode=input.mode,
-            query_summary=f"activities for '{input.query}'",
-            total_hits=len(hits),
-            hits=hits
-        )
+        input_copy = input.model_copy()
+        input_copy.mode = SearchMode.TARGETS_FOR_DRUG
+        input_copy.data_source = DataSource.ACTIVITY
+        return await self._search_targets_for_drug(input_copy)
 
-    # =========================================================================
-    # HANDLER: ACTIVITIES_FOR_TARGET (raw measurements)
-    # =========================================================================
-    
     async def _search_activities_for_target(self, input: TargetSearchInput) -> TargetSearchOutput:
         """Get raw activity measurements for a target."""
-        conn = await self._get_conn()
-        
-        sql = """
-            SELECT 
-                cta.mol_id,
-                m.concept_id,
-                cta.molecule_name,
-                m.canonical_smiles,
-                m.chembl_id,
-                cta.target_id,
-                cta.gene_symbol,
-                t.protein_name as target_name,
-                t.organism as target_organism,
-                cta.activity_value as activity_value_nm,
-                cta.activity_type,
-                cta.pchembl_value as pchembl,
-                1 as n_total_measurements,
-                NULL as data_confidence,
-                ARRAY[cta.source] as sources
-            FROM dm_compound_target_activity cta
-            JOIN dm_molecule m ON cta.mol_id = m.mol_id
-            LEFT JOIN dm_target t ON cta.target_id = t.target_id
-            WHERE cta.gene_symbol = UPPER($1)
-              AND cta.pchembl_value >= $2
-        """
-        
-        params = [input.query, input.min_pchembl]
-        param_idx = 3
-        
-        if input.activity_type != ActivityType.ALL:
-            sql += f" AND cta.activity_type = ${param_idx}"
-            params.append(input.activity_type.value)
-            param_idx += 1
-        
-        sql += f" ORDER BY cta.pchembl_value DESC NULLS LAST LIMIT ${param_idx}"
-        params.append(input.limit)
-        
-        rows = await conn.execute_query(sql, *params)
-        hits = [self._row_to_drug_target_hit(r) for r in rows]
-        
-        return TargetSearchOutput(
-            status="success" if hits else "not_found",
-            mode=input.mode,
-            query_summary=f"activities for target '{input.query}'",
-            total_hits=len(hits),
-            hits=hits
-        )
-
-    # =========================================================================
-    # HELPERS
-    # =========================================================================
-    
-    def _row_to_drug_target_hit(self, r: dict) -> DrugTargetHit:
-        """Convert a database row to DrugTargetHit."""
-        return DrugTargetHit(
-            concept_id=r.get('concept_id'),
-            concept_name=r.get('concept_name'),
-            mol_id=r.get('mol_id'),
-            molecule_name=r.get('molecule_name'),
-            canonical_smiles=r.get('canonical_smiles'),
-            chembl_id=r.get('chembl_id'),
-            target_id=r.get('target_id'),
-            gene_symbol=r.get('gene_symbol') or "N/A",
-            target_name=r.get('target_name'),
-            target_organism=r.get('target_organism'),
-            activity_type=r.get('activity_type') or "N/A",
-            activity_value_nm=float(r['activity_value_nm']) if r.get('activity_value_nm') else 0,
-            pchembl=float(r['pchembl']) if r.get('pchembl') else None,
-            n_measurements=r.get('n_total_measurements'),
-            data_confidence=r.get('data_confidence'),
-            sources=r.get('sources'),
-            tanimoto_similarity=r.get('tanimoto_similarity'),
-            selectivity_fold=r.get('selectivity_fold')
-        )
+        input_copy = input.model_copy()
+        input_copy.mode = SearchMode.DRUGS_FOR_TARGET
+        input_copy.data_source = DataSource.ACTIVITY
+        return await self._search_drugs_for_target(input_copy)
 
 
 # =============================================================================

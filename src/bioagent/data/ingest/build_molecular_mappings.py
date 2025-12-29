@@ -3669,6 +3669,419 @@ def fix_placeholder_values(config: DatabaseConfig):
 
 
 # ============================================================================
+# PHASE 13: CREATE DRUG MECHANISM TABLE
+# ============================================================================
+
+def create_drug_mechanism_table(config: DatabaseConfig):
+    """
+    Create dm_drug_mechanism table from ChEMBL drug_mechanism data.
+    
+    DEDUPLICATION: One row per (concept_id, mec_id), with UniProt accessions 
+    stored as an array. This prevents explosion from protein complexes/families.
+    """
+    print("\n💊 PHASE 13: Creating Drug Mechanism Table...")
+    
+    with get_connection(config) as con:
+        with con.cursor() as cur:
+            start_time = time.time()
+            
+            # Check if drug_mechanism table exists in ChEMBL
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'drug_mechanism'
+                )
+            """)
+            if not cur.fetchone()[0]:
+                print("  ⚠️  ChEMBL drug_mechanism table not found - skipping")
+                return
+            
+            print("  🧹 Dropping existing table...")
+            cur.execute("DROP TABLE IF EXISTS dm_drug_mechanism CASCADE;")
+            con.commit()
+            
+            print("  📋 Creating dm_drug_mechanism table...")
+            cur.execute("""
+                CREATE TABLE dm_drug_mechanism (
+                    id BIGSERIAL PRIMARY KEY,
+                    
+                    -- Compound reference (our layer)
+                    concept_id BIGINT REFERENCES dm_molecule_concept(concept_id),
+                    concept_name TEXT,
+                    mol_id BIGINT REFERENCES dm_molecule(mol_id),
+                    chembl_id TEXT,
+                    
+                    -- ChEMBL mechanism identifiers
+                    mec_id BIGINT,           -- drug_mechanism primary key
+                    record_id BIGINT,        -- FK to compound_records
+                    molregno BIGINT,         -- FK to molecule_dictionary
+                    
+                    -- Mechanism of action
+                    mechanism_of_action TEXT,
+                    action_type TEXT,        -- INHIBITOR, AGONIST, ANTAGONIST, etc.
+                    mechanism_comment TEXT,
+                    selectivity_comment TEXT,
+                    binding_site_comment TEXT,
+                    
+                    -- Flags (from smallint 0/1)
+                    direct_interaction BOOLEAN,
+                    molecular_mechanism BOOLEAN,
+                    disease_efficacy BOOLEAN,
+                    
+                    -- Target info (from target_dictionary)
+                    tid BIGINT,
+                    target_chembl_id TEXT,
+                    target_name TEXT,
+                    target_type TEXT,        -- SINGLE PROTEIN, PROTEIN FAMILY, PROTEIN COMPLEX GROUP
+                    target_organism TEXT,
+                    
+                    -- Target components (aggregated as arrays)
+                    uniprot_accessions TEXT[],     -- All UniProt IDs for this target
+                    gene_symbols TEXT[],           -- All gene symbols (linked from dm_target)
+                    n_components INTEGER,          -- Number of protein components
+                    
+                    -- Reference info (from mechanism_refs) - first/best reference
+                    ref_type TEXT,
+                    ref_id TEXT,
+                    ref_url TEXT,
+                    
+                    -- Metadata
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    
+                    -- Unique: one row per concept + mechanism
+                    UNIQUE(concept_id, mec_id)
+                );
+            """)
+            con.commit()
+            
+            print("  🔄 Loading drug mechanisms from ChEMBL (deduplicated)...")
+            cur.execute("""
+                WITH raw_data AS (
+                    SELECT
+                        -- Our molecule layer
+                        dm.concept_id,
+                        mc.preferred_name as concept_name,
+                        dm.mol_id,
+                        dm.chembl_id,
+                        
+                        -- ChEMBL identifiers
+                        dmech.mec_id,
+                        dmech.record_id,
+                        dmech.molregno,
+                        
+                        -- Mechanism info
+                        dmech.mechanism_of_action,
+                        dmech.action_type,
+                        dmech.mechanism_comment,
+                        dmech.selectivity_comment,
+                        dmech.binding_site_comment,
+                        
+                        -- Flags
+                        dmech.direct_interaction,
+                        dmech.molecular_mechanism,
+                        dmech.disease_efficacy,
+                        
+                        -- Target info
+                        dmech.tid,
+                        td.chembl_id as target_chembl_id,
+                        td.pref_name as target_name,
+                        td.target_type,
+                        td.organism as target_organism,
+                        
+                        -- UniProt from component_sequences
+                        cs.accession as uniprot_accession
+                        
+                    FROM dm_molecule dm
+                    JOIN dm_molecule_concept mc ON dm.concept_id = mc.concept_id
+                    JOIN molecule_dictionary md ON dm.chembl_id = md.chembl_id
+                    JOIN drug_mechanism dmech ON md.molregno = dmech.molregno
+                    LEFT JOIN target_dictionary td ON dmech.tid = td.tid
+                    LEFT JOIN target_components tc ON td.tid = tc.tid
+                    LEFT JOIN component_sequences cs ON tc.component_id = cs.component_id
+                    WHERE dm.concept_id IS NOT NULL
+                      AND (dmech.mechanism_of_action IS NOT NULL OR dmech.action_type IS NOT NULL)
+                ),
+                
+                -- Aggregate UniProts per mechanism
+                aggregated AS (
+                    SELECT
+                        concept_id,
+                        concept_name,
+                        mol_id,
+                        chembl_id,
+                        mec_id,
+                        record_id,
+                        molregno,
+                        mechanism_of_action,
+                        action_type,
+                        mechanism_comment,
+                        selectivity_comment,
+                        binding_site_comment,
+                        direct_interaction,
+                        molecular_mechanism,
+                        disease_efficacy,
+                        tid,
+                        target_chembl_id,
+                        target_name,
+                        target_type,
+                        target_organism,
+                        -- Aggregate UniProts as array (remove NULLs and duplicates)
+                        ARRAY_AGG(DISTINCT uniprot_accession) 
+                            FILTER (WHERE uniprot_accession IS NOT NULL) as uniprot_accessions,
+                        COUNT(DISTINCT uniprot_accession) 
+                            FILTER (WHERE uniprot_accession IS NOT NULL) as n_components
+                    FROM raw_data
+                    GROUP BY 
+                        concept_id, concept_name, mol_id, chembl_id,
+                        mec_id, record_id, molregno,
+                        mechanism_of_action, action_type, mechanism_comment,
+                        selectivity_comment, binding_site_comment,
+                        direct_interaction, molecular_mechanism, disease_efficacy,
+                        tid, target_chembl_id, target_name, target_type, target_organism
+                )
+                
+                INSERT INTO dm_drug_mechanism (
+                    concept_id, concept_name, mol_id, chembl_id,
+                    mec_id, record_id, molregno,
+                    mechanism_of_action, action_type, mechanism_comment,
+                    selectivity_comment, binding_site_comment,
+                    direct_interaction, molecular_mechanism, disease_efficacy,
+                    tid, target_chembl_id, target_name, target_type, target_organism,
+                    uniprot_accessions, n_components
+                )
+                SELECT 
+                    concept_id, concept_name, mol_id, chembl_id,
+                    mec_id, record_id, molregno,
+                    mechanism_of_action, action_type, mechanism_comment,
+                    selectivity_comment, binding_site_comment,
+                    CASE WHEN direct_interaction = 1 THEN TRUE 
+                         WHEN direct_interaction = 0 THEN FALSE 
+                         ELSE NULL END,
+                    CASE WHEN molecular_mechanism = 1 THEN TRUE 
+                         WHEN molecular_mechanism = 0 THEN FALSE 
+                         ELSE NULL END,
+                    CASE WHEN disease_efficacy = 1 THEN TRUE 
+                         WHEN disease_efficacy = 0 THEN FALSE 
+                         ELSE NULL END,
+                    tid, target_chembl_id, target_name, target_type, target_organism,
+                    uniprot_accessions, n_components
+                FROM aggregated
+                ON CONFLICT (concept_id, mec_id) DO NOTHING;
+            """)
+            rows_inserted = cur.rowcount
+            con.commit()
+            
+            # Link gene symbols from dm_target for each UniProt
+            print("  🔗 Linking gene symbols from dm_target...")
+            cur.execute("""
+                UPDATE dm_drug_mechanism ddm
+                SET gene_symbols = subq.gene_symbols
+                FROM (
+                    SELECT 
+                        ddm2.id,
+                        ARRAY_AGG(DISTINCT dt.gene_symbol) 
+                            FILTER (WHERE dt.gene_symbol IS NOT NULL) as gene_symbols
+                    FROM dm_drug_mechanism ddm2
+                    CROSS JOIN LATERAL unnest(ddm2.uniprot_accessions) as uniprot
+                    LEFT JOIN dm_target dt ON uniprot = dt.uniprot_id
+                    GROUP BY ddm2.id
+                ) subq
+                WHERE ddm.id = subq.id
+                  AND subq.gene_symbols IS NOT NULL;
+            """)
+            genes_linked = cur.rowcount
+            con.commit()
+            
+            # Add mechanism references
+            print("  📚 Loading mechanism references...")
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'mechanism_refs'
+                )
+            """)
+            has_refs = cur.fetchone()[0]
+            
+            refs_added = 0
+            if has_refs:
+                cur.execute("""
+                    WITH first_ref AS (
+                        SELECT DISTINCT ON (mec_id)
+                            mec_id,
+                            ref_type,
+                            ref_id,
+                            ref_url
+                        FROM mechanism_refs
+                        ORDER BY mec_id, 
+                                 CASE WHEN ref_type = 'PUBMED' THEN 1
+                                      WHEN ref_type = 'FDA' THEN 2
+                                      WHEN ref_type = 'DailyMed' THEN 3
+                                      ELSE 4 END
+                    )
+                    UPDATE dm_drug_mechanism ddm
+                    SET 
+                        ref_type = fr.ref_type,
+                        ref_id = fr.ref_id,
+                        ref_url = fr.ref_url
+                    FROM first_ref fr
+                    WHERE ddm.mec_id = fr.mec_id
+                      AND ddm.ref_type IS NULL;
+                """)
+                refs_added = cur.rowcount
+                con.commit()
+                print(f"     ✓ References linked: {refs_added:,}")
+            
+            print("  ⚡ Creating indexes...")
+            cur.execute("""
+                CREATE INDEX idx_ddm_concept_id ON dm_drug_mechanism(concept_id);
+                CREATE INDEX idx_ddm_concept_name ON dm_drug_mechanism(concept_name);
+                CREATE INDEX idx_ddm_concept_name_trgm ON dm_drug_mechanism USING gin(concept_name gin_trgm_ops);
+                CREATE INDEX idx_ddm_mol_id ON dm_drug_mechanism(mol_id);
+                CREATE INDEX idx_ddm_mec_id ON dm_drug_mechanism(mec_id);
+                CREATE INDEX idx_ddm_action_type ON dm_drug_mechanism(action_type);
+                CREATE INDEX idx_ddm_moa ON dm_drug_mechanism(mechanism_of_action);
+                CREATE INDEX idx_ddm_moa_trgm ON dm_drug_mechanism USING gin(mechanism_of_action gin_trgm_ops);
+                CREATE INDEX idx_ddm_tid ON dm_drug_mechanism(tid);
+                CREATE INDEX idx_ddm_target_name ON dm_drug_mechanism(target_name);
+                CREATE INDEX idx_ddm_target_type ON dm_drug_mechanism(target_type);
+                CREATE INDEX idx_ddm_uniprot_arr ON dm_drug_mechanism USING gin(uniprot_accessions);
+                CREATE INDEX idx_ddm_gene_arr ON dm_drug_mechanism USING gin(gene_symbols);
+                CREATE INDEX idx_ddm_disease_efficacy ON dm_drug_mechanism(disease_efficacy) 
+                    WHERE disease_efficacy = TRUE;
+            """)
+            con.commit()
+            
+            log_audit(cur, 'PHASE_13', 'create_drug_mechanism', rows_inserted, 
+                     time.time() - start_time, 'SUCCESS')
+            con.commit()
+            
+            # Stats
+            cur.execute("""
+                SELECT 
+                    COUNT(*) as total_rows,
+                    COUNT(DISTINCT concept_id) as unique_compounds,
+                    COUNT(DISTINCT mec_id) as unique_mechanisms,
+                    COUNT(DISTINCT target_name) as unique_targets,
+                    COUNT(DISTINCT tid) as unique_tids,
+                    COUNT(DISTINCT action_type) as action_types,
+                    COUNT(DISTINCT mechanism_of_action) as unique_moas,
+                    COUNT(*) FILTER (WHERE gene_symbols IS NOT NULL AND array_length(gene_symbols, 1) > 0) as with_gene_symbols,
+                    COUNT(*) FILTER (WHERE uniprot_accessions IS NOT NULL AND array_length(uniprot_accessions, 1) > 0) as with_uniprots,
+                    COUNT(*) FILTER (WHERE direct_interaction = TRUE) as direct_interactions,
+                    COUNT(*) FILTER (WHERE molecular_mechanism = TRUE) as molecular_mechanisms,
+                    COUNT(*) FILTER (WHERE disease_efficacy = TRUE) as disease_efficacy_true,
+                    COUNT(*) FILTER (WHERE ref_type IS NOT NULL) as with_references,
+                    ROUND(AVG(n_components) FILTER (WHERE n_components > 0), 1) as avg_components
+                FROM dm_drug_mechanism
+            """)
+            stats = cur.fetchone()
+            
+            # Action type breakdown
+            cur.execute("""
+                SELECT action_type, COUNT(*) as count
+                FROM dm_drug_mechanism
+                WHERE action_type IS NOT NULL
+                GROUP BY action_type
+                ORDER BY count DESC
+                LIMIT 15
+            """)
+            action_breakdown = cur.fetchall()
+            
+            # Target type breakdown
+            cur.execute("""
+                SELECT target_type, COUNT(*) as count
+                FROM dm_drug_mechanism
+                WHERE target_type IS NOT NULL
+                GROUP BY target_type
+                ORDER BY count DESC
+                LIMIT 10
+            """)
+            target_type_breakdown = cur.fetchall()
+            
+    print(f"\n  ✅ Drug mechanism table created with {rows_inserted:,} rows")
+    print(f"     Unique compounds:       {stats[1]:,}")
+    print(f"     Unique mechanisms:      {stats[2]:,}")
+    print(f"     Unique targets:         {stats[3]:,}")
+    print(f"     Unique MOAs:            {stats[6]:,}")
+    print(f"     With gene symbols:      {stats[7]:,}")
+    print(f"     With UniProts:          {stats[8]:,}")
+    print(f"     Direct interactions:    {stats[9]:,}")
+    print(f"     Molecular mechanisms:   {stats[10]:,}")
+    print(f"     Disease efficacy:       {stats[11]:,}")
+    print(f"     With references:        {stats[12]:,}")
+    print(f"     Avg components/target:  {stats[13] or 0:.1f}")
+    
+    print(f"\n     Action Types:")
+    for action, count in action_breakdown:
+        print(f"       {action or 'NULL':<30} {count:>6,}")
+    
+    print(f"\n     Target Types:")
+    for ttype, count in target_type_breakdown:
+        print(f"       {ttype or 'NULL':<30} {count:>6,}")
+
+
+
+# ============================================================================
+# PHASE 14: index
+# ============================================================================
+
+def index_drug_mechanism_table(config: DatabaseConfig, drop_indexes: bool = False) -> None:
+    """Index the drug mechanism table."""
+    # List of indexes to drop if drop_indexes is True
+    indexes_to_drop = [
+        'idx_dms_synonym_lower_btree',
+        'idx_dms_synonym_lower_trgm',
+        'idx_dmc_preferred_name_lower',
+        'idx_dmc_preferred_name_trgm',
+        'idx_dm_concept_not_salt',
+        'idx_dms_mol_id',
+        'idx_dmts_gene_concept_activity',
+    ]
+    
+    sql = """
+        -- 1. B-tree synonym lookup
+        CREATE INDEX IF NOT EXISTS idx_dms_synonym_lower_btree 
+            ON dm_molecule_synonyms(synonym_lower);
+
+        -- 2. Trigram synonym lookup (gin for ILIKE)
+        CREATE EXTENSION IF NOT EXISTS pg_trgm;
+        CREATE INDEX IF NOT EXISTS idx_dms_synonym_lower_trgm 
+            ON dm_molecule_synonyms USING gin(synonym_lower gin_trgm_ops);
+
+        -- 3. Exact concept name lookup
+        CREATE INDEX IF NOT EXISTS idx_dmc_preferred_name_lower 
+            ON dm_molecule_concept(LOWER(preferred_name));
+
+        -- 4. Trigram concept name lookup
+        CREATE INDEX IF NOT EXISTS idx_dmc_preferred_name_trgm 
+            ON dm_molecule_concept USING gin(preferred_name gin_trgm_ops);
+
+        -- 5. Molecule by concept (non-salt only)
+        CREATE INDEX IF NOT EXISTS idx_dm_concept_not_salt 
+            ON dm_molecule(concept_id) WHERE is_salt = FALSE;
+
+        -- 6. Synonym mol_id lookup
+        CREATE INDEX IF NOT EXISTS idx_dms_mol_id 
+            ON dm_molecule_synonyms(mol_id);
+
+        -- Add composite index for selectivity queries
+        CREATE INDEX IF NOT EXISTS idx_dmts_gene_concept_activity
+            ON dm_molecule_target_summary(gene_symbol, concept_id, best_pchembl DESC NULLS LAST);
+    """
+    with get_connection(config) as con:
+        with con.cursor() as cur:
+            # Drop indexes first if requested
+            if drop_indexes:
+                for index_name in indexes_to_drop:
+                    cur.execute(f"DROP INDEX IF EXISTS {index_name};")
+            
+            # Create indexes
+            cur.execute(sql)
+            con.commit()
+
+
+
+# ============================================================================
 # DATA QUALITY CHECKS
 # ============================================================================
 
@@ -4364,7 +4777,8 @@ def ensure_schema_exists(config: DatabaseConfig):
 
 def main(full_rebuild: bool = True, skip_validation: bool = False, 
          enable_fuzzy: bool = True, fuzzy_threshold: float = 0.8,
-         from_phase: Optional[int] = None, limit: Optional[int] = None):
+         from_phase: Optional[int] = None, limit: Optional[int] = None,
+         drop_indexes: bool = False):
     """
     Run the complete molecular integration pipeline.
     
@@ -4523,6 +4937,16 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
     else:
         print("⏩ Skipping Phase 12: create_indication_functions")
 
+    if start_phase <= 13:
+        create_drug_mechanism_table(config)
+    else:
+        print("⏩ Skipping Phase 13: create_drug_mechanism_table")
+
+    if start_phase <= 14:
+        index_drug_mechanism_table(config, drop_indexes=drop_indexes)
+    else:
+        print("⏩ Skipping Phase 14: index_drug_mechanism_table")
+
     # 7. Validate (always run)
     print("\n🔍 Validating pipeline...")
     with get_connection(config) as con:
@@ -4590,6 +5014,8 @@ Phases:
  10 = link_dailymed_products      (link DailyMed FDA labels)
  11 = link_openfda_labels         (link OpenFDA labels)
  12 = create_indication_functions (indication search SQL functions)
+ 13 = create_drug_mechanism_table  (create drug mechanism table)
+ 14 = index_drug_mechanism_table   (index drug mechanism table)
 
 Fast Mode Defaults (--fast):
   - ChEMBL:      10,000 molecules
@@ -4606,8 +5032,8 @@ Fast Mode Defaults (--fast):
                         help='Maximum molecules/items to process per source')
     parser.add_argument('--incremental', action='store_true', 
                         help='Run incremental update instead of full rebuild')
-    parser.add_argument('--from-phase', type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                        help='Start from this phase (1-7), skipping earlier phases')
+    parser.add_argument('--from-phase', type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+                        help='Start from this phase (1-14), skipping earlier phases')
     parser.add_argument('--skip-validation', action='store_true',
                         help='Skip data quality validation')
     parser.add_argument('--refresh-only', action='store_true',
@@ -4620,6 +5046,8 @@ Fast Mode Defaults (--fast):
                         help='Disable fuzzy matching for clinical trials')
     parser.add_argument('--fuzzy-threshold', type=float, default=0.8,
                         help='Minimum similarity for fuzzy matches (0-1, default: 0.8)')
+    parser.add_argument('--drop-indexes', action='store_true',
+                        help='Drop all indexes before reindexing')
     
     args = parser.parse_args()
     
@@ -4653,5 +5081,6 @@ Fast Mode Defaults (--fast):
             enable_fuzzy=not args.no_fuzzy,
             fuzzy_threshold=args.fuzzy_threshold,
             from_phase=args.from_phase,
-            limit=limit
+            limit=limit,
+            drop_indexes=args.drop_indexes
         )

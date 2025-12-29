@@ -11,19 +11,22 @@ from __future__ import annotations
 import json
 import inspect
 from functools import wraps
-from typing import Any
 
 from langchain_core.tools import tool
 
 # Your existing imports
-from bioagent.data.ingest.config import DatabaseConfig, DEFAULT_CONFIG
-from bioagent.data.search.clinical_trial_searches import (
+from bioagent.data.ingest.config import DEFAULT_CONFIG
+from bioagent.data.search.clinical_trial_search import (
     ClinicalTrialsSearchInput,
     ClinicalTrialsSearchOutput,
-    SearchKind,
+    TrialSearchHit,
     clinical_trials_search_async,
+    SearchStrategy, 
+    SortField,
+    SortOrder,
+    _truncate
 )
-from bioagent.data.search.openfda_and_dailymed_searches import (
+from bioagent.data.search.openfda_and_dailymed_search import (
     DailyMedAndOpenFDAInput,
     DailyMedAndOpenFDASearchOutput,
     dailymed_and_openfda_search_async,
@@ -33,8 +36,7 @@ from bioagent.data.search.target_search import (
     TargetSearchInput,
     TargetSearchOutput,
     SearchMode,
-    ActivityType,
-    DataConfidence,
+    DataSource,
 )
 
 
@@ -344,25 +346,55 @@ def _format_pharmacology_output(output: TargetSearchOutput) -> str:
 @tool("search_clinical_trials", return_direct=False)
 @robust_unwrap_llm_inputs
 async def search_clinical_trials(
+    # === Search Queries ===
     query: str = "",
     condition: str | None = None,
     intervention: str | None = None,
     keyword: str | None = None,
     nct_ids: str | None = None,
     sponsor: str | None = None,
+    
+    # === Filters ===
     phase: str | None = None,
     status: str | None = None,
     study_type: str | None = None,
     intervention_type: str | None = None,
-    has_results: bool | None = None,
-    is_fda_regulated: bool | None = None,
+    
+    # Date filters
+    start_date_from: str | None = None,
+    start_date_to: str | None = None,
+    completion_date_from: str | None = None,
+    completion_date_to: str | None = None,
+    
+    # Enrollment filters
     min_enrollment: int | None = None,
     max_enrollment: int | None = None,
-    limit: int = 10,
+    
+    # Boolean filters
+    has_results: bool | None = None,
+    is_fda_regulated: bool | None = None,
+    
+    # === Search Options ===
+    strategy: str = "combined",
     match_all: bool = False,
+    similarity_threshold: float = 0.3,
+    
+    # === Output Options ===
+    sort_by: str = "relevance",
+    sort_order: str = "desc",
+    limit: int = 10,
+    offset: int = 0,
+    
+    # === Output Sections ===
     include_results: bool = False,
     include_adverse_events: bool = False,
     include_eligibility: bool = True,
+    include_groups: bool = True,
+    include_baseline: bool = False,
+    include_sponsors: bool = True,
+    include_countries: bool = True,
+    
+    # === Display Options ===
     brief_output: bool = False,
 ) -> str:
     """
@@ -371,65 +403,161 @@ async def search_clinical_trials(
     This tool searches over 500,000 clinical trials with flexible querying options.
     You can search by condition, intervention, keywords, sponsor, or NCT ID.
     
-    SEARCH PARAMETERS:
-    -----------------
+    ═══════════════════════════════════════════════════════════════════════════════
+    SEARCH PARAMETERS
+    ═══════════════════════════════════════════════════════════════════════════════
+    
     query: General search term. Auto-detected as NCT ID if starts with "NCT",
            otherwise treated as a condition search. For more control, use the
            specific parameters below instead.
     
-    condition: Disease or condition name (e.g., "breast cancer", "diabetes mellitus")
+    condition: Disease or condition name
+               Examples: "breast cancer", "type 2 diabetes", "EGFR-mutant NSCLC"
     
-    intervention: Drug or intervention name (e.g., "pembrolizumab", "radiation therapy")
+    intervention: Drug, therapy, or intervention name
+                  Examples: "pembrolizumab", "radiation therapy", "CABG surgery"
     
     keyword: Free-text search across titles and descriptions
+             Examples: "immunotherapy checkpoint", "first-line treatment"
     
-    nct_ids: Comma-separated NCT IDs for direct lookup (e.g., "NCT04280705,NCT03456789")
+    nct_ids: Comma-separated NCT IDs for direct lookup
+             Example: "NCT04280705, NCT03456789"
     
-    sponsor: Organization name (e.g., "Pfizer", "NIH", "Memorial Sloan Kettering")
+    sponsor: Organization or company name
+             Examples: "Pfizer", "NIH", "Memorial Sloan Kettering"
     
-    FILTER PARAMETERS:
-    -----------------
-    phase: Trial phase(s). Comma-separated. Options:
-           "Phase 1", "Phase 2", "Phase 3", "Phase 4", "Phase 1/Phase 2",
-           "Phase 2/Phase 3", "Early Phase 1", "N/A"
+    ═══════════════════════════════════════════════════════════════════════════════
+    FILTER PARAMETERS
+    ═══════════════════════════════════════════════════════════════════════════════
     
-    status: Trial status(es). Comma-separated. Options:
-            "Recruiting", "Active, not recruiting", "Completed", "Terminated",
-            "Withdrawn", "Suspended", "Not yet recruiting", "Enrolling by invitation"
+    phase: Trial phase(s), comma-separated. Options:
+           • "Phase 1", "Phase 2", "Phase 3", "Phase 4"
+           • "Phase 1/Phase 2", "Phase 2/Phase 3"
+           • "Early Phase 1", "N/A"
+           Example: "Phase 2, Phase 3"
     
-    study_type: Type of study. Options: "Interventional", "Observational", "Expanded Access"
+    status: Trial status(es), comma-separated. Options:
+            • "Recruiting" - Currently enrolling participants
+            • "Active, not recruiting" - Ongoing but not enrolling
+            • "Completed" - Study finished
+            • "Terminated" - Stopped early
+            • "Withdrawn" - Withdrawn before enrollment
+            • "Suspended" - Temporarily halted
+            • "Not yet recruiting" - Approved but not started
+            • "Enrolling by invitation" - By invitation only
+            Example: "Recruiting, Active, not recruiting"
     
-    intervention_type: Type of intervention. Comma-separated. Options:
-                       "Drug", "Biological", "Device", "Procedure", "Radiation",
-                       "Behavioral", "Dietary Supplement", "Genetic", "Other"
+    study_type: Type of study. Options:
+                • "Interventional" - Tests treatments/interventions
+                • "Observational" - Observes outcomes without intervention
+                • "Expanded Access" - Access to investigational drugs
     
-    has_results: Set to True to only find trials with posted results
+    intervention_type: Type of intervention, comma-separated. Options:
+                       • "Drug" - Pharmaceutical agents
+                       • "Biological" - Vaccines, blood products, gene therapy
+                       • "Device" - Medical devices
+                       • "Procedure" - Surgical or other procedures
+                       • "Radiation" - Radiation therapy
+                       • "Behavioral" - Behavioral interventions
+                       • "Dietary Supplement" - Vitamins, supplements
+                       • "Genetic" - Gene therapy, genetic testing
+                       • "Combination Product" - Drug-device combinations
+                       • "Other" - Other intervention types
+                       Example: "Drug, Biological"
     
-    is_fda_regulated: Set to True for FDA-regulated trials only
+    ═══════════════════════════════════════════════════════════════════════════════
+    DATE FILTERS (format: YYYY-MM-DD)
+    ═══════════════════════════════════════════════════════════════════════════════
     
-    min_enrollment: Minimum number of enrolled participants
+    start_date_from: Trials starting on or after this date
+                     Example: "2020-01-01"
     
-    max_enrollment: Maximum number of enrolled participants
+    start_date_to: Trials starting on or before this date
+                   Example: "2024-12-31"
     
-    SEARCH OPTIONS:
-    --------------
+    completion_date_from: Trials completing on or after this date
+    
+    completion_date_to: Trials completing on or before this date
+    
+    ═══════════════════════════════════════════════════════════════════════════════
+    ENROLLMENT FILTERS
+    ═══════════════════════════════════════════════════════════════════════════════
+    
+    min_enrollment: Minimum number of participants (e.g., 100)
+    
+    max_enrollment: Maximum number of participants (e.g., 5000)
+    
+    ═══════════════════════════════════════════════════════════════════════════════
+    BOOLEAN FILTERS
+    ═══════════════════════════════════════════════════════════════════════════════
+    
+    has_results: True = only trials with posted results
+                 False = only trials without results
+                 None (default) = no filter
+    
+    is_fda_regulated: True = only FDA-regulated trials
+                      False = exclude FDA-regulated trials
+                      None (default) = no filter
+    
+    ═══════════════════════════════════════════════════════════════════════════════
+    SEARCH OPTIONS
+    ═══════════════════════════════════════════════════════════════════════════════
+    
+    strategy: Search matching strategy. Options:
+              • "combined" (default) - Best of trigram + fulltext
+              • "trigram" - Fuzzy matching (handles typos)
+              • "fulltext" - Exact word matching
+              • "exact" - Exact string matching
+    
+    match_all: If True, ALL search terms must match (AND logic)
+               If False (default), ANY term can match (OR with scoring)
+    
+    similarity_threshold: Minimum similarity score (0.0-1.0, default: 0.3)
+                          Lower = more results, higher = stricter matching
+    
+    ═══════════════════════════════════════════════════════════════════════════════
+    OUTPUT OPTIONS
+    ═══════════════════════════════════════════════════════════════════════════════
+    
+    sort_by: How to sort results. Options:
+             • "relevance" (default) - By match score
+             • "start_date" - By trial start date
+             • "completion_date" - By completion date
+             • "enrollment" - By number of participants
+             • "nct_id" - By NCT ID
+    
+    sort_order: Sort direction
+                • "desc" (default) - Descending
+                • "asc" - Ascending
+    
     limit: Maximum trials to return (default: 10, max: 100)
     
-    match_all: If True, require ALL search terms to match (AND logic).
-               If False (default), match ANY term (OR logic with relevance scoring).
+    offset: Number of results to skip for pagination (default: 0)
     
-    OUTPUT OPTIONS:
-    --------------
+    ═══════════════════════════════════════════════════════════════════════════════
+    OUTPUT SECTION CONTROLS
+    ═══════════════════════════════════════════════════════════════════════════════
+    
     include_results: Include outcome results and statistical analyses (default: False)
     
     include_adverse_events: Include adverse event data (default: False)
     
     include_eligibility: Include eligibility criteria (default: True)
     
+    include_groups: Include arm/group descriptions (default: True)
+    
+    include_baseline: Include baseline measurements (default: False)
+    
+    include_sponsors: Include sponsor information (default: True)
+    
+    include_countries: Include country/location info (default: True)
+    
     brief_output: Return brief summaries instead of full details (default: False)
     
-    EXAMPLES:
-    --------
+    ═══════════════════════════════════════════════════════════════════════════════
+    EXAMPLES
+    ═══════════════════════════════════════════════════════════════════════════════
+    
     1. Find a specific trial by NCT ID:
        search_clinical_trials(nct_ids="NCT04280705")
     
@@ -458,7 +586,8 @@ async def search_clinical_trials(
            intervention="imatinib",
            status="Completed",
            has_results=True,
-           include_results=True
+           include_results=True,
+           include_adverse_events=True
        )
     
     7. Find large trials by a specific sponsor:
@@ -468,10 +597,36 @@ async def search_clinical_trials(
            phase="Phase 3"
        )
     
+    8. Find recent device trials:
+       search_clinical_trials(
+           intervention_type="Device",
+           start_date_from="2023-01-01",
+           status="Recruiting"
+       )
+    
+    9. Find biological trials for autoimmune diseases:
+       search_clinical_trials(
+           condition="rheumatoid arthritis",
+           intervention_type="Biological",
+           phase="Phase 3",
+           is_fda_regulated=True
+       )
+    
+    10. Search with pagination:
+        search_clinical_trials(
+            condition="diabetes",
+            limit=20,
+            offset=20,  # Get results 21-40
+            sort_by="enrollment",
+            sort_order="desc"
+        )
+    
     Returns:
         Formatted clinical trial information including study design,
         enrollment, outcomes, and adverse events as requested.
     """
+    from datetime import date as date_type
+    
     try:
         # Handle legacy 'query' parameter for backwards compatibility
         if query and not any([condition, intervention, keyword, nct_ids]):
@@ -479,7 +634,6 @@ async def search_clinical_trials(
             if query.upper().startswith("NCT"):
                 nct_ids = query
             else:
-                # Default to condition search
                 condition = query
         
         # Parse comma-separated NCT IDs
@@ -502,31 +656,87 @@ async def search_clinical_trials(
         if intervention_type:
             intervention_type_list = [t.strip() for t in intervention_type.split(",") if t.strip()]
         
+        # Parse dates
+        def parse_date(date_str: str | None) -> date_type | None:
+            if not date_str:
+                return None
+            try:
+                parts = date_str.strip().split("-")
+                return date_type(int(parts[0]), int(parts[1]), int(parts[2]))
+            except (ValueError, IndexError):
+                return None
+        
+        # Map string sort_by to enum
+        sort_by_map = {
+            "relevance": SortField.RELEVANCE,
+            "start_date": SortField.START_DATE,
+            "completion_date": SortField.COMPLETION_DATE,
+            "enrollment": SortField.ENROLLMENT,
+            "nct_id": SortField.NCT_ID,
+        }
+        sort_by_enum = sort_by_map.get(sort_by.lower(), SortField.RELEVANCE)
+        
+        # Map string sort_order to enum
+        sort_order_enum = SortOrder.DESC if sort_order.lower() == "desc" else SortOrder.ASC
+        
+        # Map string strategy to enum
+        strategy_map = {
+            "combined": SearchStrategy.COMBINED,
+            "trigram": SearchStrategy.TRIGRAM,
+            "fulltext": SearchStrategy.FULLTEXT,
+            "exact": SearchStrategy.EXACT,
+        }
+        strategy_enum = strategy_map.get(strategy.lower(), SearchStrategy.COMBINED)
+        
         # Build search input
         search_input = ClinicalTrialsSearchInput(
+            # Search queries
             condition=condition,
             intervention=intervention,
             keyword=keyword,
             nct_ids=nct_id_list,
             sponsor=sponsor,
+            
+            # Filters
             phase=phase_list,
             status=status_list,
             study_type=study_type,
             intervention_type=intervention_type_list,
-            has_results=has_results,
-            is_fda_regulated=is_fda_regulated,
+            
+            # Date filters
+            start_date_from=parse_date(start_date_from),
+            start_date_to=parse_date(start_date_to),
+            completion_date_from=parse_date(completion_date_from),
+            completion_date_to=parse_date(completion_date_to),
+            
+            # Enrollment filters
             min_enrollment=min_enrollment,
             max_enrollment=max_enrollment,
-            limit=min(limit, 100),
+            
+            # Boolean filters
+            has_results=has_results,
+            is_fda_regulated=is_fda_regulated,
+            
+            # Search options
+            strategy=strategy_enum,
             match_all=match_all,
+            similarity_threshold=similarity_threshold,
+            
+            # Output options
+            sort_by=sort_by_enum,
+            sort_order=sort_order_enum,
+            limit=min(limit, 100),
+            offset=offset,
             include_study_json=True,
+            
+            # Output sections
             output_eligibility=include_eligibility,
-            output_groups=True,
-            output_baseline_measurements=include_results,
+            output_groups=include_groups,
+            output_baseline_measurements=include_baseline,
             output_results=include_results,
             output_adverse_effects=include_adverse_events,
-            output_sponsors=True,
-            output_countries=True,
+            output_sponsors=include_sponsors,
+            output_countries=include_countries,
         )
         
         # Execute search
@@ -636,7 +846,7 @@ async def search_drug_labels(
 
 
 # =============================================================================
-# PHARMACOLOGY TOOLS (Drug-Target)
+# PHARMACOLOGY TOOLS (Drug-Target) - UPDATED
 # =============================================================================
 
 @tool("search_drug_targets", return_direct=False)
@@ -644,7 +854,7 @@ async def search_drug_labels(
 async def search_drug_targets(
     drug_name: str,
     min_pchembl: float = 5.0,
-    activity_type: str = "ALL",
+    data_source: str = "both",
     include_all_organisms: bool = False,
     limit: int = 50,
 ) -> str:
@@ -652,47 +862,48 @@ async def search_drug_targets(
     Find all known protein targets for a drug.
     
     Returns target proteins that the drug binds to or inhibits, with 
-    activity measurements (IC50, Ki, Kd, EC50) from ChEMBL and DrugCentral.
+    activity measurements (IC50, Ki, Kd, EC50) from ChEMBL and curated
+    mechanism of action data from DrugCentral.
     
     Args:
         drug_name: Name of the drug to search (brand name, generic, or synonym).
-            Examples: "imatinib", "Gleevec", "aspirin"
+            Examples: "imatinib", "Gleevec", "aspirin", "ab-106"
         min_pchembl: Minimum pChEMBL value (potency threshold). 
             - 5.0 = 10 μM (weak, default)
             - 6.0 = 1 μM (moderate)
             - 7.0 = 100 nM (good)
             - 8.0 = 10 nM (potent)
             - 9.0 = 1 nM (very potent)
-        activity_type: Filter by activity measurement type.
-            Options: "ALL" (default), "IC50", "Ki", "Kd", "EC50"
+        data_source: Type of target data to return.
+            - "both" (default): Activity data + curated mechanisms
+            - "activity": Only quantitative assay data (IC50, Ki, etc.)
+            - "mechanism": Only curated mechanism of action data
         include_all_organisms: If True, include targets from all species.
             Default (False) returns only human targets.
         limit: Maximum number of targets to return (default: 50).
     
     Returns:
-        List of targets with gene symbols, activity values, and data quality indicators.
+        List of targets with gene symbols, activity values, mechanisms, 
+        and data quality indicators.
     
     Examples:
         - search_drug_targets("imatinib")  # All targets of imatinib
         - search_drug_targets("aspirin", min_pchembl=6.0)  # Potent targets only
-        - search_drug_targets("erlotinib", activity_type="IC50")  # IC50 data only
+        - search_drug_targets("diazepam", data_source="mechanism")  # Mechanisms only
     """
     try:
-        # Map activity type string to enum
-        activity_map = {
-            "ALL": ActivityType.ALL,
-            "IC50": ActivityType.IC50,
-            "KI": ActivityType.KI,
-            "KD": ActivityType.KD,
-            "EC50": ActivityType.EC50,
+        data_source_map = {
+            "both": DataSource.BOTH,
+            "activity": DataSource.ACTIVITY,
+            "mechanism": DataSource.MECHANISM,
         }
-        act_type = activity_map.get(activity_type.upper(), ActivityType.ALL)
+        ds = data_source_map.get(data_source.lower(), DataSource.BOTH)
         
         search_input = TargetSearchInput(
             mode=SearchMode.TARGETS_FOR_DRUG,
             query=drug_name,
             min_pchembl=min_pchembl,
-            activity_type=act_type,
+            data_source=ds,
             include_all_organisms=include_all_organisms,
             limit=limit,
         )
@@ -710,48 +921,50 @@ async def search_drug_targets(
 async def search_target_drugs(
     gene_symbol: str,
     min_pchembl: float = 5.0,
-    activity_type: str = "ALL",
+    data_source: str = "both",
     limit: int = 50,
 ) -> str:
     """
     Find all drugs/compounds that modulate a specific protein target.
     
     Use this to discover inhibitors, agonists, or modulators of a gene/protein.
+    Returns both quantitative activity data and curated mechanism annotations.
     
     Args:
         gene_symbol: Gene symbol of the target protein.
-            Examples: "EGFR", "BCR-ABL", "JAK2", "BRAF", "CDK4"
+            Examples: "EGFR", "ABL1", "JAK2", "BRAF", "CDK4", "ROS1", "NTRK1"
         min_pchembl: Minimum pChEMBL value (potency threshold).
             - 5.0 = 10 μM (weak, default)
             - 6.0 = 1 μM (moderate)  
             - 7.0 = 100 nM (good)
             - 8.0 = 10 nM (potent)
-        activity_type: Filter by measurement type: "ALL", "IC50", "Ki", "Kd", "EC50"
+        data_source: Type of data to return.
+            - "both" (default): Activity + mechanism data
+            - "activity": Only quantitative assay data
+            - "mechanism": Only curated mechanisms
         limit: Maximum results (default: 50).
     
     Returns:
-        List of drugs/compounds with activity data against the target.
+        List of drugs/compounds with activity data and/or mechanisms.
     
     Examples:
-        - search_target_drugs("EGFR")  # All EGFR inhibitors
+        - search_target_drugs("EGFR")  # All EGFR modulators
         - search_target_drugs("JAK2", min_pchembl=7.0)  # Potent JAK2 inhibitors
-        - search_target_drugs("BRAF", activity_type="IC50")  # BRAF IC50 data
+        - search_target_drugs("ROS1", data_source="mechanism")  # Approved ROS1 drugs
     """
     try:
-        activity_map = {
-            "ALL": ActivityType.ALL,
-            "IC50": ActivityType.IC50,
-            "KI": ActivityType.KI,
-            "KD": ActivityType.KD,
-            "EC50": ActivityType.EC50,
+        data_source_map = {
+            "both": DataSource.BOTH,
+            "activity": DataSource.ACTIVITY,
+            "mechanism": DataSource.MECHANISM,
         }
-        act_type = activity_map.get(activity_type.upper(), ActivityType.ALL)
+        ds = data_source_map.get(data_source.lower(), DataSource.BOTH)
         
         search_input = TargetSearchInput(
             mode=SearchMode.DRUGS_FOR_TARGET,
             query=gene_symbol.upper(),
             min_pchembl=min_pchembl,
-            activity_type=act_type,
+            data_source=ds,
             limit=limit,
         )
         
@@ -769,7 +982,6 @@ async def search_similar_molecules(
     smiles: str,
     similarity_threshold: float = 0.7,
     min_pchembl: float = 5.0,
-    include_activities: bool = True,
     limit: int = 50,
 ) -> str:
     """
@@ -788,15 +1000,14 @@ async def search_similar_molecules(
             - 0.85 = close analogs
             - 0.95 = very similar (stereoisomers, salts)
         min_pchembl: Minimum potency for activity data (default: 5.0).
-        include_activities: If True, include target activity data for similar molecules.
         limit: Maximum results (default: 50).
     
     Returns:
-        List of similar molecules with similarity scores and optional activity data.
+        List of similar molecules with similarity scores and activity data.
     
     Examples:
         - search_similar_molecules("CCO", similarity_threshold=0.5)  # Ethanol analogs
-        - search_similar_molecules(imatinib_smiles, similarity_threshold=0.7)
+        - search_similar_molecules(imatinib_smiles, similarity_threshold=0.85)
     """
     try:
         search_input = TargetSearchInput(
@@ -804,7 +1015,6 @@ async def search_similar_molecules(
             smiles=smiles,
             similarity_threshold=similarity_threshold,
             min_pchembl=min_pchembl,
-            include_activities=include_activities,
             limit=limit,
         )
         
@@ -816,12 +1026,48 @@ async def search_similar_molecules(
         return f"Error searching similar molecules: {type(e).__name__}: {e}"
 
 
+@tool("search_exact_structure", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_exact_structure(
+    smiles: str,
+    min_pchembl: float = 5.0,
+) -> str:
+    """
+    Find an exact structure match for a molecule.
+    
+    Use this when you have a SMILES and want to identify the compound
+    and retrieve its target activity and mechanism data.
+    
+    Args:
+        smiles: SMILES string of the molecule to identify.
+        min_pchembl: Minimum potency for activity data (default: 5.0).
+    
+    Returns:
+        Compound identification with activity and mechanism data if found.
+    
+    Examples:
+        - search_exact_structure("CC(=O)Oc1ccccc1C(=O)O")  # Identify aspirin
+        - search_exact_structure("Cc1nc(CNC(=O)NC2CCN(c3ncccc3Cl)C2)oc1C")
+    """
+    try:
+        search_input = TargetSearchInput(
+            mode=SearchMode.EXACT_STRUCTURE,
+            smiles=smiles,
+            min_pchembl=min_pchembl,
+        )
+        
+        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+    
+    except Exception as e:
+        return f"Error in exact structure search: {type(e).__name__}: {e}"
+
+
 @tool("search_substructure", return_direct=False)
 @robust_unwrap_llm_inputs
 async def search_substructure(
     pattern: str,
-    min_pchembl: float = 5.0,
-    include_activities: bool = True,
     limit: int = 50,
 ) -> str:
     """
@@ -830,14 +1076,15 @@ async def search_substructure(
     Use SMILES or SMARTS patterns to find compounds with specific 
     chemical features (e.g., a particular ring system, functional group).
     
+    Note: This search can be slow for very common substructures.
+    
     Args:
         pattern: SMILES or SMARTS pattern to search for.
             Examples:
             - "c1ccccc1" (benzene ring)
             - "C(=O)N" (amide)
+            - "c1ccc2[nH]ccc2c1" (indole)
             - "[#7]1~[#6]~[#6]~[#7]~[#6]~[#6]1" (pyrimidine SMARTS)
-        min_pchembl: Minimum potency for activity data (default: 5.0).
-        include_activities: If True, include target activity data.
         limit: Maximum results (default: 50).
     
     Returns:
@@ -851,8 +1098,6 @@ async def search_substructure(
         search_input = TargetSearchInput(
             mode=SearchMode.SUBSTRUCTURE,
             smarts=pattern,
-            min_pchembl=min_pchembl,
-            include_activities=include_activities,
             limit=limit,
         )
         
@@ -868,7 +1113,6 @@ async def search_substructure(
 @robust_unwrap_llm_inputs
 async def get_drug_profile(
     drug_name: str,
-    include_targets: bool = True,
     include_trials: bool = True,
     include_forms: bool = True,
     min_pchembl: float = 5.0,
@@ -879,12 +1123,12 @@ async def get_drug_profile(
     Returns aggregated information including:
     - All molecular forms (salts, stereoisomers)
     - Known protein targets with activity data
+    - Curated mechanism of action
     - Associated clinical trials
-    - Chemical identifiers
+    - Chemical identifiers (ChEMBL ID, SMILES)
     
     Args:
         drug_name: Name of the drug (brand, generic, or synonym).
-        include_targets: Include target activity data (default: True).
         include_trials: Include clinical trial associations (default: True).
         include_forms: Include all salt/stereo forms (default: True).
         min_pchembl: Minimum potency for target data (default: 5.0).
@@ -894,13 +1138,12 @@ async def get_drug_profile(
     
     Examples:
         - get_drug_profile("imatinib")
-        - get_drug_profile("Keytruda", include_trials=True)
+        - get_drug_profile("aspirin", include_trials=False)
     """
     try:
         search_input = TargetSearchInput(
             mode=SearchMode.DRUG_PROFILE,
             query=drug_name,
-            include_activities=include_targets,
             include_trials=include_trials,
             include_forms=include_forms,
             min_pchembl=min_pchembl,
@@ -914,12 +1157,88 @@ async def get_drug_profile(
         return f"Error getting drug profile: {type(e).__name__}: {e}"
 
 
+@tool("get_drug_forms", return_direct=False)
+@robust_unwrap_llm_inputs
+async def get_drug_forms(
+    drug_name: str,
+    limit: int = 50,
+) -> str:
+    """
+    Get all molecular forms of a drug (salts, stereoisomers, etc.).
+    
+    Use this to see all registered forms of a drug substance,
+    including different salt forms and stereochemical variants.
+    
+    Args:
+        drug_name: Name of the drug (brand, generic, or synonym).
+        limit: Maximum results (default: 50).
+    
+    Returns:
+        List of all molecular forms with identifiers and SMILES.
+    
+    Examples:
+        - get_drug_forms("imatinib")  # Shows imatinib mesylate, etc.
+        - get_drug_forms("metformin")  # Shows metformin HCl, etc.
+    """
+    try:
+        search_input = TargetSearchInput(
+            mode=SearchMode.DRUG_FORMS,
+            query=drug_name,
+            limit=limit,
+        )
+        
+        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+    
+    except Exception as e:
+        return f"Error getting drug forms: {type(e).__name__}: {e}"
+
+
+@tool("search_drug_trials", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_drug_trials(
+    drug_name: str,
+    limit: int = 50,
+) -> str:
+    """
+    Find clinical trials for a drug.
+    
+    Searches ClinicalTrials.gov for trials involving the specified drug.
+    Works for both small molecules and biologics.
+    
+    Args:
+        drug_name: Name of the drug (brand, generic, or synonym).
+            Examples: "imatinib", "pembrolizumab", "Keytruda"
+        limit: Maximum results (default: 50).
+    
+    Returns:
+        List of clinical trials with NCT IDs, titles, phases, and status.
+    
+    Examples:
+        - search_drug_trials("imatinib")
+        - search_drug_trials("pembrolizumab")
+    """
+    try:
+        search_input = TargetSearchInput(
+            mode=SearchMode.TRIALS_FOR_DRUG,
+            query=drug_name,
+            limit=limit,
+        )
+        
+        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+    
+    except Exception as e:
+        return f"Error searching drug trials: {type(e).__name__}: {e}"
+
+
 @tool("compare_drugs_on_target", return_direct=False)
 @robust_unwrap_llm_inputs
 async def compare_drugs_on_target(
     target: str,
     drug_names: list[str] | str,
-    activity_type: str = "IC50",
 ) -> str:
     """
     Compare multiple drugs' activity against a single target.
@@ -928,11 +1247,9 @@ async def compare_drugs_on_target(
     against the same protein target.
     
     Args:
-        target: Gene symbol of the target (e.g., "EGFR", "BCR-ABL").
+        target: Gene symbol of the target (e.g., "EGFR", "ABL1").
         drug_names: List of drug names to compare.
             Examples: ["imatinib", "dasatinib", "nilotinib"]
-        activity_type: Measurement type for comparison.
-            Options: "IC50" (default), "Ki", "Kd", "EC50"
     
     Returns:
         Comparison table showing relative potency and fold-differences.
@@ -942,23 +1259,13 @@ async def compare_drugs_on_target(
         - compare_drugs_on_target("EGFR", ["erlotinib", "gefitinib", "osimertinib"])
     """
     try:
-        # Normalize drug_names to list
         if isinstance(drug_names, str):
             drug_names = [drug_names]
-        
-        activity_map = {
-            "IC50": ActivityType.IC50,
-            "KI": ActivityType.KI,
-            "KD": ActivityType.KD,
-            "EC50": ActivityType.EC50,
-        }
-        act_type = activity_map.get(activity_type.upper(), ActivityType.IC50)
         
         search_input = TargetSearchInput(
             mode=SearchMode.COMPARE_DRUGS,
             target=target.upper(),
             drug_names=drug_names,
-            activity_type=act_type,
         )
         
         searcher = PharmacologySearch(DEFAULT_CONFIG)
@@ -1000,9 +1307,9 @@ async def search_selective_drugs(
     Examples:
         - search_selective_drugs("JAK2", ["JAK1", "JAK3"])  # JAK2-selective
         - search_selective_drugs("CDK4", ["CDK6"], min_selectivity_fold=100)
+        - search_selective_drugs("EGFR", ["ERBB2", "ERBB4"])  # EGFR-selective
     """
     try:
-        # Normalize off_targets to list
         if isinstance(off_targets, str):
             off_targets = [off_targets]
         
