@@ -1,0 +1,1044 @@
+# dbsearch.py
+"""
+Biomedical research tools for LangChain/LangGraph agents.
+
+Exposes clinical trials, drug labels, and pharmacology data through
+LLM-friendly interfaces with flat parameters and formatted outputs.
+"""
+
+from __future__ import annotations
+
+import json
+import inspect
+from functools import wraps
+from typing import Any
+
+from langchain_core.tools import tool
+
+# Your existing imports
+from bioagent.data.ingest.config import DatabaseConfig, DEFAULT_CONFIG
+from bioagent.data.search.clinical_trial_searches import (
+    ClinicalTrialsSearchInput,
+    ClinicalTrialsSearchOutput,
+    SearchKind,
+    clinical_trials_search_async,
+)
+from bioagent.data.search.openfda_and_dailymed_searches import (
+    DailyMedAndOpenFDAInput,
+    DailyMedAndOpenFDASearchOutput,
+    dailymed_and_openfda_search_async,
+)
+from bioagent.data.search.target_search import (
+    PharmacologySearch,
+    TargetSearchInput,
+    TargetSearchOutput,
+    SearchMode,
+    ActivityType,
+    DataConfidence,
+)
+
+
+# =============================================================================
+# DECORATOR
+# =============================================================================
+
+def robust_unwrap_llm_inputs(func):
+    """
+    Decorator to normalize LLM outputs into Python types.
+    
+    Handles:
+    - JSON strings: '["a", "b"]' → ["a", "b"]
+    - Null strings: "null", "None" → None
+    - Wrapped dicts: {"value": [...]} → [...]
+    - Single values: "aspirin" → ["aspirin"] (when list expected)
+    """
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        def process_value(value, param_name=None):
+            if value is None:
+                return None
+            
+            # Unwrap {"value": ...} or {"type": ..., "value": ...}
+            if isinstance(value, dict) and "value" in value:
+                value = value["value"]
+                return process_value(value, param_name)
+            
+            # Handle string representations
+            if isinstance(value, str):
+                stripped = value.strip().lower()
+                
+                # Null-like strings
+                if stripped in ("null", "none", ""):
+                    return None
+                
+                # JSON arrays/objects
+                if value.strip().startswith(("[", "{")):
+                    try:
+                        return json.loads(value)
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Boolean strings
+                if stripped == "true":
+                    return True
+                if stripped == "false":
+                    return False
+                
+                # Return as-is
+                return value
+            
+            return value
+
+        processed_kwargs = {k: process_value(v, k) for k, v in kwargs.items()}
+        
+        if inspect.iscoroutinefunction(func):
+            return await func(*args, **processed_kwargs)
+        return func(*args, **processed_kwargs)
+
+    return wrapper
+
+
+# =============================================================================
+# OUTPUT FORMATTERS
+# =============================================================================
+
+def _format_hit_brief(hit: TrialSearchHit, index: int) -> str:
+    """Format a single hit as a brief summary (for list view)."""
+    lines = [
+        f"[{index}] {hit.nct_id} (score: {hit.score:.2f})",
+        f"    Title: {_truncate(hit.brief_title, 80)}",
+        f"    Phase: {hit.phase_display} | Status: {hit.status_display}",
+    ]
+    
+    if hit.enrollment:
+        lines.append(f"    Enrollment: {hit.enrollment:,}")
+    
+    if hit.lead_sponsor:
+        lines.append(f"    Sponsor: {_truncate(hit.lead_sponsor, 50)}")
+    
+    if hit.conditions:
+        conds = ", ".join(hit.conditions[:3])
+        if len(hit.conditions) > 3:
+            conds += f" (+{len(hit.conditions) - 3} more)"
+        lines.append(f"    Conditions: {conds}")
+    
+    if hit.interventions:
+        intv = ", ".join(hit.interventions[:3])
+        if len(hit.interventions) > 3:
+            intv += f" (+{len(hit.interventions) - 3} more)"
+        lines.append(f"    Interventions: {intv}")
+    
+    if hit.match_reasons:
+        lines.append(f"    Matched on: {', '.join(hit.match_reasons)}")
+    
+    return "\n".join(lines)
+
+
+def _format_hit_full(hit: TrialSearchHit, index: int) -> str:
+    """Format a single hit with full details including rendered summary."""
+    lines = [
+        f"[{index}] {hit.nct_id} (score: {hit.score:.2f})",
+        "=" * 60,
+    ]
+    
+    if hit.rendered_summary:
+        lines.append(hit.rendered_summary)
+    else:
+        # Fallback if no rendered summary
+        lines.append(f"Title: {hit.brief_title}")
+        lines.append(f"Phase: {hit.phase_display} | Status: {hit.status_display}")
+        if hit.enrollment:
+            lines.append(f"Enrollment: {hit.enrollment:,}")
+        if hit.start_date:
+            lines.append(f"Start Date: {hit.start_date}")
+        if hit.completion_date:
+            lines.append(f"Completion Date: {hit.completion_date}")
+        if hit.lead_sponsor:
+            lines.append(f"Sponsor: {hit.lead_sponsor}")
+        if hit.conditions:
+            lines.append(f"Conditions: {', '.join(hit.conditions)}")
+        if hit.interventions:
+            lines.append(f"Interventions: {', '.join(hit.interventions)}")
+        if hit.countries:
+            lines.append(f"Countries: {', '.join(hit.countries)}")
+    
+    return "\n".join(lines)
+
+
+def _format_clinical_trials_output(
+    output: ClinicalTrialsSearchOutput,
+    brief: bool = False,
+) -> str:
+    """
+    Format clinical trials search results for LLM consumption.
+    
+    Args:
+        output: The search output
+        brief: If True, show brief summaries; if False, show full details
+    """
+    if output.status == "error":
+        return f"❌ Search failed: {output.error}"
+    
+    if output.status == "not_found" or not output.hits:
+        return (
+            "🔍 No clinical trials found matching your criteria.\n\n"
+            "Suggestions:\n"
+            "- Try broader search terms\n"
+            "- Check spelling of condition/drug names\n"
+            "- Remove some filters to expand results"
+        )
+    
+    lines = [
+        f"✅ Found {output.total_hits} clinical trial(s)",
+        f"Query: {output.query_summary}",
+    ]
+    
+    if output.filters_applied:
+        lines.append(f"Filters: {', '.join(output.filters_applied)}")
+    
+    if output.has_more:
+        lines.append(f"(Showing {len(output.hits)} of {output.total_hits} - more available)")
+    
+    lines.append("=" * 60)
+    
+    for i, hit in enumerate(output.hits, 1):
+        lines.append("")
+        if brief:
+            lines.append(_format_hit_brief(hit, i))
+        else:
+            lines.append(_format_hit_full(hit, i))
+    
+    return "\n".join(lines)
+
+def _format_drug_labels_output(output: DailyMedAndOpenFDASearchOutput) -> str:
+    """Format drug label search results for LLM consumption."""
+    if output.status == "error":
+        return f"Search failed: {output.error}"
+    
+    if output.status == "not_found" or not output.results:
+        return "No drug information found. Try different drug names or search terms."
+    
+    lines = [
+        f"Found information for {len(output.results)} drug(s):",
+        "=" * 40,
+    ]
+    
+    for result in output.results:
+        lines.append(f"\n--- {result.product_name} ---")
+        
+        if result.properties and result.properties.name:
+            p = result.properties
+            lines.append(f"  Official Name: {p.name}")
+            if p.formula:
+                lines.append(f"  Formula: {p.formula}")
+            if p.smiles:
+                lines.append(f"  SMILES: {p.smiles}")
+        
+        if not result.sections:
+            lines.append("  No matching sections found.")
+            continue
+        
+        lines.append(f"\n  Label Sections ({len(result.sections)}):")
+        for section in result.sections:
+            text = " ".join(section.text.strip().split())
+            # Truncate very long sections
+            if len(text) > 1000:
+                text = text[:1000] + "... [truncated]"
+            lines.append(f"\n  [{section.section_name}] (source: {section.source})")
+            lines.append(f"    {text}")
+    
+    return "\n".join(lines)
+
+
+def _format_pharmacology_output(output: TargetSearchOutput) -> str:
+    """Format pharmacology search results for LLM consumption."""
+    if output.status == "error":
+        return f"Search failed: {output.error}"
+    
+    if output.status == "invalid_input":
+        return f"Invalid search parameters: {output.error}"
+    
+    if output.status == "not_found" or not output.hits:
+        return f"No results found for: {output.query_summary}. Try different search terms or lower the potency threshold."
+    
+    lines = [
+        f"Search: {output.query_summary}",
+        f"Found {output.total_hits} result(s):",
+        "=" * 40,
+    ]
+    
+    for warning in output.warnings:
+        lines.append(f"⚠ {warning}")
+    
+    for i, hit in enumerate(output.hits[:50], 1):  # Limit output
+        # Handle different hit types
+        if hasattr(hit, "gene_symbol") and hasattr(hit, "pchembl"):
+            # DrugTargetHit
+            name = hit.concept_name or hit.molecule_name or hit.chembl_id or f"MOL_{hit.mol_id}"
+            target = hit.gene_symbol if hit.gene_symbol != "N/A" else ""
+            
+            parts = [f"[{i}] {name}"]
+            if target:
+                parts.append(f"→ {target}")
+            if hit.pchembl:
+                parts.append(f"| pChEMBL: {hit.pchembl:.2f}")
+            if hit.activity_value_nm and hit.activity_value_nm > 0:
+                parts.append(f"({hit.activity_type}: {hit.activity_value_nm:.1f} nM)")
+            if hit.tanimoto_similarity:
+                parts.append(f"[similarity: {hit.tanimoto_similarity:.2f}]")
+            if hit.selectivity_fold:
+                parts.append(f"[selectivity: {hit.selectivity_fold:.1f}x]")
+            
+            lines.append(" ".join(parts))
+            
+            if hit.canonical_smiles:
+                smiles_preview = hit.canonical_smiles[:60] + "..." if len(hit.canonical_smiles) > 60 else hit.canonical_smiles
+                lines.append(f"    SMILES: {smiles_preview}")
+        
+        elif hasattr(hit, "nct_id"):
+            # ClinicalTrialHit
+            lines.append(f"[{i}] {hit.nct_id} | {hit.phase or 'N/A'} | {hit.trial_status or 'N/A'}")
+            lines.append(f"    {hit.trial_title[:100]}...")
+        
+        elif hasattr(hit, "fold_vs_best"):
+            # DrugComparisonHit
+            val = f"{hit.activity_value_nm:.1f} nM" if hit.activity_value_nm else "N/A"
+            fold = f"{hit.fold_vs_best:.1f}x" if hit.fold_vs_best else "best"
+            lines.append(f"[{i}] {hit.drug_name}: {val} (vs best: {fold}, n={hit.n_measurements})")
+        
+        elif hasattr(hit, "form_name"):
+            # MoleculeForm
+            name = hit.form_name or hit.chembl_id or f"MOL_{hit.mol_id}"
+            salt = f" ({hit.salt_form})" if hit.salt_form else ""
+            lines.append(f"[{i}] {name}{salt}")
+            if hit.canonical_smiles:
+                lines.append(f"    SMILES: {hit.canonical_smiles[:60]}...")
+        
+        elif hasattr(hit, "n_targets"):
+            # DrugProfileResult
+            lines.append(f"\nDrug Profile: {hit.concept_name}")
+            lines.append(f"  - Forms: {hit.n_forms} ({hit.n_salt_forms} salts, {hit.n_stereo_variants} stereoisomers)")
+            lines.append(f"  - Known targets: {hit.n_targets}")
+            lines.append(f"  - Clinical trials: {hit.n_clinical_trials}")
+            
+            if hit.top_targets:
+                lines.append("  - Top targets by potency:")
+                for t in hit.top_targets[:5]:
+                    val = f"{t.activity_value_nm:.1f} nM" if t.activity_value_nm else "N/A"
+                    lines.append(f"      • {t.gene_symbol}: {val}")
+        
+        else:
+            # Fallback
+            lines.append(f"[{i}] {hit}")
+    
+    if output.total_hits > 50:
+        lines.append(f"\n... and {output.total_hits - 50} more results (truncated)")
+    
+    return "\n".join(lines)
+
+
+# =============================================================================
+# CLINICAL TRIALS TOOLS
+# =============================================================================
+
+@tool("search_clinical_trials", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_clinical_trials(
+    query: str = "",
+    condition: str | None = None,
+    intervention: str | None = None,
+    keyword: str | None = None,
+    nct_ids: str | None = None,
+    sponsor: str | None = None,
+    phase: str | None = None,
+    status: str | None = None,
+    study_type: str | None = None,
+    intervention_type: str | None = None,
+    has_results: bool | None = None,
+    is_fda_regulated: bool | None = None,
+    min_enrollment: int | None = None,
+    max_enrollment: int | None = None,
+    limit: int = 10,
+    match_all: bool = False,
+    include_results: bool = False,
+    include_adverse_events: bool = False,
+    include_eligibility: bool = True,
+    brief_output: bool = False,
+) -> str:
+    """
+    Search ClinicalTrials.gov for clinical studies.
+    
+    This tool searches over 500,000 clinical trials with flexible querying options.
+    You can search by condition, intervention, keywords, sponsor, or NCT ID.
+    
+    SEARCH PARAMETERS:
+    -----------------
+    query: General search term. Auto-detected as NCT ID if starts with "NCT",
+           otherwise treated as a condition search. For more control, use the
+           specific parameters below instead.
+    
+    condition: Disease or condition name (e.g., "breast cancer", "diabetes mellitus")
+    
+    intervention: Drug or intervention name (e.g., "pembrolizumab", "radiation therapy")
+    
+    keyword: Free-text search across titles and descriptions
+    
+    nct_ids: Comma-separated NCT IDs for direct lookup (e.g., "NCT04280705,NCT03456789")
+    
+    sponsor: Organization name (e.g., "Pfizer", "NIH", "Memorial Sloan Kettering")
+    
+    FILTER PARAMETERS:
+    -----------------
+    phase: Trial phase(s). Comma-separated. Options:
+           "Phase 1", "Phase 2", "Phase 3", "Phase 4", "Phase 1/Phase 2",
+           "Phase 2/Phase 3", "Early Phase 1", "N/A"
+    
+    status: Trial status(es). Comma-separated. Options:
+            "Recruiting", "Active, not recruiting", "Completed", "Terminated",
+            "Withdrawn", "Suspended", "Not yet recruiting", "Enrolling by invitation"
+    
+    study_type: Type of study. Options: "Interventional", "Observational", "Expanded Access"
+    
+    intervention_type: Type of intervention. Comma-separated. Options:
+                       "Drug", "Biological", "Device", "Procedure", "Radiation",
+                       "Behavioral", "Dietary Supplement", "Genetic", "Other"
+    
+    has_results: Set to True to only find trials with posted results
+    
+    is_fda_regulated: Set to True for FDA-regulated trials only
+    
+    min_enrollment: Minimum number of enrolled participants
+    
+    max_enrollment: Maximum number of enrolled participants
+    
+    SEARCH OPTIONS:
+    --------------
+    limit: Maximum trials to return (default: 10, max: 100)
+    
+    match_all: If True, require ALL search terms to match (AND logic).
+               If False (default), match ANY term (OR logic with relevance scoring).
+    
+    OUTPUT OPTIONS:
+    --------------
+    include_results: Include outcome results and statistical analyses (default: False)
+    
+    include_adverse_events: Include adverse event data (default: False)
+    
+    include_eligibility: Include eligibility criteria (default: True)
+    
+    brief_output: Return brief summaries instead of full details (default: False)
+    
+    EXAMPLES:
+    --------
+    1. Find a specific trial by NCT ID:
+       search_clinical_trials(nct_ids="NCT04280705")
+    
+    2. Search by condition:
+       search_clinical_trials(condition="non-small cell lung cancer")
+    
+    3. Search by drug:
+       search_clinical_trials(intervention="pembrolizumab")
+    
+    4. Combined search (trials for a specific drug in a specific condition):
+       search_clinical_trials(
+           condition="melanoma",
+           intervention="nivolumab",
+           match_all=True
+       )
+    
+    5. Find recruiting Phase 3 trials:
+       search_clinical_trials(
+           condition="breast cancer",
+           phase="Phase 3",
+           status="Recruiting"
+       )
+    
+    6. Find completed trials with results:
+       search_clinical_trials(
+           intervention="imatinib",
+           status="Completed",
+           has_results=True,
+           include_results=True
+       )
+    
+    7. Find large trials by a specific sponsor:
+       search_clinical_trials(
+           sponsor="Merck",
+           min_enrollment=500,
+           phase="Phase 3"
+       )
+    
+    Returns:
+        Formatted clinical trial information including study design,
+        enrollment, outcomes, and adverse events as requested.
+    """
+    try:
+        # Handle legacy 'query' parameter for backwards compatibility
+        if query and not any([condition, intervention, keyword, nct_ids]):
+            query = query.strip()
+            if query.upper().startswith("NCT"):
+                nct_ids = query
+            else:
+                # Default to condition search
+                condition = query
+        
+        # Parse comma-separated NCT IDs
+        nct_id_list = None
+        if nct_ids:
+            nct_id_list = [n.strip().upper() for n in nct_ids.split(",") if n.strip()]
+        
+        # Parse comma-separated phases
+        phase_list = None
+        if phase:
+            phase_list = [p.strip() for p in phase.split(",") if p.strip()]
+        
+        # Parse comma-separated statuses
+        status_list = None
+        if status:
+            status_list = [s.strip() for s in status.split(",") if s.strip()]
+        
+        # Parse comma-separated intervention types
+        intervention_type_list = None
+        if intervention_type:
+            intervention_type_list = [t.strip() for t in intervention_type.split(",") if t.strip()]
+        
+        # Build search input
+        search_input = ClinicalTrialsSearchInput(
+            condition=condition,
+            intervention=intervention,
+            keyword=keyword,
+            nct_ids=nct_id_list,
+            sponsor=sponsor,
+            phase=phase_list,
+            status=status_list,
+            study_type=study_type,
+            intervention_type=intervention_type_list,
+            has_results=has_results,
+            is_fda_regulated=is_fda_regulated,
+            min_enrollment=min_enrollment,
+            max_enrollment=max_enrollment,
+            limit=min(limit, 100),
+            match_all=match_all,
+            include_study_json=True,
+            output_eligibility=include_eligibility,
+            output_groups=True,
+            output_baseline_measurements=include_results,
+            output_results=include_results,
+            output_adverse_effects=include_adverse_events,
+            output_sponsors=True,
+            output_countries=True,
+        )
+        
+        # Execute search
+        result = await clinical_trials_search_async(DEFAULT_CONFIG, search_input)
+        
+        return _format_clinical_trials_output(result, brief=brief_output)
+    
+    except Exception as e:
+        return f"❌ Error searching clinical trials: {type(e).__name__}: {e}"
+
+
+# =============================================================================
+# DRUG LABEL TOOLS (OpenFDA / DailyMed)
+# =============================================================================
+
+@tool("search_drug_labels", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_drug_labels(
+    drug_names: list[str] | str | None = None,
+    section_queries: list[str] | str | None = None,
+    keyword_query: list[str] | str | None = None,
+    fetch_all_sections: bool = False,
+    result_limit: int = 10,
+) -> str:
+    """
+    Search FDA drug labels from OpenFDA and DailyMed databases.
+    
+    Use this tool to find drug information including:
+    - Indications and usage
+    - Warnings and precautions
+    - Adverse reactions / side effects
+    - Drug interactions
+    - Dosage and administration
+    - Contraindications
+    - Clinical pharmacology
+    
+    Args:
+        drug_names: Drug name(s) to search for. Can be brand or generic names.
+            Examples: "Lipitor", "atorvastatin", ["Tylenol", "Advil"]
+        section_queries: Label sections to retrieve. Use semantic names like:
+            "warnings", "adverse reactions", "drug interactions", 
+            "indications", "dosage", "contraindications", "pregnancy"
+        keyword_query: Keywords to search for within the labels.
+            Use this to find drugs associated with specific conditions or effects.
+        fetch_all_sections: If True, returns ALL sections for the specified drugs.
+            Use this when you need comprehensive drug information.
+        result_limit: Maximum number of results (default: 10, max: 50).
+    
+    Returns:
+        Formatted drug label information organized by drug and section.
+    
+    Usage Patterns:
+    
+    1. **Get all info about a drug:**
+       search_drug_labels(drug_names="Ozempic", fetch_all_sections=True)
+    
+    2. **Get specific sections:**
+       search_drug_labels(drug_names="metformin", 
+                         section_queries=["warnings", "drug interactions"])
+    
+    3. **Find drugs for a condition:**
+       search_drug_labels(keyword_query="Stevens-Johnson syndrome")
+    
+    4. **Search within a drug's label:**
+       search_drug_labels(drug_names="warfarin", keyword_query="vitamin K")
+    
+    5. **Targeted section + keyword:**
+       search_drug_labels(drug_names="Humira",
+                         section_queries=["adverse reactions"],
+                         keyword_query="infection")
+    """
+    try:
+        # Normalize inputs to lists
+        if isinstance(drug_names, str):
+            drug_names = [drug_names]
+        if isinstance(section_queries, str):
+            section_queries = [section_queries]
+        if isinstance(keyword_query, str):
+            keyword_query = [keyword_query]
+        
+        search_input = DailyMedAndOpenFDAInput(
+            drug_names=drug_names,
+            section_queries=section_queries,
+            keyword_query=keyword_query,
+            fetch_all_sections=fetch_all_sections,
+            aggressive_deduplication=True,
+            result_limit=min(result_limit, 50),
+            top_n_drugs=5,
+            sections_per_query=3,
+        )
+        
+        result = await dailymed_and_openfda_search_async(DEFAULT_CONFIG, search_input)
+        return _format_drug_labels_output(result)
+    
+    except ValueError as e:
+        # Pydantic validation error - give helpful guidance
+        return (
+            f"Invalid search parameters: {e}\n\n"
+            "Valid patterns:\n"
+            "- drug_names only → get drug properties\n"
+            "- drug_names + fetch_all_sections=True → get all label sections\n"
+            "- drug_names + section_queries/keyword_query → targeted search\n"
+            "- keyword_query only → discover drugs by keyword"
+        )
+    except Exception as e:
+        return f"Error searching drug labels: {type(e).__name__}: {e}"
+
+
+# =============================================================================
+# PHARMACOLOGY TOOLS (Drug-Target)
+# =============================================================================
+
+@tool("search_drug_targets", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_drug_targets(
+    drug_name: str,
+    min_pchembl: float = 5.0,
+    activity_type: str = "ALL",
+    include_all_organisms: bool = False,
+    limit: int = 50,
+) -> str:
+    """
+    Find all known protein targets for a drug.
+    
+    Returns target proteins that the drug binds to or inhibits, with 
+    activity measurements (IC50, Ki, Kd, EC50) from ChEMBL and DrugCentral.
+    
+    Args:
+        drug_name: Name of the drug to search (brand name, generic, or synonym).
+            Examples: "imatinib", "Gleevec", "aspirin"
+        min_pchembl: Minimum pChEMBL value (potency threshold). 
+            - 5.0 = 10 μM (weak, default)
+            - 6.0 = 1 μM (moderate)
+            - 7.0 = 100 nM (good)
+            - 8.0 = 10 nM (potent)
+            - 9.0 = 1 nM (very potent)
+        activity_type: Filter by activity measurement type.
+            Options: "ALL" (default), "IC50", "Ki", "Kd", "EC50"
+        include_all_organisms: If True, include targets from all species.
+            Default (False) returns only human targets.
+        limit: Maximum number of targets to return (default: 50).
+    
+    Returns:
+        List of targets with gene symbols, activity values, and data quality indicators.
+    
+    Examples:
+        - search_drug_targets("imatinib")  # All targets of imatinib
+        - search_drug_targets("aspirin", min_pchembl=6.0)  # Potent targets only
+        - search_drug_targets("erlotinib", activity_type="IC50")  # IC50 data only
+    """
+    try:
+        # Map activity type string to enum
+        activity_map = {
+            "ALL": ActivityType.ALL,
+            "IC50": ActivityType.IC50,
+            "KI": ActivityType.KI,
+            "KD": ActivityType.KD,
+            "EC50": ActivityType.EC50,
+        }
+        act_type = activity_map.get(activity_type.upper(), ActivityType.ALL)
+        
+        search_input = TargetSearchInput(
+            mode=SearchMode.TARGETS_FOR_DRUG,
+            query=drug_name,
+            min_pchembl=min_pchembl,
+            activity_type=act_type,
+            include_all_organisms=include_all_organisms,
+            limit=limit,
+        )
+        
+        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+    
+    except Exception as e:
+        return f"Error searching drug targets: {type(e).__name__}: {e}"
+
+
+@tool("search_target_drugs", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_target_drugs(
+    gene_symbol: str,
+    min_pchembl: float = 5.0,
+    activity_type: str = "ALL",
+    limit: int = 50,
+) -> str:
+    """
+    Find all drugs/compounds that modulate a specific protein target.
+    
+    Use this to discover inhibitors, agonists, or modulators of a gene/protein.
+    
+    Args:
+        gene_symbol: Gene symbol of the target protein.
+            Examples: "EGFR", "BCR-ABL", "JAK2", "BRAF", "CDK4"
+        min_pchembl: Minimum pChEMBL value (potency threshold).
+            - 5.0 = 10 μM (weak, default)
+            - 6.0 = 1 μM (moderate)  
+            - 7.0 = 100 nM (good)
+            - 8.0 = 10 nM (potent)
+        activity_type: Filter by measurement type: "ALL", "IC50", "Ki", "Kd", "EC50"
+        limit: Maximum results (default: 50).
+    
+    Returns:
+        List of drugs/compounds with activity data against the target.
+    
+    Examples:
+        - search_target_drugs("EGFR")  # All EGFR inhibitors
+        - search_target_drugs("JAK2", min_pchembl=7.0)  # Potent JAK2 inhibitors
+        - search_target_drugs("BRAF", activity_type="IC50")  # BRAF IC50 data
+    """
+    try:
+        activity_map = {
+            "ALL": ActivityType.ALL,
+            "IC50": ActivityType.IC50,
+            "KI": ActivityType.KI,
+            "KD": ActivityType.KD,
+            "EC50": ActivityType.EC50,
+        }
+        act_type = activity_map.get(activity_type.upper(), ActivityType.ALL)
+        
+        search_input = TargetSearchInput(
+            mode=SearchMode.DRUGS_FOR_TARGET,
+            query=gene_symbol.upper(),
+            min_pchembl=min_pchembl,
+            activity_type=act_type,
+            limit=limit,
+        )
+        
+        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+    
+    except Exception as e:
+        return f"Error searching target drugs: {type(e).__name__}: {e}"
+
+
+@tool("search_similar_molecules", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_similar_molecules(
+    smiles: str,
+    similarity_threshold: float = 0.7,
+    min_pchembl: float = 5.0,
+    include_activities: bool = True,
+    limit: int = 50,
+) -> str:
+    """
+    Find molecules structurally similar to a query compound.
+    
+    Uses Tanimoto similarity on Morgan fingerprints to find analogs.
+    Useful for finding related compounds, potential drug candidates,
+    or understanding structure-activity relationships.
+    
+    Args:
+        smiles: SMILES string of the query molecule.
+            Example: "Cc1ccc(cc1Nc2nccc(n2)c3cccnc3)NC(=O)c4ccc(cc4)CN5CCN(CC5)C" (imatinib)
+        similarity_threshold: Minimum Tanimoto similarity (0.0 to 1.0).
+            - 0.5 = distant analogs
+            - 0.7 = similar scaffold (default)
+            - 0.85 = close analogs
+            - 0.95 = very similar (stereoisomers, salts)
+        min_pchembl: Minimum potency for activity data (default: 5.0).
+        include_activities: If True, include target activity data for similar molecules.
+        limit: Maximum results (default: 50).
+    
+    Returns:
+        List of similar molecules with similarity scores and optional activity data.
+    
+    Examples:
+        - search_similar_molecules("CCO", similarity_threshold=0.5)  # Ethanol analogs
+        - search_similar_molecules(imatinib_smiles, similarity_threshold=0.7)
+    """
+    try:
+        search_input = TargetSearchInput(
+            mode=SearchMode.SIMILAR_MOLECULES,
+            smiles=smiles,
+            similarity_threshold=similarity_threshold,
+            min_pchembl=min_pchembl,
+            include_activities=include_activities,
+            limit=limit,
+        )
+        
+        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+    
+    except Exception as e:
+        return f"Error searching similar molecules: {type(e).__name__}: {e}"
+
+
+@tool("search_substructure", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_substructure(
+    pattern: str,
+    min_pchembl: float = 5.0,
+    include_activities: bool = True,
+    limit: int = 50,
+) -> str:
+    """
+    Find molecules containing a specific substructure.
+    
+    Use SMILES or SMARTS patterns to find compounds with specific 
+    chemical features (e.g., a particular ring system, functional group).
+    
+    Args:
+        pattern: SMILES or SMARTS pattern to search for.
+            Examples:
+            - "c1ccccc1" (benzene ring)
+            - "C(=O)N" (amide)
+            - "[#7]1~[#6]~[#6]~[#7]~[#6]~[#6]1" (pyrimidine SMARTS)
+        min_pchembl: Minimum potency for activity data (default: 5.0).
+        include_activities: If True, include target activity data.
+        limit: Maximum results (default: 50).
+    
+    Returns:
+        List of molecules containing the substructure.
+    
+    Examples:
+        - search_substructure("c1ccc2[nH]ccc2c1")  # Indole-containing compounds
+        - search_substructure("C(F)(F)F")  # Trifluoromethyl compounds
+    """
+    try:
+        search_input = TargetSearchInput(
+            mode=SearchMode.SUBSTRUCTURE,
+            smarts=pattern,
+            min_pchembl=min_pchembl,
+            include_activities=include_activities,
+            limit=limit,
+        )
+        
+        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+    
+    except Exception as e:
+        return f"Error in substructure search: {type(e).__name__}: {e}"
+
+
+@tool("get_drug_profile", return_direct=False)
+@robust_unwrap_llm_inputs
+async def get_drug_profile(
+    drug_name: str,
+    include_targets: bool = True,
+    include_trials: bool = True,
+    include_forms: bool = True,
+    min_pchembl: float = 5.0,
+) -> str:
+    """
+    Get a comprehensive profile for a drug.
+    
+    Returns aggregated information including:
+    - All molecular forms (salts, stereoisomers)
+    - Known protein targets with activity data
+    - Associated clinical trials
+    - Chemical identifiers
+    
+    Args:
+        drug_name: Name of the drug (brand, generic, or synonym).
+        include_targets: Include target activity data (default: True).
+        include_trials: Include clinical trial associations (default: True).
+        include_forms: Include all salt/stereo forms (default: True).
+        min_pchembl: Minimum potency for target data (default: 5.0).
+    
+    Returns:
+        Comprehensive drug profile with all available information.
+    
+    Examples:
+        - get_drug_profile("imatinib")
+        - get_drug_profile("Keytruda", include_trials=True)
+    """
+    try:
+        search_input = TargetSearchInput(
+            mode=SearchMode.DRUG_PROFILE,
+            query=drug_name,
+            include_activities=include_targets,
+            include_trials=include_trials,
+            include_forms=include_forms,
+            min_pchembl=min_pchembl,
+        )
+        
+        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+    
+    except Exception as e:
+        return f"Error getting drug profile: {type(e).__name__}: {e}"
+
+
+@tool("compare_drugs_on_target", return_direct=False)
+@robust_unwrap_llm_inputs
+async def compare_drugs_on_target(
+    target: str,
+    drug_names: list[str] | str,
+    activity_type: str = "IC50",
+) -> str:
+    """
+    Compare multiple drugs' activity against a single target.
+    
+    Useful for understanding relative potency of different drugs
+    against the same protein target.
+    
+    Args:
+        target: Gene symbol of the target (e.g., "EGFR", "BCR-ABL").
+        drug_names: List of drug names to compare.
+            Examples: ["imatinib", "dasatinib", "nilotinib"]
+        activity_type: Measurement type for comparison.
+            Options: "IC50" (default), "Ki", "Kd", "EC50"
+    
+    Returns:
+        Comparison table showing relative potency and fold-differences.
+    
+    Examples:
+        - compare_drugs_on_target("ABL1", ["imatinib", "dasatinib", "nilotinib"])
+        - compare_drugs_on_target("EGFR", ["erlotinib", "gefitinib", "osimertinib"])
+    """
+    try:
+        # Normalize drug_names to list
+        if isinstance(drug_names, str):
+            drug_names = [drug_names]
+        
+        activity_map = {
+            "IC50": ActivityType.IC50,
+            "KI": ActivityType.KI,
+            "KD": ActivityType.KD,
+            "EC50": ActivityType.EC50,
+        }
+        act_type = activity_map.get(activity_type.upper(), ActivityType.IC50)
+        
+        search_input = TargetSearchInput(
+            mode=SearchMode.COMPARE_DRUGS,
+            target=target.upper(),
+            drug_names=drug_names,
+            activity_type=act_type,
+        )
+        
+        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+    
+    except Exception as e:
+        return f"Error comparing drugs: {type(e).__name__}: {e}"
+
+
+@tool("search_selective_drugs", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_selective_drugs(
+    target: str,
+    off_targets: list[str] | str,
+    min_selectivity_fold: float = 10.0,
+    min_pchembl: float = 6.0,
+    limit: int = 50,
+) -> str:
+    """
+    Find drugs that are selective for one target over others.
+    
+    Useful for finding compounds that hit a desired target but 
+    spare related proteins (e.g., selective kinase inhibitors).
+    
+    Args:
+        target: Primary target gene symbol (the desired target).
+        off_targets: Gene symbols of targets to avoid.
+            Examples: ["JAK1", "JAK3"] to find JAK2-selective compounds
+        min_selectivity_fold: Minimum fold-selectivity required (default: 10x).
+            A value of 10 means the drug must be 10x more potent on 
+            the primary target vs off-targets.
+        min_pchembl: Minimum potency on primary target (default: 6.0 = 1 μM).
+        limit: Maximum results (default: 50).
+    
+    Returns:
+        List of selective compounds with selectivity ratios.
+    
+    Examples:
+        - search_selective_drugs("JAK2", ["JAK1", "JAK3"])  # JAK2-selective
+        - search_selective_drugs("CDK4", ["CDK6"], min_selectivity_fold=100)
+    """
+    try:
+        # Normalize off_targets to list
+        if isinstance(off_targets, str):
+            off_targets = [off_targets]
+        
+        search_input = TargetSearchInput(
+            mode=SearchMode.SELECTIVE_DRUGS,
+            target=target.upper(),
+            off_targets=[t.upper() for t in off_targets],
+            min_selectivity_fold=min_selectivity_fold,
+            min_pchembl=min_pchembl,
+            limit=limit,
+        )
+        
+        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+    
+    except Exception as e:
+        return f"Error searching selective drugs: {type(e).__name__}: {e}"
+
+
+# =============================================================================
+# TOOL COLLECTION
+# =============================================================================
+
+# Export all tools for easy registration
+DBSEARCH_TOOLS = [
+    # Clinical Trials
+    search_clinical_trials,
+    # Drug Labels
+    search_drug_labels,
+    # Pharmacology
+    search_drug_targets,
+    search_target_drugs,
+    search_similar_molecules,
+    search_substructure,
+    get_drug_profile,
+    compare_drugs_on_target,
+    search_selective_drugs,
+]
