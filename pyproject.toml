@@ -40,7 +40,9 @@ dependencies = [
   "ipywidgets",
   "jupyterlab",
   # Environment and data
-  "python-dotenv"
+  "python-dotenv",
+  # printing
+  "rich"
 ]
 
 [project.scripts]

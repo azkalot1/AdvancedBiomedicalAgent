@@ -69,6 +69,9 @@ def show_help() -> None:
     print("  ingest --ctgov-rag-buckets 32 - Number of buckets for RAG corpus (default: 16)")
     print("  ingest --ctgov-rag-corpus-only - Only populate CT.gov RAG corpus (standalone)")
     print("  ingest --ctgov-rag-keys-only - Only populate CT.gov RAG keys (standalone)")
+    print("  ingest --ctgov-populate-enriched-search - Populate enriched search table after ingestion")
+    print("  ingest --ctgov-enriched-search-batch-size 2000 - Batch size for enriched search (default: 1000)")
+    print("  ingest --ctgov-enriched-search-only - Only populate enriched search table (standalone)")
     print()
     print("  BindingDB Options:")
     print("  ingest --bindingdb-all-organisms - Include all organisms (default: human only)")
@@ -80,6 +83,14 @@ def show_help() -> None:
     print()
     print("Search Index Commands:")
     print("  generate-search          - Create full-text search indexes (tsvector + GIN)")
+    print("  generate-ctgov-search    - Create enriched CT.gov search table")
+    print("    create                 - Create table and indexes")
+    print("    populate [batch_size]  - Populate data (default batch: 1000)")
+    print("    refresh [batch_size]   - Refresh data (truncate + reload)")
+    print("    verify                 - Verify table state")
+    print("    test                   - Test search queries")
+    print("    drop                   - Drop table and indexes")
+    print("    full [batch_size]      - Create + populate + verify + test")
     print()
     print()
     print("Usage:")
@@ -103,10 +114,15 @@ def show_help() -> None:
     print("  biomedagent-db ingest --ctgov-populate-rag --ctgov-rag-buckets 32")
     print("  biomedagent-db ingest --ctgov-rag-corpus-only")
     print("  biomedagent-db ingest --ctgov-rag-keys-only")
+    print("  biomedagent-db ingest --ctgov-populate-enriched-search")
+    print("  biomedagent-db ingest --ctgov-enriched-search-only --ctgov-enriched-search-batch-size 2000")
     print("  biomedagent-db ingest --vacuum")
     print("  biomedagent-db ingest --dump-db backup.sql")
     print("  biomedagent-db ingest --restore-db backup.sql")
     print("  biomedagent-db generate-search")
+    print("  biomedagent-db generate-ctgov-search create")
+    print("  biomedagent-db generate-ctgov-search populate 2000")
+    print("  biomedagent-db generate-ctgov-search full")
     print("  biomedagent-db extract-schema --output schema.txt --sample-rows 5")
 
 
@@ -185,6 +201,28 @@ def route_extract_schema() -> NoReturn:
     finally:
         if "original_argv" in locals():
             sys.argv = original_argv
+
+
+def route_generate_ctgov_search() -> NoReturn:
+    """Route to CT.gov enriched search table generation."""
+    try:
+        from bioagent.data.ingest.generate_ctgov_enriched_search import main
+        # Preserve original argv while forwarding only subcommand args
+        original_argv = sys.argv.copy()
+        # Replace the script name so argparse help looks correct
+        sys.argv = ["generate_ctgov_enriched_search.py"] + sys.argv[2:]
+        main()
+    except ImportError as e:
+        print(f"❌ Error importing generate_ctgov_enriched_search: {e}")
+        print("Make sure all dependencies are installed with: pip install -e .")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error running CT.gov enriched search generation: {e}")
+        sys.exit(1)
+    finally:
+        if "original_argv" in locals():
+            sys.argv = original_argv
+    sys.exit(0)
 
 
 
@@ -276,6 +314,8 @@ def main() -> NoReturn:
         route_extract_schema()
     elif command == "generate-search":
         route_generate_search()
+    elif command == "generate-ctgov-search":
+        route_generate_ctgov_search()
     elif command in ["info", "reset", "vacuum", "tables", "create-schema", "fix-permissions", "verify-deps", "install-pgvector", "create-vector-ext", "install-rdkit", "create-rdkit-ext"]:
         route_db_command(command, args)
     elif command in ["help", "--help", "-h"]:

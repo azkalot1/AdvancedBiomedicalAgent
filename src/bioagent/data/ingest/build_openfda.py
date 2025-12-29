@@ -42,14 +42,15 @@ import requests
 from bs4 import BeautifulSoup
 from pgvector.psycopg2 import register_vector
 from sentence_transformers import SentenceTransformer
+import argparse
 from tqdm import tqdm
 
 # Handle imports for both direct execution and module import
 try:
-    from .config import DatabaseConfig, get_connection
+    from .config import DatabaseConfig, get_connection, DEFAULT_CONFIG
     from .constants import MAPPING_TABLES, OPENFDA_DOWNLOAD_INDEX
 except ImportError:
-    from config import DatabaseConfig, get_connection
+    from config import DatabaseConfig, get_connection, DEFAULT_CONFIG
     from constants import MAPPING_TABLES, OPENFDA_DOWNLOAD_INDEX
 
 DOWNLOAD_INDEX = OPENFDA_DOWNLOAD_INDEX
@@ -1004,3 +1005,69 @@ def build_fda_normalized(
     print(f"💾 Database: {config.database} on {config.host}:{config.port}")
     print("🔍 Ready for advanced searches with PostgreSQL features")
     print("🧠 Semantic search enabled with vector embeddings")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Standalone OpenFDA PostgreSQL Ingestion",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    %(prog)s                              # Process all files
+    %(prog)s --max-files 5                # Limit to 5 partition files
+    %(prog)s --n-max 1000                 # Limit to 1000 records total
+    %(prog)s --use-local-files            # Skip download, use existing files
+    %(prog)s --raw-dir ./raw          # Custom raw directory
+        """,
+    )
+    
+    parser.add_argument(
+        "--max-files", 
+        type=int, 
+        default=None,
+        help="Maximum number of OpenFDA partition files to process (default: all)"
+    )
+    parser.add_argument(
+        "--n-max", 
+        type=int, 
+        default=None,
+        help="Maximum number of records to process (default: all)"
+    )
+    parser.add_argument(
+        "--use-local-files", 
+        action="store_true",
+        help="Use existing local files in raw_dir/openfda (skip download)"
+    )
+    parser.add_argument(
+        "--raw-dir", 
+        type=Path, 
+        default=Path("./raw"),
+        help="Directory for raw data files (default: ./raw)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Ensure raw directory exists
+    args.raw_dir.mkdir(parents=True, exist_ok=True)
+    
+    print("🚀 OpenFDA PostgreSQL Ingestion")
+    print("=" * 50)
+    print(f"📁 Raw directory: {args.raw_dir}")
+    print(f"📦 Max files: {args.max_files or 'all'}")
+    print(f"📊 Max records: {args.n_max or 'all'}")
+    print(f"💾 Use local files: {args.use_local_files}")
+    print("=" * 50)
+    
+    build_fda_normalized(
+        config=DEFAULT_CONFIG,
+        raw_dir=args.raw_dir,
+        max_label_files=args.max_files,
+        n_max=args.n_max,
+        use_local_files=args.use_local_files,
+    )
+    
+    print("\n✅ OpenFDA ingestion complete!")
+
+
+if __name__ == "__main__":
+    main()

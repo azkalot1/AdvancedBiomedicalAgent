@@ -33,6 +33,13 @@ try:
     from .build_openfda import build_fda_normalized
     from .build_orange_book import ingest_orange_book
     from .create_and_populate_dm_target import main as populate_dm_target
+    from .generate_ctgov_enriched_search import (
+        create_table as create_enriched_search_table,
+        populate_table as populate_enriched_search_table,
+        refresh_table as refresh_enriched_search_table,
+        verify_table as verify_enriched_search_table,
+        test_search as test_enriched_search,
+    )
     from .config import (
         DEFAULT_CONFIG,
         DatabaseConfig,
@@ -54,6 +61,13 @@ except ImportError:
     from build_openfda import build_fda_normalized
     from build_orange_book import ingest_orange_book
     from create_and_populate_dm_target import main as populate_dm_target
+    from generate_ctgov_enriched_search import (
+        create_table as create_enriched_search_table,
+        populate_table as populate_enriched_search_table,
+        refresh_table as refresh_enriched_search_table,
+        verify_table as verify_enriched_search_table,
+        test_search as test_enriched_search,
+    )
     from config import (
         DEFAULT_CONFIG,
         DatabaseConfig,
@@ -130,7 +144,8 @@ def run_orange_book_ingestion(config: DatabaseConfig, raw_dir: Path) -> bool:
 
 
 def run_ctgov_ingestion(config: DatabaseConfig, raw_dir: Path, n_max: int | None = None, 
-                        populate_rag: bool = False, rag_buckets: int = 16) -> bool:
+                        populate_rag: bool = False, rag_buckets: int = 16,
+                        populate_enriched_search: bool = False, enriched_search_batch_size: int = 1000) -> bool:
     """
     Run ClinicalTrials.gov ingestion.
     
@@ -140,6 +155,8 @@ def run_ctgov_ingestion(config: DatabaseConfig, raw_dir: Path, n_max: int | None
         n_max: Maximum number of trials (not currently used for AACT dump)
         populate_rag: Whether to populate RAG corpus after ingestion (can take hours!)
         rag_buckets: Number of buckets for RAG corpus population
+        populate_enriched_search: Whether to populate enriched search table after ingestion
+        enriched_search_batch_size: Batch size for enriched search table population
     """
     print("\n" + "=" * 60)
     print("🔬 CLINICALTRIALS.GOV INGESTION")
@@ -165,6 +182,15 @@ def run_ctgov_ingestion(config: DatabaseConfig, raw_dir: Path, n_max: int | None
             print("\n💡 Note: RAG corpus not populated. To populate later, run:")
             print(f"   python build_ctgov.py populate-corpus {rag_buckets}")
             print("   python build_ctgov.py populate-keys")
+        
+        if populate_enriched_search:
+            print("\n🔍 Enriched search table population requested")
+            if not run_ctgov_enriched_search(config, enriched_search_batch_size):
+                print("⚠️  Enriched search table population failed, but base ingestion succeeded")
+        else:
+            print("\n💡 Note: Enriched search table not populated. To populate later, run:")
+            print(f"   biomedagent-db generate-ctgov-search create")
+            print(f"   biomedagent-db generate-ctgov-search populate {enriched_search_batch_size}")
         
         return True
     except Exception as e:
@@ -219,6 +245,61 @@ def run_ctgov_rag_keys(config: DatabaseConfig) -> bool:
     except Exception as e:
         print(f"❌ RAG keys population failed: {e}")
         return False
+
+
+def run_ctgov_enriched_search(config: DatabaseConfig, batch_size: int = 1000) -> bool:
+    """
+    Run ClinicalTrials.gov enriched search table creation and population.
+    Creates a denormalized table optimized for flexible searching with:
+    - Aggregated conditions, interventions, sponsors
+    - Normalized text for trigram similarity
+    - Full-text search vectors
+    - Filterable metadata columns
+    - Proper indexes for all search patterns
+    
+    Args:
+        config: Database configuration
+        batch_size: Batch size for population (default: 1000)
+    """
+    print("\n" + "=" * 60)
+    print("🔍 CLINICALTRIALS.GOV ENRICHED SEARCH TABLE")
+    print("   (Creating denormalized search table)")
+    print(f"   (Batch size: {batch_size:,})")
+    print("=" * 60)
+    
+    try:
+        start_time = time.time()
+        
+        # Create table and indexes
+        print("\n📋 Creating table structure and indexes...")
+        create_enriched_search_table(config)
+        
+        # Populate data
+        print("\n📊 Populating data...")
+        populate_enriched_search_table(config, batch_size)
+        
+        # Verify
+        print("\n🔍 Verifying table state...")
+        verify_enriched_search_table(config)
+        
+        elapsed = time.time() - start_time
+        print(f"\n✅ Enriched search table completed in {elapsed:.1f} seconds")
+        return True
+    except Exception as e:
+        print(f"❌ Enriched search table creation failed: {e}")
+        return False
+
+
+def run_ctgov_enriched_search_only(config: DatabaseConfig, batch_size: int = 1000) -> bool:
+    """
+    Standalone function to run enriched search table generation.
+    Can be called independently after CT.gov ingestion.
+    
+    Args:
+        config: Database configuration
+        batch_size: Batch size for population (default: 1000)
+    """
+    return run_ctgov_enriched_search(config, batch_size)
 
 
 def run_dailymed_ingestion(config: DatabaseConfig, raw_dir: Path, n_max: int | None = None) -> bool:
@@ -561,6 +642,9 @@ Examples:
   %(prog)s --ctgov-rag-corpus-only          # Only populate CT.gov RAG corpus
   %(prog)s --ctgov-rag-keys-only            # Only populate CT.gov RAG keys
   %(prog)s --ctgov-rag-buckets 32           # Use 32 buckets for RAG population
+  %(prog)s --ctgov-populate-enriched-search # Populate CT.gov enriched search table
+  %(prog)s --ctgov-enriched-search-only     # Only populate enriched search table (standalone)
+  %(prog)s --ctgov-enriched-search-batch-size 2000  # Batch size for enriched search
   %(prog)s --reset --force --vacuum         # Complete reset: drop all, reimport, optimize
   %(prog)s --dump-db backup.sql             # Create database dump
   %(prog)s --restore-db backup.sql          # Restore database from dump
@@ -580,6 +664,9 @@ Examples:
     parser.add_argument("--ctgov-rag-buckets", type=int, default=16, help="Number of buckets for CT.gov RAG corpus (default: 16)")
     parser.add_argument("--ctgov-rag-corpus-only", action="store_true", help="Only populate CT.gov RAG corpus (requires prior ingestion)")
     parser.add_argument("--ctgov-rag-keys-only", action="store_true", help="Only populate CT.gov RAG keys (requires corpus to be populated)")
+    parser.add_argument("--ctgov-populate-enriched-search", action="store_true", help="Populate CT.gov enriched search table after ingestion")
+    parser.add_argument("--ctgov-enriched-search-batch-size", type=int, default=1000, help="Batch size for enriched search table population (default: 1000)")
+    parser.add_argument("--ctgov-enriched-search-only", action="store_true", help="Only populate CT.gov enriched search table (requires prior CT.gov ingestion)")
     parser.add_argument("--bindingdb-all-organisms", action="store_true", help="Include all organisms in BindingDB (default: human only)")
     parser.add_argument("--bindingdb-batch-size", type=int, default=10000, help="Batch size for BindingDB processing (default: 10000)")
     parser.add_argument("--bindingdb-force-recreate", action="store_true", help="Force recreate BindingDB tables (WARNING: deletes existing data)")
@@ -695,6 +782,17 @@ Examples:
             sys.exit(1)
         return
 
+    # Handle --ctgov-enriched-search-only command (standalone)
+    if args.ctgov_enriched_search_only:
+        print("🔍 ClinicalTrials.gov Enriched Search Table (Standalone)")
+        print("=" * 50)
+        if run_ctgov_enriched_search_only(config, args.ctgov_enriched_search_batch_size):
+            print("\n🎉 Enriched search table population completed!")
+        else:
+            print("\n❌ Enriched search table population failed!")
+            sys.exit(1)
+        return
+
     # Show initial database info
     print("\n📊 Initial Database State:")
     show_database_info(config)
@@ -739,7 +837,9 @@ Examples:
             raw_dir, 
             args.n_max,
             populate_rag=args.ctgov_populate_rag,
-            rag_buckets=args.ctgov_rag_buckets
+            rag_buckets=args.ctgov_rag_buckets,
+            populate_enriched_search=args.ctgov_populate_enriched_search,
+            enriched_search_batch_size=args.ctgov_enriched_search_batch_size
         )
     else:
         print("\n⏭️  Skipping ClinicalTrials.gov ingestion")

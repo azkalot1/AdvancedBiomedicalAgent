@@ -1,14 +1,26 @@
-from .app import unified_search_async, UnifiedSearchInput, EnrichedSearchOutput, clinical_trials_search, ClinicalTrialsSearchInput, ClinicalTrialsSearchOutput, SearchKind
+from .search import (
+    dailymed_and_openfda_search_async,
+    DailyMedAndOpenFDAInput,
+    DailyMedAndOpenFDASearchOutput,
+    clinical_trials_search_async,
+    ClinicalTrialsSearchInput,
+    ClinicalTrialsSearchOutput,
+    target_search_async,
+    TargetSearchInput,
+    TargetSearchOutput,
+)
 from .ingest import DatabaseConfig, DEFAULT_CONFIG, get_connection, get_async_connection
 
 __all__ = [
-    "unified_search_async",
-    "UnifiedSearchInput",
-    "EnrichedSearchOutput",
-    "SearchKind",
-    "clinical_trials_search",
+    "dailymed_and_openfda_search_async",
+    "DailyMedAndOpenFDAInput",
+    "DailyMedAndOpenFDASearchOutput",
+    "clinical_trials_search_async",
     "ClinicalTrialsSearchInput",
     "ClinicalTrialsSearchOutput",
+    "target_search_async",
+    "TargetSearchInput",
+    "TargetSearchOutput",
     "DatabaseConfig",
     "DEFAULT_CONFIG",
     "get_connection",
