@@ -5016,6 +5016,7 @@ Phases:
  12 = create_indication_functions (indication search SQL functions)
  13 = create_drug_mechanism_table  (create drug mechanism table)
  14 = index_drug_mechanism_table   (index drug mechanism table)
+ 14 = index_drug_mechanism_table   (index drug mechanism table)
 
 Fast Mode Defaults (--fast):
   - ChEMBL:      10,000 molecules

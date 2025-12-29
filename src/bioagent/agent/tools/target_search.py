@@ -2,12 +2,10 @@
 # agent_target_search.py
 """
 Agent-facing pharmacology search tools with proper formatting.
-
-This module provides LLM-friendly tools for searching drug-target interactions,
-mechanisms of action, clinical trials, and molecular similarity.
 """
 
 from langchain_core.tools import tool
+
 from bioagent.data.ingest.config import DEFAULT_CONFIG
 from .tool_utils import robust_unwrap_llm_inputs
 
@@ -22,6 +20,7 @@ from bioagent.data.search.target_search import (
     DrugProfileResult,
     ClinicalTrialHit,
     MoleculeForm,
+    SearchDiagnostics,
 )
 
 
@@ -54,6 +53,36 @@ def _truncate(text: str, max_len: int) -> str:
     return text[:max_len] + "..." if len(text) > max_len else text
 
 
+def _format_diagnostics(diagnostics: SearchDiagnostics | None, verbose: bool = False) -> list[str]:
+    """Format diagnostics information for output."""
+    if not diagnostics:
+        return []
+    
+    lines = []
+    
+    # Search steps (what was tried)
+    if diagnostics.search_steps and verbose:
+        lines.append("")
+        lines.append("Search steps attempted:")
+        for step in diagnostics.search_steps:
+            status = "✓" if step.get("found", 0) > 0 else "✗"
+            step_name = step.get("step", "unknown").replace("_", " ")
+            found = step.get("found", 0)
+            lines.append(f"  {status} {step_name}: {found} match(es)")
+            if step.get("matches"):
+                matches_preview = ", ".join(step["matches"][:3])
+                lines.append(f"      → {matches_preview}")
+    
+    # Suggestions (always show)
+    if diagnostics.suggestions:
+        lines.append("")
+        lines.append("Suggestions:")
+        for suggestion in diagnostics.suggestions:
+            lines.append(f"  → {suggestion}")
+    
+    return lines
+
+
 def _format_compound_profile(rank: int, hit: CompoundTargetProfile) -> list[str]:
     """Format a compound target profile for agent output."""
     lines = []
@@ -80,8 +109,6 @@ def _format_compound_profile(rank: int, hit: CompoundTargetProfile) -> list[str]
             genes = ", ".join(m.gene_symbols) if m.gene_symbols else "unknown target"
             lines.append(f"      • {m.action_type}: {m.mechanism_of_action}")
             lines.append(f"        Target: {m.target_name or 'N/A'} ({genes})")
-            
-            # Flags
             flags = []
             if m.disease_efficacy:
                 flags.append("efficacy established")
@@ -113,29 +140,23 @@ def _format_drug_for_target(rank: int, hit: DrugForTargetHit) -> list[str]:
     """Format a drug-for-target hit."""
     lines = []
     
-    # Header
     lines.append(f"[{rank}] {hit.concept_name}")
     
-    # Identifiers
     if hit.chembl_id:
         lines.append(f"    ChEMBL: {hit.chembl_id}")
     
-    # Activity data
     if hit.activity_value_nm is not None:
         lines.append(f"    Activity: {hit.activity_type} = {hit.activity_value_nm:.1f} nM")
         if hit.pchembl:
             lines.append(f"    pChEMBL: {hit.pchembl:.2f} ({_get_potency_label(hit.pchembl)})")
         lines.append(f"    Confidence: {hit.data_confidence or 'N/A'}, measurements: {hit.n_measurements}")
     
-    # Mechanism data
     if hit.mechanism_of_action:
         lines.append(f"    Mechanism: {hit.action_type} - {hit.mechanism_of_action}")
     
-    # Selectivity
     if hit.selectivity_fold:
         lines.append(f"    Selectivity: {hit.selectivity_fold:.1f}x over off-targets")
     
-    # SMILES
     if hit.canonical_smiles:
         lines.append(f"    SMILES: {_truncate(hit.canonical_smiles, 70)}")
     
@@ -149,7 +170,6 @@ def _format_drug_profile_result(rank: int, hit: DrugProfileResult) -> list[str]:
     lines.append(f"[{rank}] {hit.concept_name}")
     lines.append(f"    Concept ID: {hit.concept_id}")
     
-    # Summary stats
     salt_info = " (includes salts)" if hit.has_salt_forms else ""
     lines.append(f"    Molecular forms: {hit.n_forms}{salt_info}")
     lines.append(f"    Activity targets: {hit.n_activity_targets}")
@@ -159,16 +179,13 @@ def _format_drug_profile_result(rank: int, hit: DrugProfileResult) -> list[str]:
     if hit.canonical_smiles:
         lines.append(f"    SMILES: {_truncate(hit.canonical_smiles, 70)}")
     
-    # Target profile details
     if hit.target_profile:
         lines.append("")
         lines.append("    --- TARGET PROFILE ---")
         profile_lines = _format_compound_profile(0, hit.target_profile)
-        # Indent and skip the header line
         for line in profile_lines[1:]:
             lines.append(f"    {line.strip()}")
     
-    # Recent trials
     if hit.recent_trials:
         lines.append("")
         lines.append(f"    --- CLINICAL TRIALS ({len(hit.recent_trials)}) ---")
@@ -178,7 +195,6 @@ def _format_drug_profile_result(rank: int, hit: DrugProfileResult) -> list[str]:
         if len(hit.recent_trials) > 5:
             lines.append(f"      ... and {len(hit.recent_trials) - 5} more trials")
     
-    # Molecular forms
     if hit.forms:
         lines.append("")
         lines.append(f"    --- MOLECULAR FORMS ({len(hit.forms)}) ---")
@@ -238,7 +254,7 @@ def _format_pharmacology_output(result: TargetSearchOutput) -> str:
     """Format pharmacology search results for LLM consumption."""
     lines = []
     
-    # Status header
+    # === STATUS HEADER ===
     if result.status == "success":
         lines.append(f"✓ Search: {result.query_summary}")
         lines.append(f"  Found {result.total_hits} result(s)")
@@ -256,47 +272,42 @@ def _format_pharmacology_output(result: TargetSearchOutput) -> str:
     if result.execution_time_ms:
         lines.append(f"  (Query time: {result.execution_time_ms:.0f}ms)")
     
-    # Warnings
+    # === WARNINGS ===
     if result.warnings:
         lines.append("")
         for w in result.warnings:
             lines.append(f"⚠ {w}")
     
-    # Early return for errors
-    if result.status in ["error", "invalid_input"]:
-        lines.append("")
-        lines.append("Suggestions:")
-        lines.append("  • Check input parameters and spelling")
-        lines.append("  • Verify drug/gene names are correct")
-        lines.append("  • For SMILES input, ensure the structure is valid")
+    # === DIAGNOSTICS FOR ERRORS AND NOT_FOUND ===
+    if result.status in ["error", "invalid_input", "not_found"]:
+        # Use diagnostics from the search
+        if result.diagnostics:
+            lines.extend(_format_diagnostics(result.diagnostics, verbose=(result.status == "error")))
+        else:
+            # Fallback suggestions if no diagnostics provided
+            lines.append("")
+            lines.append("Suggestions:")
+            if result.status == "invalid_input":
+                lines.append("  → Check required parameters for this search mode")
+                lines.append("  → Refer to the tool documentation for examples")
+            elif result.status == "error":
+                lines.append("  → Check input parameters and try again")
+                lines.append("  → If SMILES error, verify structure is valid")
+            elif result.status == "not_found":
+                lines.append("  → Check spelling of drug/gene names")
+                lines.append("  → Try alternative names or synonyms")
+                lines.append("  → Try lowering min_pchembl threshold")
+        
         return "\n".join(lines)
     
-    # Not found suggestions
-    if result.status == "not_found":
-        lines.append("")
-        lines.append("Suggestions:")
-        if result.mode in [SearchMode.TARGETS_FOR_DRUG, SearchMode.DRUG_PROFILE, 
-                          SearchMode.DRUG_FORMS, SearchMode.TRIALS_FOR_DRUG]:
-            lines.append("  • Check drug name spelling")
-            lines.append("  • Try generic name instead of brand name")
-            lines.append("  • Try alternative synonyms")
-        elif result.mode == SearchMode.DRUGS_FOR_TARGET:
-            lines.append("  • Verify gene symbol (use official HGNC symbol)")
-            lines.append("  • Try lowering min_pchembl threshold (e.g., 5.0)")
-        elif result.mode in [SearchMode.SIMILAR_MOLECULES, SearchMode.EXACT_STRUCTURE]:
-            lines.append("  • Verify SMILES string is valid")
-            lines.append("  • Try lowering similarity_threshold")
-        return "\n".join(lines)
-    
-    # No hits
+    # === RESULTS ===
     if not result.hits:
         return "\n".join(lines)
     
     lines.append("")
     lines.append("=" * 60)
     
-    # Format each hit based on type
-    for i, hit in enumerate(result.hits[:30], 1):  # Limit to 30 for readability
+    for i, hit in enumerate(result.hits[:30], 1):
         lines.append("")
         
         if isinstance(hit, CompoundTargetProfile):
@@ -310,13 +321,18 @@ def _format_pharmacology_output(result: TargetSearchOutput) -> str:
         elif isinstance(hit, MoleculeForm):
             lines.extend(_format_molecule_form(i, hit))
         else:
-            # Fallback for unknown types
             lines.append(f"[{i}] {type(hit).__name__}: {hit}")
     
-    # Truncation notice
     if result.total_hits > 30:
         lines.append("")
         lines.append(f"... showing 30 of {result.total_hits} results. Use 'limit' parameter for more.")
+    
+    # === DIAGNOSTICS FOR SUCCESS (if there are suggestions) ===
+    if result.diagnostics and result.diagnostics.suggestions:
+        lines.append("")
+        lines.append("Notes:")
+        for suggestion in result.diagnostics.suggestions[:3]:
+            lines.append(f"  ℹ {suggestion}")
     
     return "\n".join(lines)
 
@@ -354,7 +370,6 @@ def _validate_gene_symbol(gene_symbol: str | None) -> tuple[str | None, str | No
     if len(gene_symbol) > 20:
         return None, f"gene_symbol '{gene_symbol}' is too long. Use official HGNC symbols."
     
-    # Basic pattern check
     if not gene_symbol.replace("-", "").replace("_", "").isalnum():
         return None, f"gene_symbol '{gene_symbol}' contains invalid characters. Use official HGNC symbols."
     
@@ -374,7 +389,6 @@ def _validate_smiles(smiles: str | None) -> tuple[str | None, str | None]:
     if len(smiles) > 5000:
         return None, f"smiles is too long ({len(smiles)} chars). Maximum is 5000 characters."
     
-    # Basic character check (SMILES alphabet)
     valid_chars = set("CNOPSFIBrcnopsfib[]()=#@+-\\/%.0123456789")
     invalid = set(smiles) - valid_chars
     if invalid:
@@ -453,7 +467,7 @@ def _validate_limit(limit: int) -> tuple[int | None, str | None]:
         return None, "limit must be at least 1"
     
     if limit > 500:
-        return 500, None  # Cap at 500, don't error
+        return 500, None
     
     return limit, None
 
@@ -497,11 +511,6 @@ async def search_drug_targets(
     Returns:
         Formatted list of targets with gene symbols, activity values, mechanisms,
         and data quality indicators.
-    
-    Examples:
-        search_drug_targets("imatinib")
-        search_drug_targets("aspirin", min_pchembl=6.0)
-        search_drug_targets("diazepam", data_source="mechanism")
     """
     # Validate inputs
     drug_name, error = _validate_drug_name(drug_name)
@@ -530,7 +539,7 @@ async def search_drug_targets(
             limit=limit,
         )
         
-        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
         return _format_pharmacology_output(result)
     
@@ -539,9 +548,9 @@ async def search_drug_targets(
             f"✗ Error searching drug targets: {type(e).__name__}: {e}\n\n"
             f"Input: drug_name='{drug_name}', min_pchembl={min_pchembl}, data_source='{data_source}'\n\n"
             "Suggestions:\n"
-            "  • Check drug name spelling\n"
-            "  • Try generic name instead of brand name\n"
-            "  • For biologics (antibodies), try the INN name"
+            "  → Check drug name spelling\n"
+            "  → Try generic name instead of brand name\n"
+            "  → For biologics (antibodies), try the INN name"
         )
 
 
@@ -575,13 +584,7 @@ async def search_target_drugs(
     
     Returns:
         Formatted list of drugs/compounds with activity data and/or mechanisms.
-    
-    Examples:
-        search_target_drugs("EGFR")
-        search_target_drugs("JAK2", min_pchembl=7.0)
-        search_target_drugs("ROS1", data_source="mechanism")
     """
-    # Validate inputs
     gene_symbol, error = _validate_gene_symbol(gene_symbol)
     if error:
         return f"✗ Input error: {error}"
@@ -607,7 +610,7 @@ async def search_target_drugs(
             limit=limit,
         )
         
-        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
         return _format_pharmacology_output(result)
     
@@ -616,9 +619,9 @@ async def search_target_drugs(
             f"✗ Error searching target drugs: {type(e).__name__}: {e}\n\n"
             f"Input: gene_symbol='{gene_symbol}', min_pchembl={min_pchembl}\n\n"
             "Suggestions:\n"
-            "  • Verify gene symbol (use official HGNC symbol)\n"
-            "  • Common symbols: EGFR, BRAF, ABL1, JAK2, CDK4, ERBB2\n"
-            "  • Try lowering min_pchembl to get more results"
+            "  → Verify gene symbol (use official HGNC symbol)\n"
+            "  → Common symbols: EGFR, BRAF, ABL1, JAK2, CDK4, ERBB2\n"
+            "  → Try lowering min_pchembl to get more results"
         )
 
 
@@ -638,7 +641,6 @@ async def search_similar_molecules(
     
     Args:
         smiles: SMILES string of the query molecule.
-            Example: "Cc1ccc(NC(=O)c2ccc(CN3CCN(C)CC3)cc2)cc1Nc1nccc(-c2cccnc2)n1" (imatinib)
         similarity_threshold: Minimum Tanimoto similarity (0.0 to 1.0).
             - 0.5 = distant analogs (many results)
             - 0.7 = similar scaffold (default)
@@ -649,12 +651,7 @@ async def search_similar_molecules(
     
     Returns:
         List of similar molecules with similarity scores and activity data.
-    
-    Examples:
-        search_similar_molecules("CC(=O)Oc1ccccc1C(=O)O")  # Aspirin analogs
-        search_similar_molecules(imatinib_smiles, similarity_threshold=0.85)
     """
-    # Validate inputs
     smiles, error = _validate_smiles(smiles)
     if error:
         return f"✗ Input error: {error}"
@@ -680,7 +677,7 @@ async def search_similar_molecules(
             limit=limit,
         )
         
-        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
         return _format_pharmacology_output(result)
     
@@ -690,9 +687,9 @@ async def search_similar_molecules(
             f"✗ Error searching similar molecules: {type(e).__name__}: {e}\n\n"
             f"Input SMILES: {smiles_preview}\n\n"
             "Suggestions:\n"
-            "  • Verify the SMILES string is valid\n"
-            "  • Use a SMILES validator or chemical drawing tool\n"
-            "  • Try lowering similarity_threshold for more results"
+            "  → Verify the SMILES string is valid\n"
+            "  → Use a chemical structure editor to generate valid SMILES\n"
+            "  → Try lowering similarity_threshold for more results"
         )
 
 
@@ -714,12 +711,7 @@ async def search_exact_structure(
     
     Returns:
         Compound identification with activity and mechanism data if found.
-    
-    Examples:
-        search_exact_structure("CC(=O)Oc1ccccc1C(=O)O")  # Identify aspirin
-        search_exact_structure("Cc1nc(CNC(=O)NC2CCN(c3ncccc3Cl)C2)oc1C")
     """
-    # Validate inputs
     smiles, error = _validate_smiles(smiles)
     if error:
         return f"✗ Input error: {error}"
@@ -735,7 +727,7 @@ async def search_exact_structure(
             min_pchembl=min_pchembl,
         )
         
-        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
         return _format_pharmacology_output(result)
     
@@ -745,8 +737,8 @@ async def search_exact_structure(
             f"✗ Error in exact structure search: {type(e).__name__}: {e}\n\n"
             f"Input SMILES: {smiles_preview}\n\n"
             "Suggestions:\n"
-            "  • Verify the SMILES string is valid\n"
-            "  • Try search_similar_molecules with high threshold instead"
+            "  → Verify the SMILES string is valid\n"
+            "  → Try search_similar_molecules with high threshold instead"
         )
 
 
@@ -766,28 +758,15 @@ async def search_substructure(
     
     Args:
         pattern: SMILES or SMARTS pattern to search for.
-            Examples:
-            - "c1ccccc1" (benzene ring - very common, slow)
-            - "c1ccc2[nH]ccc2c1" (indole)
-            - "C(F)(F)F" (trifluoromethyl)
-            - "C(=O)N" (amide)
         limit: Maximum results (default: 50, max: 500).
     
     Returns:
         List of molecules containing the substructure.
-    
-    Examples:
-        search_substructure("c1ccc2[nH]ccc2c1")  # Indole compounds
-        search_substructure("C(F)(F)F")  # CF3-containing compounds
     """
-    # Validate pattern (similar to SMILES validation)
     if not pattern or not pattern.strip():
         return "✗ Input error: pattern is required. Provide a SMILES or SMARTS pattern."
     
     pattern = pattern.strip()
-    
-    if len(pattern) < 1:
-        return "✗ Input error: pattern cannot be empty."
     
     limit, error = _validate_limit(limit)
     if error:
@@ -800,7 +779,7 @@ async def search_substructure(
             limit=limit,
         )
         
-        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
         return _format_pharmacology_output(result)
     
@@ -809,9 +788,9 @@ async def search_substructure(
             f"✗ Error in substructure search: {type(e).__name__}: {e}\n\n"
             f"Input pattern: {pattern}\n\n"
             "Suggestions:\n"
-            "  • Check SMILES/SMARTS syntax\n"
-            "  • Very common substructures (benzene) may timeout\n"
-            "  • Try a more specific pattern"
+            "  → Check SMILES/SMARTS syntax\n"
+            "  → Very common substructures (benzene) may timeout\n"
+            "  → Try a more specific pattern"
         )
 
 
@@ -841,12 +820,7 @@ async def get_drug_profile(
     
     Returns:
         Comprehensive drug profile with all available information.
-    
-    Examples:
-        get_drug_profile("imatinib")
-        get_drug_profile("aspirin", include_trials=False)
     """
-    # Validate inputs
     drug_name, error = _validate_drug_name(drug_name)
     if error:
         return f"✗ Input error: {error}"
@@ -864,7 +838,7 @@ async def get_drug_profile(
             min_pchembl=min_pchembl,
         )
         
-        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
         return _format_pharmacology_output(result)
     
@@ -873,8 +847,8 @@ async def get_drug_profile(
             f"✗ Error getting drug profile: {type(e).__name__}: {e}\n\n"
             f"Input: drug_name='{drug_name}'\n\n"
             "Suggestions:\n"
-            "  • Check drug name spelling\n"
-            "  • Try alternative names or synonyms"
+            "  → Check drug name spelling\n"
+            "  → Try alternative names or synonyms"
         )
 
 
@@ -887,21 +861,13 @@ async def get_drug_forms(
     """
     Get all molecular forms of a drug (salts, stereoisomers, etc.).
     
-    Use this to see all registered forms of a drug substance,
-    including different salt forms and stereochemical variants.
-    
     Args:
         drug_name: Name of the drug (brand, generic, or synonym).
         limit: Maximum results (default: 50).
     
     Returns:
         List of all molecular forms with identifiers and SMILES.
-    
-    Examples:
-        get_drug_forms("imatinib")  # Shows imatinib mesylate, etc.
-        get_drug_forms("metformin")  # Shows metformin HCl, etc.
     """
-    # Validate inputs
     drug_name, error = _validate_drug_name(drug_name)
     if error:
         return f"✗ Input error: {error}"
@@ -917,7 +883,7 @@ async def get_drug_forms(
             limit=limit,
         )
         
-        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
         return _format_pharmacology_output(result)
     
@@ -939,17 +905,11 @@ async def search_drug_trials(
     
     Args:
         drug_name: Name of the drug (brand, generic, or synonym).
-            Examples: "imatinib", "pembrolizumab", "Keytruda"
         limit: Maximum results (default: 50).
     
     Returns:
         List of clinical trials with NCT IDs, titles, phases, and status.
-    
-    Examples:
-        search_drug_trials("imatinib")
-        search_drug_trials("pembrolizumab")
     """
-    # Validate inputs
     drug_name, error = _validate_drug_name(drug_name)
     if error:
         return f"✗ Input error: {error}"
@@ -965,7 +925,7 @@ async def search_drug_trials(
             limit=limit,
         )
         
-        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
         return _format_pharmacology_output(result)
     
@@ -974,8 +934,8 @@ async def search_drug_trials(
             f"✗ Error searching drug trials: {type(e).__name__}: {e}\n\n"
             f"Input: drug_name='{drug_name}'\n\n"
             "Suggestions:\n"
-            "  • Check drug name spelling\n"
-            "  • For biologics, try the INN name (e.g., 'pembrolizumab' not 'Keytruda')"
+            "  → Check drug name spelling\n"
+            "  → For biologics, try the INN name (e.g., 'pembrolizumab' not 'Keytruda')"
         )
 
 
@@ -988,27 +948,17 @@ async def compare_drugs_on_target(
     """
     Compare multiple drugs' activity against a single target.
     
-    Useful for understanding relative potency of different drugs
-    against the same protein target.
-    
     Args:
         target: Gene symbol of the target (e.g., "EGFR", "ABL1").
-        drug_names: List of drug names to compare.
-            Examples: ["imatinib", "dasatinib", "nilotinib"]
+        drug_names: List of drug names to compare (at least 2).
     
     Returns:
         Comparison table showing relative potency and fold-differences.
-    
-    Examples:
-        compare_drugs_on_target("ABL1", ["imatinib", "dasatinib", "nilotinib"])
-        compare_drugs_on_target("EGFR", ["erlotinib", "gefitinib", "osimertinib"])
     """
-    # Validate target
     target, error = _validate_gene_symbol(target)
     if error:
         return f"✗ Input error (target): {error}"
     
-    # Normalize drug_names to list
     if isinstance(drug_names, str):
         drug_names = [drug_names]
     
@@ -1021,7 +971,6 @@ async def compare_drugs_on_target(
     if len(drug_names) > 20:
         return "✗ Input error: Too many drugs. Maximum is 20 for comparison."
     
-    # Validate each drug name
     validated_names = []
     for name in drug_names:
         clean_name, error = _validate_drug_name(name)
@@ -1036,7 +985,7 @@ async def compare_drugs_on_target(
             drug_names=validated_names,
         )
         
-        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
         return _format_pharmacology_output(result)
     
@@ -1059,34 +1008,20 @@ async def search_selective_drugs(
     """
     Find drugs that are selective for one target over others.
     
-    Useful for finding compounds that hit a desired target but 
-    spare related proteins (e.g., selective kinase inhibitors).
-    
     Args:
         target: Primary target gene symbol (the desired target).
-            Example: "JAK2"
         off_targets: Gene symbols of targets to avoid.
-            Example: ["JAK1", "JAK3"] to find JAK2-selective compounds
         min_selectivity_fold: Minimum fold-selectivity required (default: 10x).
-            A value of 10 means the drug must be 10x more potent on 
-            the primary target vs off-targets.
         min_pchembl: Minimum potency on primary target (default: 6.0 = 1 μM).
         limit: Maximum results (default: 50).
     
     Returns:
         List of selective compounds with selectivity ratios.
-    
-    Examples:
-        search_selective_drugs("JAK2", ["JAK1", "JAK3"])
-        search_selective_drugs("CDK4", ["CDK6"], min_selectivity_fold=100)
-        search_selective_drugs("EGFR", ["ERBB2", "ERBB4"])
     """
-    # Validate target
     target, error = _validate_gene_symbol(target)
     if error:
         return f"✗ Input error (target): {error}"
     
-    # Normalize off_targets to list
     if isinstance(off_targets, str):
         off_targets = [off_targets]
     
@@ -1100,7 +1035,6 @@ async def search_selective_drugs(
     if len(off_targets) > 10:
         return "✗ Input error: Too many off-targets. Maximum is 10."
     
-    # Validate each off-target
     validated_off_targets = []
     for ot in off_targets:
         clean_ot, error = _validate_gene_symbol(ot)
@@ -1108,7 +1042,6 @@ async def search_selective_drugs(
             return f"✗ Input error (off_target '{ot}'): {error}"
         validated_off_targets.append(clean_ot)
     
-    # Validate numeric params
     min_pchembl, error = _validate_pchembl(min_pchembl)
     if error:
         return f"✗ Input error: {error}"
@@ -1130,7 +1063,7 @@ async def search_selective_drugs(
             limit=limit,
         )
         
-        searcher = PharmacologySearch(DEFAULT_CONFIG)
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
         return _format_pharmacology_output(result)
     
@@ -1139,3 +1072,16 @@ async def search_selective_drugs(
             f"✗ Error searching selective drugs: {type(e).__name__}: {e}\n\n"
             f"Input: target='{target}', off_targets={validated_off_targets}"
         )
+
+TARGET_SEARCH_TOOLS = [
+    search_drug_targets,
+    search_target_drugs,
+    search_similar_molecules,
+    search_exact_structure,
+    search_substructure,
+    get_drug_profile,
+    get_drug_forms,
+    search_drug_trials,
+    compare_drugs_on_target,
+    search_selective_drugs,
+]
