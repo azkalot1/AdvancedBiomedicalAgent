@@ -1073,6 +1073,330 @@ async def search_selective_drugs(
             f"Input: target='{target}', off_targets={validated_off_targets}"
         )
 
+
+# =============================================================================
+# UNIFIED PHARMACOLOGY SEARCH TOOL
+# =============================================================================
+
+@tool("pharmacology_search", return_direct=False)
+@robust_unwrap_llm_inputs
+async def pharmacology_search(
+    search_type: str,
+    drug_name: str | None = None,
+    gene_symbol: str | None = None,
+    smiles: str | None = None,
+    drug_names: list[str] | None = None,
+    off_targets: list[str] | None = None,
+    min_pchembl: float = 5.0,
+    similarity_threshold: float = 0.7,
+    min_selectivity_fold: float = 10.0,
+    data_source: str = "both",
+    limit: int = 50,
+) -> str:
+    """
+    Unified pharmacology search tool for drug-target interactions, mechanisms, 
+    clinical trials, and molecular similarity.
+    
+    Args:
+        search_type: The type of search to perform. Required. One of:
+            - "drug_targets": Find all protein targets for a drug (requires drug_name)
+            - "target_drugs": Find all drugs that hit a target (requires gene_symbol)
+            - "drug_profile": Get comprehensive drug profile (requires drug_name)
+            - "drug_forms": Get all salt/stereo forms of a drug (requires drug_name)
+            - "drug_trials": Find clinical trials for a drug (requires drug_name)
+            - "similar_molecules": Find structurally similar molecules (requires smiles)
+            - "exact_structure": Identify a molecule from SMILES (requires smiles)
+            - "substructure": Find molecules containing a substructure (requires smiles)
+            - "compare_drugs": Compare drugs on a target (requires gene_symbol + drug_names)
+            - "selective_drugs": Find selective drugs (requires gene_symbol + off_targets)
+        
+        drug_name: Name of the drug (brand, generic, or synonym).
+            Required for: drug_targets, drug_profile, drug_forms, drug_trials
+            Examples: "imatinib", "Gleevec", "aspirin", "pembrolizumab"
+        
+        gene_symbol: Gene symbol of the target protein (HGNC official symbol).
+            Required for: target_drugs, compare_drugs, selective_drugs
+            Examples: "EGFR", "ABL1", "JAK2", "BRAF", "CDK4", "ROS1"
+        
+        smiles: SMILES string of a molecule.
+            Required for: similar_molecules, exact_structure, substructure
+            Example: "CC(=O)Oc1ccccc1C(=O)O" (aspirin)
+        
+        drug_names: List of drug names for comparison.
+            Required for: compare_drugs
+            Example: ["imatinib", "dasatinib", "nilotinib"]
+        
+        off_targets: List of gene symbols to avoid (for selectivity search).
+            Required for: selective_drugs
+            Example: ["JAK1", "JAK3"] (to find JAK2-selective compounds)
+        
+        min_pchembl: Minimum potency threshold (pChEMBL value). Default: 5.0
+            - 5.0 = 10 μM (weak, more results)
+            - 6.0 = 1 μM (moderate)
+            - 7.0 = 100 nM (good)
+            - 8.0 = 10 nM (potent, fewer results)
+        
+        similarity_threshold: Minimum Tanimoto similarity for structure search. Default: 0.7
+            - 0.5 = distant analogs
+            - 0.7 = similar scaffold
+            - 0.85 = close analogs
+            - 0.95 = very similar
+        
+        min_selectivity_fold: Minimum fold-selectivity for selective_drugs. Default: 10.0
+        
+        data_source: Type of target data to return. Default: "both"
+            - "both": Activity data + curated mechanisms
+            - "activity": Only quantitative assay data (IC50, Ki, etc.)
+            - "mechanism": Only curated mechanism of action data
+        
+        limit: Maximum number of results. Default: 50, max: 500
+    
+    Returns:
+        Formatted search results with target/mechanism data, activity values,
+        clinical trials, or molecular similarity scores depending on search_type.
+    
+    Examples:
+        # Find targets for a drug
+        pharmacology_search(search_type="drug_targets", drug_name="imatinib")
+        
+        # Find drugs for a target
+        pharmacology_search(search_type="target_drugs", gene_symbol="EGFR", min_pchembl=7.0)
+        
+        # Get comprehensive drug profile
+        pharmacology_search(search_type="drug_profile", drug_name="aspirin")
+        
+        # Find similar molecules
+        pharmacology_search(search_type="similar_molecules", smiles="CC(=O)Oc1ccccc1C(=O)O")
+        
+        # Compare drugs on a target
+        pharmacology_search(
+            search_type="compare_drugs",
+            gene_symbol="ABL1",
+            drug_names=["imatinib", "dasatinib", "nilotinib"]
+        )
+        
+        # Find selective drugs
+        pharmacology_search(
+            search_type="selective_drugs",
+            gene_symbol="JAK2",
+            off_targets=["JAK1", "JAK3"],
+            min_selectivity_fold=10.0
+        )
+    """
+    
+    # === VALIDATE SEARCH TYPE ===
+    valid_search_types = {
+        "drug_targets": SearchMode.TARGETS_FOR_DRUG,
+        "target_drugs": SearchMode.DRUGS_FOR_TARGET,
+        "drug_profile": SearchMode.DRUG_PROFILE,
+        "drug_forms": SearchMode.DRUG_FORMS,
+        "drug_trials": SearchMode.TRIALS_FOR_DRUG,
+        "similar_molecules": SearchMode.SIMILAR_MOLECULES,
+        "exact_structure": SearchMode.EXACT_STRUCTURE,
+        "substructure": SearchMode.SUBSTRUCTURE,
+        "compare_drugs": SearchMode.COMPARE_DRUGS,
+        "selective_drugs": SearchMode.SELECTIVE_DRUGS,
+    }
+    
+    if not search_type:
+        return (
+            "✗ Input error: search_type is required.\n\n"
+            "Valid search types:\n"
+            "  • drug_targets - Find protein targets for a drug\n"
+            "  • target_drugs - Find drugs that hit a target\n"
+            "  • drug_profile - Get comprehensive drug profile\n"
+            "  • drug_forms - Get all salt/stereo forms\n"
+            "  • drug_trials - Find clinical trials\n"
+            "  • similar_molecules - Find structurally similar molecules\n"
+            "  • exact_structure - Identify a molecule from SMILES\n"
+            "  • substructure - Find molecules containing a substructure\n"
+            "  • compare_drugs - Compare drugs on a target\n"
+            "  • selective_drugs - Find selective drugs"
+        )
+    
+    search_type_lower = search_type.lower().strip().replace("-", "_").replace(" ", "_")
+    
+    if search_type_lower not in valid_search_types:
+        return (
+            f"✗ Input error: Unknown search_type '{search_type}'.\n\n"
+            "Valid search types:\n"
+            "  • drug_targets - Find protein targets for a drug (requires drug_name)\n"
+            "  • target_drugs - Find drugs that hit a target (requires gene_symbol)\n"
+            "  • drug_profile - Get comprehensive drug profile (requires drug_name)\n"
+            "  • drug_forms - Get all salt/stereo forms (requires drug_name)\n"
+            "  • drug_trials - Find clinical trials (requires drug_name)\n"
+            "  • similar_molecules - Find structurally similar molecules (requires smiles)\n"
+            "  • exact_structure - Identify a molecule from SMILES (requires smiles)\n"
+            "  • substructure - Find molecules with substructure (requires smiles)\n"
+            "  • compare_drugs - Compare drugs on a target (requires gene_symbol + drug_names)\n"
+            "  • selective_drugs - Find selective drugs (requires gene_symbol + off_targets)"
+        )
+    
+    mode = valid_search_types[search_type_lower]
+    
+    # === VALIDATE REQUIRED PARAMETERS FOR EACH SEARCH TYPE ===
+    
+    # Drug name required
+    if mode in [SearchMode.TARGETS_FOR_DRUG, SearchMode.DRUG_PROFILE, 
+                SearchMode.DRUG_FORMS, SearchMode.TRIALS_FOR_DRUG]:
+        if not drug_name or not drug_name.strip():
+            return (
+                f"✗ Input error: drug_name is required for search_type='{search_type}'.\n\n"
+                "Example:\n"
+                f"  pharmacology_search(search_type='{search_type}', drug_name='imatinib')"
+            )
+        drug_name = drug_name.strip()
+        if len(drug_name) < 2:
+            return f"✗ Input error: drug_name '{drug_name}' is too short."
+    
+    # Gene symbol required
+    if mode in [SearchMode.DRUGS_FOR_TARGET, SearchMode.COMPARE_DRUGS, SearchMode.SELECTIVE_DRUGS]:
+        if not gene_symbol or not gene_symbol.strip():
+            return (
+                f"✗ Input error: gene_symbol is required for search_type='{search_type}'.\n\n"
+                "Example:\n"
+                f"  pharmacology_search(search_type='{search_type}', gene_symbol='EGFR')\n\n"
+                "Common gene symbols: EGFR, ABL1, JAK2, BRAF, CDK4, ROS1, NTRK1"
+            )
+        gene_symbol = gene_symbol.strip().upper()
+        if len(gene_symbol) < 2 or len(gene_symbol) > 20:
+            return f"✗ Input error: gene_symbol '{gene_symbol}' is invalid. Use official HGNC symbols."
+    
+    # SMILES required
+    if mode in [SearchMode.SIMILAR_MOLECULES, SearchMode.EXACT_STRUCTURE, SearchMode.SUBSTRUCTURE]:
+        if not smiles or not smiles.strip():
+            return (
+                f"✗ Input error: smiles is required for search_type='{search_type}'.\n\n"
+                "Example:\n"
+                f"  pharmacology_search(search_type='{search_type}', smiles='CC(=O)Oc1ccccc1C(=O)O')"
+            )
+        smiles = smiles.strip()
+        if len(smiles) > 5000:
+            return f"✗ Input error: smiles is too long ({len(smiles)} chars). Maximum is 5000."
+    
+    # Drug names list required for compare
+    if mode == SearchMode.COMPARE_DRUGS:
+        if not drug_names or len(drug_names) < 2:
+            return (
+                "✗ Input error: drug_names list with at least 2 drugs is required for compare_drugs.\n\n"
+                "Example:\n"
+                "  pharmacology_search(\n"
+                "      search_type='compare_drugs',\n"
+                "      gene_symbol='ABL1',\n"
+                "      drug_names=['imatinib', 'dasatinib', 'nilotinib']\n"
+                "  )"
+            )
+        if isinstance(drug_names, str):
+            drug_names = [drug_names]
+        drug_names = [d.strip() for d in drug_names if d and d.strip()]
+        if len(drug_names) < 2:
+            return "✗ Input error: Provide at least 2 valid drug names to compare."
+    
+    # Off-targets required for selective
+    if mode == SearchMode.SELECTIVE_DRUGS:
+        if not off_targets or len(off_targets) == 0:
+            return (
+                "✗ Input error: off_targets list is required for selective_drugs.\n\n"
+                "Example:\n"
+                "  pharmacology_search(\n"
+                "      search_type='selective_drugs',\n"
+                "      gene_symbol='JAK2',\n"
+                "      off_targets=['JAK1', 'JAK3']\n"
+                "  )"
+            )
+        if isinstance(off_targets, str):
+            off_targets = [off_targets]
+        off_targets = [t.strip().upper() for t in off_targets if t and t.strip()]
+        if len(off_targets) == 0:
+            return "✗ Input error: Provide at least 1 valid off-target gene symbol."
+        if len(off_targets) > 10:
+            return "✗ Input error: Too many off-targets. Maximum is 10."
+    
+    # === VALIDATE OPTIONAL PARAMETERS ===
+    
+    # min_pchembl
+    if not isinstance(min_pchembl, (int, float)):
+        return f"✗ Input error: min_pchembl must be a number, got {type(min_pchembl).__name__}"
+    if min_pchembl < 0 or min_pchembl > 15:
+        return (
+            f"✗ Input error: min_pchembl={min_pchembl} is out of range (0.0 to 15.0).\n"
+            "Common values: 5.0 (weak), 6.0 (moderate), 7.0 (good), 8.0 (potent)"
+        )
+    
+    # similarity_threshold
+    if not isinstance(similarity_threshold, (int, float)):
+        return f"✗ Input error: similarity_threshold must be a number"
+    if similarity_threshold < 0.0 or similarity_threshold > 1.0:
+        return f"✗ Input error: similarity_threshold={similarity_threshold} must be between 0.0 and 1.0"
+    
+    # min_selectivity_fold
+    if not isinstance(min_selectivity_fold, (int, float)) or min_selectivity_fold < 1:
+        return "✗ Input error: min_selectivity_fold must be >= 1.0"
+    
+    # data_source
+    data_source_map = {
+        "both": DataSource.BOTH,
+        "activity": DataSource.ACTIVITY,
+        "mechanism": DataSource.MECHANISM,
+    }
+    ds_key = data_source.lower().strip() if data_source else "both"
+    if ds_key not in data_source_map:
+        return (
+            f"✗ Input error: Invalid data_source '{data_source}'.\n"
+            "Valid options: 'both', 'activity', 'mechanism'"
+        )
+    ds = data_source_map[ds_key]
+    
+    # limit
+    if not isinstance(limit, int):
+        try:
+            limit = int(limit)
+        except (ValueError, TypeError):
+            return f"✗ Input error: limit must be an integer"
+    limit = max(1, min(500, limit))
+    
+    # === BUILD SEARCH INPUT ===
+    try:
+        search_input = TargetSearchInput(
+            mode=mode,
+            query=drug_name or gene_symbol,
+            smiles=smiles,
+            smarts=smiles if mode == SearchMode.SUBSTRUCTURE else None,
+            similarity_threshold=float(similarity_threshold),
+            min_pchembl=float(min_pchembl),
+            data_source=ds,
+            target=gene_symbol,
+            off_targets=off_targets or [],
+            min_selectivity_fold=float(min_selectivity_fold),
+            drug_names=drug_names or [],
+            limit=limit,
+        )
+        
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+    
+    except Exception as e:
+        # Build context-specific error message
+        context_parts = [f"search_type='{search_type}'"]
+        if drug_name:
+            context_parts.append(f"drug_name='{drug_name}'")
+        if gene_symbol:
+            context_parts.append(f"gene_symbol='{gene_symbol}'")
+        if smiles:
+            smiles_preview = _truncate(smiles, 40)
+            context_parts.append(f"smiles='{smiles_preview}'")
+        
+        return (
+            f"✗ Error in pharmacology search: {type(e).__name__}: {e}\n\n"
+            f"Input: {', '.join(context_parts)}\n\n"
+            "Suggestions:\n"
+            "  → Check spelling of drug/gene names\n"
+            "  → Verify SMILES string is valid\n"
+            "  → Try lowering min_pchembl for more results"
+        )
+
+
 TARGET_SEARCH_TOOLS = [
     search_drug_targets,
     search_target_drugs,

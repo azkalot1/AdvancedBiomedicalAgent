@@ -92,6 +92,10 @@ def show_help() -> None:
     print("    drop                   - Drop table and indexes")
     print("    full [batch_size]      - Create + populate + verify + test")
     print()
+    print("Molecular Mapping Commands:")
+    print("  create-dm-target         - Create canonical target mappings (ChEMBL + BindingDB)")
+    print("  create-dm-molecule       - Create unified molecular mappings (all sources)")
+    print()
     print()
     print("Usage:")
     print("  biomedagent-db <command> [options]")
@@ -123,6 +127,8 @@ def show_help() -> None:
     print("  biomedagent-db generate-ctgov-search create")
     print("  biomedagent-db generate-ctgov-search populate 2000")
     print("  biomedagent-db generate-ctgov-search full")
+    print("  biomedagent-db create-dm-target")
+    print("  biomedagent-db create-dm-molecule")
     print("  biomedagent-db extract-schema --output schema.txt --sample-rows 5")
 
 
@@ -230,6 +236,40 @@ def route_generate_ctgov_search() -> NoReturn:
 
 
 
+def route_create_dm_target() -> NoReturn:
+    """Route to dm_target canonical target mapping creation."""
+    try:
+        from bioagent.data.ingest.create_and_populate_dm_target import main
+        print("🎯 Starting canonical target mapping creation...")
+        main()
+        print("✅ Canonical target mapping completed successfully!")
+    except ImportError as e:
+        print(f"❌ Error importing create_and_populate_dm_target: {e}")
+        print("Make sure all dependencies are installed with: pip install -e .")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error creating canonical target mapping: {e}")
+        sys.exit(1)
+    sys.exit(0)
+
+
+def route_create_dm_molecule() -> NoReturn:
+    """Route to dm_molecule unified molecular mappings creation."""
+    try:
+        from bioagent.data.ingest.build_molecular_mappings import main
+        print("🧬 Starting unified molecular mappings creation...")
+        main()
+        print("✅ Unified molecular mappings completed successfully!")
+    except ImportError as e:
+        print(f"❌ Error importing build_molecular_mappings: {e}")
+        print("Make sure all dependencies are installed with: pip install -e .")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error creating unified molecular mappings: {e}")
+        sys.exit(1)
+    sys.exit(0)
+
+
 def route_db_command(command: str, args: list[str]) -> NoReturn:
     """Route database management commands."""
     try:
@@ -316,6 +356,10 @@ def main() -> NoReturn:
         route_generate_search()
     elif command == "generate-ctgov-search":
         route_generate_ctgov_search()
+    elif command == "create-dm-target":
+        route_create_dm_target()
+    elif command == "create-dm-molecule":
+        route_create_dm_molecule()
     elif command in ["info", "reset", "vacuum", "tables", "create-schema", "fix-permissions", "verify-deps", "install-pgvector", "create-vector-ext", "install-rdkit", "create-rdkit-ext"]:
         route_db_command(command, args)
     elif command in ["help", "--help", "-h"]:

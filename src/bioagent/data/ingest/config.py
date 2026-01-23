@@ -3,11 +3,16 @@
 Database configuration for data ingestion.
 Modify these settings to match your PostgreSQL setup.
 """
+import os
 from typing import Any
 
 import psycopg2
 import psycopg2.extras
+from dotenv import load_dotenv
 from tqdm import tqdm
+
+# Load environment variables from .env file at module import
+load_dotenv()
 
 
 class DatabaseConfig:
@@ -34,10 +39,33 @@ class DatabaseConfig:
         return {"host": self.host, "port": self.port, "database": self.database, "user": self.user, "password": self.password}
 
 
-# Default database configuration
+# Default database configuration - reads from environment variables with fallbacks
 DEFAULT_CONFIG = DatabaseConfig(
-    host="localhost", port=5432, database="database", user="database_user", password="database_password"
+    host=os.getenv("DB_HOST", "localhost"),
+    port=int(os.getenv("DB_PORT", "5432")),
+    database=os.getenv("DB_NAME", "database"),
+    user=os.getenv("DB_USER", "database_user"),
+    password=os.getenv("DB_PASSWORD", "database_password")
 )
+
+
+def load_config_from_env() -> DatabaseConfig:
+    """
+    Load database configuration from environment variables.
+
+    Looks for .env file in the project root or ingest directory.
+    Reads DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD.
+
+    Returns:
+        DatabaseConfig instance with environment variable values
+    """
+    return DatabaseConfig(
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "5432")),
+        database=os.getenv("DB_NAME", "database"),
+        user=os.getenv("DB_USER", "database_user"),
+        password=os.getenv("DB_PASSWORD", "database_password")
+    )
 
 
 def get_connection(config: DatabaseConfig) -> psycopg2.extensions.connection:

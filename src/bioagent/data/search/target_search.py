@@ -1343,14 +1343,14 @@ class PharmacologySearch:
                     s.overall_status as trial_status,
                     s.phase,
                     NULL::bigint as concept_id,
-                    i.intervention_name as concept_name,
+                    i.name as concept_name,
                     NULL as molecule_form,
                     'direct_intervention' as match_type,
                     NULL::float as confidence
                 FROM ctgov_interventions i
                 JOIN ctgov_studies s ON i.nct_id = s.nct_id
                 WHERE i.intervention_type = 'DRUG'
-                  AND i.intervention_name ILIKE $1
+                  AND i.name ILIKE $1
                 ORDER BY s.nct_id DESC
                 LIMIT $2
             """

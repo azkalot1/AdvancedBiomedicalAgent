@@ -376,7 +376,7 @@ async def search_clinical_trials(
     
     # === Search Options ===
     strategy: str = "combined",
-    match_all: bool = False,
+    match_all: bool | None = None,
     similarity_threshold: float = 0.3,
     
     # === Output Options ===
@@ -510,7 +510,9 @@ async def search_clinical_trials(
               • "exact" - Exact string matching
     
     match_all: If True, ALL search terms must match (AND logic)
-               If False (default), ANY term can match (OR with scoring)
+               If False, ANY term can match (OR with scoring)
+               If not specified, automatically uses AND logic when multiple search
+               criteria are provided, OR logic for single criteria
     
     similarity_threshold: Minimum similarity score (0.0-1.0, default: 0.3)
                           Lower = more results, higher = stricter matching
@@ -655,7 +657,21 @@ async def search_clinical_trials(
         intervention_type_list = None
         if intervention_type:
             intervention_type_list = [t.strip() for t in intervention_type.split(",") if t.strip()]
-        
+
+        # Auto-enable match_all=True when multiple search criteria are provided
+        # Count non-None search criteria
+        search_criteria_count = sum([
+            condition is not None,
+            intervention is not None,
+            keyword is not None,
+            nct_id_list is not None and len(nct_id_list) > 0,
+            sponsor is not None
+        ])
+
+        # If user didn't explicitly set match_all, auto-detect based on criteria count
+        if match_all is None:
+            match_all = search_criteria_count > 1  # Use AND logic if multiple criteria
+
         # Parse dates
         def parse_date(date_str: str | None) -> date_type | None:
             if not date_str:
