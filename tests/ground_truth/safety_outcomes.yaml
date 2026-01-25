@@ -1,0 +1,156 @@
+test_cases:
+  # ========================================
+  # ADVERSE EVENTS - EVENTS FOR DRUG
+  # ========================================
+  - id: "imatinib_adverse_events_001"
+    tool: "search_adverse_events"
+    input:
+      mode: "events_for_drug"
+      drug_name: "imatinib"
+    expected_facts:
+      required:
+        - "Adverse events for imatinib are returned"
+      optional:
+        - "Nausea is a reported event"
+        - "Edema is a reported event"
+        - "Myelosuppression or neutropenia reported"
+        - "Fatigue is a reported event"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "pembrolizumab_adverse_events_002"
+    tool: "search_adverse_events"
+    input:
+      mode: "events_for_drug"
+      drug_name: "pembrolizumab"
+    expected_facts:
+      required:
+        - "Adverse events for pembrolizumab are returned"
+      optional:
+        - "Immune-related events reported"
+        - "Fatigue is a reported event"
+        - "Rash or pruritus reported"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "metformin_adverse_events_003"
+    tool: "search_adverse_events"
+    input:
+      mode: "events_for_drug"
+      drug_name: "metformin"
+    expected_facts:
+      required:
+        - "Adverse events for metformin are returned"
+      optional:
+        - "GI events like diarrhea or nausea reported"
+        - "Lactic acidosis may be mentioned"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  # ========================================
+  # ADVERSE EVENTS - DRUGS WITH EVENT
+  # ========================================
+  - id: "neutropenia_trials_004"
+    tool: "search_adverse_events"
+    input:
+      mode: "drugs_with_event"
+      event_term: "neutropenia"
+    expected_facts:
+      required:
+        - "Trials reporting neutropenia are returned"
+      optional:
+        - "Chemotherapy trials included"
+        - "Hematologic drugs included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "hepatotoxicity_trials_005"
+    tool: "search_adverse_events"
+    input:
+      mode: "drugs_with_event"
+      event_term: "hepatotoxicity"
+    expected_facts:
+      required:
+        - "Trials reporting hepatotoxicity are returned"
+      optional:
+        - "Liver enzyme elevations mentioned"
+    source: "ClinicalTrials.gov"
+    confidence: "medium"
+
+  # ========================================
+  # TRIAL OUTCOMES - OUTCOMES FOR TRIAL
+  # ========================================
+  - id: "keynote001_outcomes_006"
+    tool: "search_trial_outcomes"
+    input:
+      mode: "outcomes_for_trial"
+      nct_id: "NCT01295827"
+    expected_facts:
+      required:
+        - "Outcomes for NCT01295827 are returned"
+      optional:
+        - "Primary and secondary outcomes listed"
+        - "Response rate or survival outcomes"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  # ========================================
+  # TRIAL OUTCOMES - TRIALS WITH OUTCOME
+  # ========================================
+  - id: "overall_survival_trials_007"
+    tool: "search_trial_outcomes"
+    input:
+      mode: "trials_with_outcome"
+      outcome_term: "overall survival"
+    expected_facts:
+      required:
+        - "Trials with overall survival outcome are returned"
+      optional:
+        - "Oncology trials included"
+        - "Time-to-event outcomes"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "progression_free_survival_008"
+    tool: "search_trial_outcomes"
+    input:
+      mode: "trials_with_outcome"
+      outcome_term: "progression free survival"
+    expected_facts:
+      required:
+        - "Trials with PFS outcome are returned"
+      optional:
+        - "Cancer trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "hba1c_outcomes_009"
+    tool: "search_trial_outcomes"
+    input:
+      mode: "trials_with_outcome"
+      outcome_term: "HbA1c"
+    expected_facts:
+      required:
+        - "Trials with HbA1c outcome are returned"
+      optional:
+        - "Diabetes trials included"
+        - "Glycemic control outcomes"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  # ========================================
+  # EFFICACY COMPARISON
+  # ========================================
+  - id: "ruxolitinib_efficacy_010"
+    tool: "search_trial_outcomes"
+    input:
+      mode: "efficacy_comparison"
+      drug_name: "ruxolitinib"
+    expected_facts:
+      required:
+        - "Efficacy data for ruxolitinib trials are returned"
+      optional:
+        - "p-values included"
+        - "Statistical analyses shown"
+    source: "ClinicalTrials.gov"
+    confidence: "high"

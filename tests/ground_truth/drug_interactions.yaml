@@ -1,0 +1,72 @@
+test_cases:
+  # ========================================
+  # WELL-KNOWN DRUG-DRUG INTERACTIONS
+  # ========================================
+  - id: "warfarin_interactions_001"
+    tool: "search_drug_interactions"
+    input:
+      drug_name: "warfarin"
+    expected_facts:
+      required:
+        - "warfarin has known drug interactions"
+      optional:
+        - "aspirin interacts with warfarin"
+        - "vitamin K interacts with warfarin"
+        - "NSAIDs interact with warfarin"
+        - "warfarin has bleeding risk with other anticoagulants"
+    source: "DrugCentral"
+    confidence: "high"
+
+  - id: "metformin_interactions_002"
+    tool: "search_drug_interactions"
+    input:
+      drug_name: "metformin"
+    expected_facts:
+      required:
+        - "metformin has known drug interactions"
+      optional:
+        - "contrast media interacts with metformin"
+        - "alcohol interacts with metformin"
+    source: "DrugCentral"
+    confidence: "medium"
+
+  - id: "simvastatin_interactions_003"
+    tool: "search_drug_interactions"
+    input:
+      drug_name: "simvastatin"
+    expected_facts:
+      required:
+        - "simvastatin has known drug interactions"
+      optional:
+        - "grapefruit interacts with simvastatin"
+        - "CYP3A4 inhibitors interact with simvastatin"
+        - "amiodarone interacts with simvastatin"
+    source: "DrugCentral"
+    confidence: "high"
+
+  - id: "fluoxetine_interactions_004"
+    tool: "search_drug_interactions"
+    input:
+      drug_name: "fluoxetine"
+    expected_facts:
+      required:
+        - "fluoxetine has known drug interactions"
+      optional:
+        - "MAO inhibitors interact with fluoxetine"
+        - "fluoxetine is a CYP2D6 inhibitor"
+    source: "DrugCentral"
+    confidence: "high"
+
+  - id: "rifampin_interactions_005"
+    tool: "search_drug_interactions"
+    input:
+      drug_name: "rifampin"
+    expected_facts:
+      required:
+        - "rifampin has known drug interactions"
+      optional:
+        - "rifampin is a CYP3A4 inducer"
+        - "oral contraceptives are affected by rifampin"
+        - "antiretrovirals interact with rifampin"
+    source: "DrugCentral"
+    confidence: "high"

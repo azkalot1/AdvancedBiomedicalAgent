@@ -1,0 +1,117 @@
+test_cases:
+  # ========================================
+  # COMPREHENSIVE DRUG PROFILES
+  # ========================================
+  - id: "imatinib_profile_001"
+    tool: "get_drug_profile"
+    input:
+      drug_name: "imatinib"
+    expected_facts:
+      required:
+        - "imatinib profile includes target information"
+        - "imatinib has known protein targets"
+      optional:
+        - "imatinib targets ABL1"
+        - "imatinib targets KIT"
+        - "imatinib has clinical trials"
+        - "imatinib has multiple molecular forms"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "aspirin_profile_002"
+    tool: "get_drug_profile"
+    input:
+      drug_name: "aspirin"
+    expected_facts:
+      required:
+        - "aspirin profile includes target information"
+      optional:
+        - "aspirin targets PTGS1 (COX-1)"
+        - "aspirin targets PTGS2 (COX-2)"
+        - "aspirin has clinical trials"
+        - "aspirin has SMILES structure"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "pembrolizumab_profile_003"
+    tool: "get_drug_profile"
+    input:
+      drug_name: "pembrolizumab"
+    expected_facts:
+      required:
+        - "pembrolizumab profile is returned"
+      optional:
+        - "pembrolizumab targets PDCD1 (PD-1)"
+        - "pembrolizumab is a biologic"
+        - "pembrolizumab has clinical trials"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "metformin_profile_004"
+    tool: "get_drug_profile"
+    input:
+      drug_name: "metformin"
+    expected_facts:
+      required:
+        - "metformin profile is returned"
+      optional:
+        - "metformin has known mechanism"
+        - "metformin has clinical trials"
+        - "metformin has molecular forms including hydrochloride"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "trastuzumab_profile_005"
+    tool: "get_drug_profile"
+    input:
+      drug_name: "trastuzumab"
+    expected_facts:
+      required:
+        - "trastuzumab profile is returned"
+      optional:
+        - "trastuzumab targets ERBB2 (HER2)"
+        - "trastuzumab is a monoclonal antibody"
+        - "trastuzumab has clinical trials"
+    source: "ChEMBL"
+    confidence: "high"
+
+  # ========================================
+  # DRUG FORMS
+  # ========================================
+  - id: "imatinib_forms_006"
+    tool: "get_drug_forms"
+    input:
+      drug_name: "imatinib"
+    expected_facts:
+      required:
+        - "imatinib forms are returned"
+      optional:
+        - "imatinib mesylate is a form"
+        - "multiple salt forms listed"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "metformin_forms_007"
+    tool: "get_drug_forms"
+    input:
+      drug_name: "metformin"
+    expected_facts:
+      required:
+        - "metformin forms are returned"
+      optional:
+        - "metformin hydrochloride is a form"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "omeprazole_forms_008"
+    tool: "get_drug_forms"
+    input:
+      drug_name: "omeprazole"
+    expected_facts:
+      required:
+        - "omeprazole forms are returned"
+      optional:
+        - "omeprazole magnesium is a form"
+        - "esomeprazole may be listed as related"
+    source: "ChEMBL"
+    confidence: "medium"

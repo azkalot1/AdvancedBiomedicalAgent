@@ -1,0 +1,17 @@
+# AdvancedBiomedicalAgent Repository Rules
+
+## Environment Setup
+- **ALWAYS** activate the `biomedagent` conda environment before running any Python scripts or commands in this repository
+- Use: `conda activate biomedagent` or `source activate biomedagent`
+- All terminal commands that execute Python code must be run within this environment
+
+## Database Configuration
+- The project uses PostgreSQL for storing clinical trial and biomedical data
+- Default database config is in `src/bioagent/data/ingest/config.py`
+- Tables follow the AACT (Aggregate Analysis of ClinicalTrials.gov) schema
+
+## Code Style
+- Follow existing patterns for data ingestion and search functionality
+- Use type hints consistently
+- Group related data by headers to avoid duplication in output rendering
+

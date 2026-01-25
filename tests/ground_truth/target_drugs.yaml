@@ -1,0 +1,161 @@
+test_cases:
+  # ========================================
+  # RECEPTOR TYROSINE KINASES
+  # ========================================
+  - id: "egfr_drugs_001"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "EGFR"
+    expected_facts:
+      required:
+        - "erlotinib targets EGFR"
+        - "gefitinib targets EGFR"
+      optional:
+        - "osimertinib targets EGFR"
+        - "afatinib targets EGFR"
+        - "lapatinib targets EGFR"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "abl1_drugs_002"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "ABL1"
+    expected_facts:
+      required:
+        - "imatinib targets ABL1"
+        - "dasatinib targets ABL1"
+      optional:
+        - "nilotinib targets ABL1"
+        - "ponatinib targets ABL1"
+        - "bosutinib targets ABL1"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "erbb2_drugs_003"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "ERBB2"
+    expected_facts:
+      required:
+        - "trastuzumab targets ERBB2"
+        - "lapatinib targets ERBB2"
+      optional:
+        - "pertuzumab targets ERBB2"
+        - "neratinib targets ERBB2"
+    source: "ChEMBL"
+    confidence: "high"
+
+  # ========================================
+  # JAK KINASES
+  # ========================================
+  - id: "jak2_drugs_004"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "JAK2"
+    expected_facts:
+      required:
+        - "ruxolitinib targets JAK2"
+      optional:
+        - "baricitinib targets JAK2"
+        - "fedratinib targets JAK2"
+        - "tofacitinib targets JAK2"
+    source: "ChEMBL"
+    confidence: "high"
+
+  # ========================================
+  # BRAF
+  # ========================================
+  - id: "braf_drugs_005"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "BRAF"
+    expected_facts:
+      required:
+        - "vemurafenib targets BRAF"
+        - "dabrafenib targets BRAF"
+      optional:
+        - "encorafenib targets BRAF"
+        - "sorafenib targets BRAF"
+    source: "ChEMBL"
+    confidence: "high"
+
+  # ========================================
+  # CDK KINASES
+  # ========================================
+  - id: "cdk4_drugs_006"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "CDK4"
+    expected_facts:
+      required:
+        - "palbociclib targets CDK4"
+      optional:
+        - "ribociclib targets CDK4"
+        - "abemaciclib targets CDK4"
+    source: "ChEMBL"
+    confidence: "high"
+
+  # ========================================
+  # IMMUNE CHECKPOINTS
+  # ========================================
+  - id: "pdcd1_drugs_007"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "PDCD1"
+    expected_facts:
+      required:
+        - "pembrolizumab targets PDCD1"
+        - "nivolumab targets PDCD1"
+      optional:
+        - "cemiplimab targets PDCD1"
+        - "dostarlimab targets PDCD1"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "cd274_drugs_008"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "CD274"
+    expected_facts:
+      required:
+        - "atezolizumab targets CD274"
+      optional:
+        - "durvalumab targets CD274"
+        - "avelumab targets CD274"
+    source: "ChEMBL"
+    confidence: "high"
+
+  # ========================================
+  # COX ENZYMES
+  # ========================================
+  - id: "ptgs2_drugs_009"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "PTGS2"
+    expected_facts:
+      required:
+        - "celecoxib targets PTGS2"
+      optional:
+        - "aspirin targets PTGS2"
+        - "ibuprofen targets PTGS2"
+        - "naproxen targets PTGS2"
+    source: "ChEMBL"
+    confidence: "high"
+
+  # ========================================
+  # TNF
+  # ========================================
+  - id: "tnf_drugs_010"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "TNF"
+    expected_facts:
+      required:
+        - "adalimumab targets TNF"
+      optional:
+        - "infliximab targets TNF"
+        - "etanercept targets TNF"
+        - "certolizumab targets TNF"
+    source: "ChEMBL"
+    confidence: "high"

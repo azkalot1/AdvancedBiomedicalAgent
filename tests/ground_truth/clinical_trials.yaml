@@ -1,0 +1,157 @@
+test_cases:
+  # ========================================
+  # LANDMARK ONCOLOGY TRIALS
+  # ========================================
+  - id: "nct01295827_001"
+    tool: "search_clinical_trials"
+    input:
+      nct_ids:
+        - "NCT01295827"
+    expected_facts:
+      required:
+        - "Trial NCT01295827 exists"
+        - "Trial NCT01295827 involves pembrolizumab"
+      optional:
+        - "Trial NCT01295827 is KEYNOTE-001"
+        - "Trial NCT01295827 involves melanoma"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "nct00924001_002"
+    tool: "search_clinical_trials"
+    input:
+      nct_ids:
+        - "NCT00924001"
+    expected_facts:
+      required:
+        - "Trial NCT00924001 exists"
+      optional:
+        - "Trial involves trastuzumab or HER2"
+        - "Trial involves breast cancer"
+    source: "ClinicalTrials.gov"
+    confidence: "medium"
+
+  # ========================================
+  # CONDITION SEARCHES
+  # ========================================
+  - id: "breast_cancer_phase3_003"
+    tool: "search_clinical_trials"
+    input:
+      condition: "breast cancer"
+      phase: "Phase 3"
+      status: "Completed"
+    expected_facts:
+      required:
+        - "Results include Phase 3 breast cancer trials"
+        - "Results include completed trials"
+      optional:
+        - "Results mention trastuzumab or palbociclib"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "diabetes_metformin_004"
+    tool: "search_clinical_trials"
+    input:
+      condition: "type 2 diabetes"
+      intervention: "metformin"
+    expected_facts:
+      required:
+        - "Results include diabetes trials"
+        - "Results include metformin"
+      optional:
+        - "Trials study glycemic control"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "melanoma_immunotherapy_005"
+    tool: "search_clinical_trials"
+    input:
+      condition: "melanoma"
+      intervention: "pembrolizumab"
+    expected_facts:
+      required:
+        - "Results include melanoma trials"
+        - "Results include pembrolizumab"
+      optional:
+        - "Trials mention checkpoint inhibitor"
+        - "Trials mention PD-1"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "cml_imatinib_006"
+    tool: "search_clinical_trials"
+    input:
+      condition: "chronic myeloid leukemia"
+      intervention: "imatinib"
+    expected_facts:
+      required:
+        - "Results include CML trials"
+        - "Results include imatinib"
+      optional:
+        - "Trials mention BCR-ABL or tyrosine kinase"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  # ========================================
+  # SPONSOR SEARCHES
+  # ========================================
+  - id: "pfizer_oncology_007"
+    tool: "search_clinical_trials"
+    input:
+      sponsor: "Pfizer"
+      condition: "cancer"
+      phase: "Phase 3"
+    expected_facts:
+      required:
+        - "Results include Pfizer-sponsored trials"
+        - "Results include cancer trials"
+      optional:
+        - "Pfizer is listed as lead sponsor"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "novartis_cml_008"
+    tool: "search_clinical_trials"
+    input:
+      sponsor: "Novartis"
+      condition: "leukemia"
+    expected_facts:
+      required:
+        - "Results include Novartis-sponsored trials"
+        - "Results include leukemia trials"
+      optional:
+        - "Trials mention imatinib or nilotinib"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  # ========================================
+  # STATUS FILTERS
+  # ========================================
+  - id: "recruiting_lung_cancer_009"
+    tool: "search_clinical_trials"
+    input:
+      condition: "non-small cell lung cancer"
+      status: "Recruiting"
+    expected_facts:
+      required:
+        - "Results include NSCLC trials"
+        - "Results include recruiting trials"
+      optional:
+        - "Trials are currently enrolling patients"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "completed_rheumatoid_010"
+    tool: "search_clinical_trials"
+    input:
+      condition: "rheumatoid arthritis"
+      status: "Completed"
+      has_results: true
+    expected_facts:
+      required:
+        - "Results include rheumatoid arthritis trials"
+        - "Results include completed trials"
+      optional:
+        - "Trials have posted results"
+    source: "ClinicalTrials.gov"
+    confidence: "high"

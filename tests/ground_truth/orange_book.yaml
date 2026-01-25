@@ -1,0 +1,124 @@
+test_cases:
+  # ========================================
+  # TE CODES (THERAPEUTIC EQUIVALENCE)
+  # ========================================
+  - id: "metformin_te_codes_001"
+    tool: "search_orange_book"
+    input:
+      mode: "te_codes"
+      drug_name: "metformin"
+    expected_facts:
+      required:
+        - "Orange Book contains products for metformin"
+      optional:
+        - "Metformin products have TE codes"
+        - "Metformin products include hydrochloride salt"
+    source: "FDA Orange Book"
+    confidence: "high"
+
+  - id: "lisinopril_te_codes_002"
+    tool: "search_orange_book"
+    input:
+      mode: "te_codes"
+      drug_name: "lisinopril"
+    expected_facts:
+      required:
+        - "Orange Book contains products for lisinopril"
+      optional:
+        - "Lisinopril products have TE codes"
+        - "Multiple generic manufacturers listed"
+    source: "FDA Orange Book"
+    confidence: "high"
+
+  - id: "atorvastatin_te_codes_003"
+    tool: "search_orange_book"
+    input:
+      mode: "te_codes"
+      drug_name: "atorvastatin"
+    expected_facts:
+      required:
+        - "Orange Book contains products for atorvastatin"
+      optional:
+        - "Atorvastatin products have TE codes"
+        - "Lipitor reference listed drug"
+    source: "FDA Orange Book"
+    confidence: "high"
+
+  # ========================================
+  # PATENT SEARCHES
+  # ========================================
+  - id: "imatinib_patents_004"
+    tool: "search_orange_book"
+    input:
+      mode: "patents"
+      drug_name: "imatinib"
+    expected_facts:
+      required:
+        - "Orange Book lists imatinib products"
+      optional:
+        - "Imatinib products include patent records"
+        - "Gleevec is listed"
+    source: "FDA Orange Book"
+    confidence: "high"
+
+  - id: "humira_patents_005"
+    tool: "search_orange_book"
+    input:
+      mode: "patents"
+      drug_name: "adalimumab"
+    expected_facts:
+      required:
+        - "Orange Book lists adalimumab products"
+      optional:
+        - "Adalimumab products include patent records"
+        - "Humira is listed"
+    source: "FDA Orange Book"
+    confidence: "high"
+
+  # ========================================
+  # EXCLUSIVITY
+  # ========================================
+  - id: "exclusivity_search_006"
+    tool: "search_orange_book"
+    input:
+      mode: "exclusivity"
+      drug_name: "pembrolizumab"
+    expected_facts:
+      required:
+        - "Orange Book lists pembrolizumab products"
+      optional:
+        - "Keytruda is listed"
+        - "Exclusivity data available"
+    source: "FDA Orange Book"
+    confidence: "medium"
+
+  # ========================================
+  # GENERICS SEARCH
+  # ========================================
+  - id: "omeprazole_generics_007"
+    tool: "search_orange_book"
+    input:
+      mode: "generics"
+      ingredient: "omeprazole"
+    expected_facts:
+      required:
+        - "Orange Book lists omeprazole products"
+      optional:
+        - "Multiple generic products listed"
+        - "Prilosec reference listed"
+    source: "FDA Orange Book"
+    confidence: "high"
+
+  - id: "simvastatin_generics_008"
+    tool: "search_orange_book"
+    input:
+      mode: "generics"
+      ingredient: "simvastatin"
+    expected_facts:
+      required:
+        - "Orange Book lists simvastatin products"
+      optional:
+        - "Zocor reference listed"
+        - "Multiple generic manufacturers"
+    source: "FDA Orange Book"
+    confidence: "high"
