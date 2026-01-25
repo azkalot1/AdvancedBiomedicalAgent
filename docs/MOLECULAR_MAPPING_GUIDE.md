@@ -4,11 +4,40 @@
 
 **ClinicalTrials.gov does NOT store molecular identifiers** like SMILES, InChI, PubChem CID, or ChEMBL ID.
 
-To enable molecule-protein binding annotation, you need to:
-1. Extract intervention names from CTG database
-2. Map names to external molecular databases
-3. Retrieve molecular structures and identifiers
-4. Link to protein binding databases
+The BiomedicalAgent database solves this through the **dm_molecule** unified molecular layer:
+
+1. **dm_molecule** - Consolidated molecules from ChEMBL, DrugCentral, BindingDB
+2. **dm_molecule_synonyms** - Comprehensive synonym dictionary for matching
+3. **map_ctgov_molecules** - Pre-computed intervention → molecule mappings
+4. **dm_compound_target_activity** - Unified activity data linking to dm_target
+
+### Quick Usage
+
+```sql
+-- Find molecules for a specific trial
+SELECT m.pref_name, m.canonical_smiles, m.inchi_key, map.confidence
+FROM map_ctgov_molecules map
+JOIN dm_molecule m ON map.mol_id = m.mol_id
+WHERE map.nct_id = 'NCT04280705';
+
+-- Find trials for a molecule
+SELECT s.nct_id, s.brief_title, s.phase, map.confidence
+FROM map_ctgov_molecules map
+JOIN ctgov_studies s ON map.nct_id = s.nct_id
+JOIN dm_molecule m ON map.mol_id = m.mol_id
+WHERE m.pref_name ILIKE '%imatinib%';
+
+-- Find trials for a drug concept (all forms)
+SELECT DISTINCT s.nct_id, s.brief_title, s.phase
+FROM map_ctgov_molecules map
+JOIN ctgov_studies s ON map.nct_id = s.nct_id
+JOIN dm_molecule_concept c ON map.concept_id = c.concept_id
+WHERE c.preferred_name ILIKE '%atorvastatin%';
+```
+
+---
+
+## Legacy Approach (for reference)
 
 ---
 
@@ -602,22 +631,159 @@ def get_or_map_intervention(intervention_id):
 ✅ **Aliases**: `ctgov_intervention_other_names.name`  
 ✅ **MeSH terms**: `ctgov_browse_interventions.mesh_term`
 
-### What You Need to Add
+### What the dm_molecule Layer Adds
 
-❌ Molecular identifiers (SMILES, InChI, etc.)  
-❌ PubChem CID, ChEMBL ID  
-❌ Protein targets  
-❌ Binding affinities
+✅ **Molecular identifiers**: SMILES, InChI, InChIKey  
+✅ **Cross-database IDs**: ChEMBL ID, DrugCentral ID, BindingDB ID, PubChem CID  
+✅ **Protein targets**: via dm_compound_target_activity  
+✅ **Binding affinities**: IC50, Ki, Kd, EC50, pChEMBL values  
+✅ **Pre-computed mappings**: map_ctgov_molecules  
 
-### Recommended Solution
+---
 
-1. **Extract** names from CTG tables
-2. **Map** to PubChem (free, comprehensive)
-3. **Enhance** with ChEMBL (bioactivity, targets)
-4. **Store** mappings in your database
-5. **Cache** results to avoid re-querying
+## BiomedicalAgent dm_molecule Implementation
 
-This gives you molecule-protein binding capability while keeping the clinical trial context!
+### The 3-Level Molecular Hierarchy
+
+```
+dm_molecule_concept (Level 1: Drug Concept)
+├── Groups all forms of the same drug
+├── parent_inchi_key_14: connectivity layer only (no stereo, no salts)
+├── preferred_name: "imatinib"
+│
+└── dm_molecule_stereo (Level 2: Stereo Form)
+    ├── Groups same stereochemistry, different salt forms
+    ├── parent_stereo_inchi_key: with stereo (no salts)
+    ├── stereo_type: ACHIRAL, DEFINED, RACEMIC, etc.
+    │
+    └── dm_molecule (Level 3: Specific Form)
+        ├── Individual molecule including salts
+        ├── inchi_key: full InChIKey
+        ├── canonical_smiles
+        ├── is_salt, salt_form
+        └── sources: [CHEMBL, DC, BDB]
+```
+
+### Matching Strategy (build_molecular_mappings.py)
+
+The `map_ctgov_molecules` table is populated using this strategy:
+
+1. **Exact name match** (confidence: 1.0)
+   - `ctgov_interventions.name` = `dm_molecule.pref_name`
+
+2. **Synonym match** (confidence: 0.95)
+   - `ctgov_interventions.name` matches `dm_molecule_synonyms.synonym`
+
+3. **Alias match** (confidence: 0.9)
+   - `ctgov_intervention_other_names.name` matches synonyms
+
+4. **Salt-stripped match** (confidence: 0.85)
+   - Remove common salt suffixes (hydrochloride, sodium, etc.)
+
+5. **Fuzzy match** (confidence: variable, threshold 0.6)
+   - Trigram similarity on normalized names
+
+6. **Combination drug parsing** (confidence: 0.8)
+   - Parse "Drug A + Drug B" into separate mappings
+
+### Key Tables and Views
+
+| Table | Purpose | Records |
+|-------|---------|---------|
+| `dm_molecule_concept` | Drug concepts (Level 1) | ~500K |
+| `dm_molecule_stereo` | Stereo forms (Level 2) | ~700K |
+| `dm_molecule` | Specific forms (Level 3) | ~3M |
+| `dm_molecule_synonyms` | Synonym dictionary | ~10M |
+| `map_ctgov_molecules` | CT.gov → molecule mappings | ~200K |
+| `map_product_molecules` | Product → molecule mappings | ~50K |
+| `dm_compound_target_activity` | Unified activity view | ~5M |
+
+### Example Queries
+
+```sql
+-- 1. Get molecule structure for a trial intervention
+SELECT 
+    i.name AS intervention,
+    m.pref_name,
+    m.canonical_smiles,
+    m.inchi_key,
+    map.match_type,
+    map.confidence
+FROM ctgov_interventions i
+JOIN map_ctgov_molecules map ON i.id = map.intervention_id
+JOIN dm_molecule m ON map.mol_id = m.mol_id
+WHERE i.nct_id = 'NCT04280705';
+
+-- 2. Find all trials for a drug (any form)
+SELECT 
+    s.nct_id,
+    s.brief_title,
+    s.phase,
+    s.overall_status,
+    c.preferred_name
+FROM dm_molecule_concept c
+JOIN map_ctgov_molecules map ON c.concept_id = map.concept_id
+JOIN ctgov_studies s ON map.nct_id = s.nct_id
+WHERE c.preferred_name ILIKE '%pembrolizumab%'
+ORDER BY s.start_date DESC;
+
+-- 3. Get protein targets for drugs in a trial
+SELECT DISTINCT
+    m.pref_name AS drug,
+    a.gene_symbol,
+    a.pchembl_value,
+    a.activity_type,
+    a.activity_value_nm
+FROM map_ctgov_molecules map
+JOIN dm_molecule m ON map.mol_id = m.mol_id
+JOIN dm_compound_target_activity a ON m.mol_id = a.mol_id
+WHERE map.nct_id = 'NCT04280705'
+  AND a.pchembl_value > 6
+ORDER BY a.pchembl_value DESC;
+
+-- 4. Find trials with drugs targeting EGFR
+SELECT DISTINCT
+    s.nct_id,
+    s.brief_title,
+    s.phase,
+    c.preferred_name AS drug,
+    a.pchembl_value
+FROM dm_compound_target_activity a
+JOIN map_ctgov_molecules map ON a.mol_id = map.mol_id
+JOIN ctgov_studies s ON map.nct_id = s.nct_id
+JOIN dm_molecule_concept c ON map.concept_id = c.concept_id
+WHERE a.gene_symbol = 'EGFR'
+  AND a.pchembl_value > 7
+  AND s.overall_status = 'Recruiting'
+ORDER BY a.pchembl_value DESC;
+
+-- 5. Compare drug forms used in trials
+SELECT 
+    c.preferred_name AS drug_concept,
+    m.pref_name AS specific_form,
+    m.salt_form,
+    COUNT(DISTINCT map.nct_id) AS n_trials
+FROM map_ctgov_molecules map
+JOIN dm_molecule m ON map.mol_id = m.mol_id
+JOIN dm_molecule_concept c ON map.concept_id = c.concept_id
+WHERE c.preferred_name ILIKE '%metformin%'
+GROUP BY c.preferred_name, m.pref_name, m.salt_form
+ORDER BY n_trials DESC;
+```
+
+### Regenerating Mappings
+
+To regenerate the CT.gov → molecule mappings:
+
+```bash
+# Run the mapping script
+python -m bioagent.data.ingest.build_molecular_mappings
+
+# Or as part of full ingestion
+biomedagent-db ingest  # dm_molecule mappings run after all sources
+```
+
+**Prerequisites:** ChEMBL, DrugCentral, BindingDB, dm_target, and CT.gov must be ingested first.
 
 
 

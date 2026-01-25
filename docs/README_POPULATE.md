@@ -2,7 +2,7 @@
 
 ## Overview
 
-The BiomedicalAgent PostgreSQL database integrates **8 data sources** into a unified schema for biomedical queries. All data is stored in the `public` schema with source-specific prefixes.
+The BiomedicalAgent PostgreSQL database integrates **9 data sources** into a unified schema for biomedical queries. All data is stored in the `public` schema with source-specific prefixes.
 
 ### Data Sources
 
@@ -10,12 +10,13 @@ The BiomedicalAgent PostgreSQL database integrates **8 data sources** into a uni
 |---|--------|---------------|-------------|
 | 1 | **OpenFDA** | `labels_meta`, `sections`, `mapping_*` | Drug labels with normalized structure |
 | 2 | **Orange Book** | `orange_book_*` | FDA therapeutic equivalence data |
-| 3 | **ClinicalTrials.gov** | `ctgov_*` | Clinical trials from CTTI AACT dump |
+| 3 | **ClinicalTrials.gov** | `ctgov_*`, `ctgov_enriched_search` | Clinical trials from CTTI AACT dump |
 | 4 | **DailyMed** | `dailymed_*` | SPL drug labels with semantic search |
 | 5 | **BindingDB** | `bindingdb_*` | Molecular targets & binding affinity |
 | 6 | **ChEMBL** | `chembl_*` (in chembl schema) | Biochemical annotations |
 | 7 | **dm_target** | `dm_target*` | Canonical target mapping (ChEMBL + BindingDB) |
 | 8 | **DrugCentral** | `drugcentral_*` | Molecular structures & chemical data |
+| 9 | **dm_molecule** | `dm_molecule*`, `map_*` | Unified molecules + CT.gov/product mappings |
 
 ---
 
@@ -93,7 +94,7 @@ biomedagent-db ingest --openfda-use-local-files  # Use existing downloads
 
 ### 3. ClinicalTrials.gov (CTTI AACT)
 
-**Script:** `build_ctgov.py`  
+**Script:** `build_ctgov.py`, `generate_ctgov_enriched_search.py`  
 **Tables Created:**
 - `ctgov_studies` - Main study records
 - `ctgov_interventions` - Drug/treatment interventions
@@ -102,11 +103,14 @@ biomedagent-db ingest --openfda-use-local-files  # Use existing downloads
 - `ctgov_*` - 40+ additional tables
 - `rag_study_corpus` - RAG-ready study JSON
 - `rag_study_keys` - Materialized view for RAG lookup
+- `ctgov_enriched_search` - Denormalized search table with trigram indexes
 
 **Key Features:**
 - Full CTTI AACT PostgreSQL dump (~500K studies)
 - Full-text search indexes on key tables
 - RAG functionality for study retrieval
+- Enriched search table with aggregated conditions, interventions, sponsors
+- Trigram similarity indexes for flexible searching
 
 **Options:**
 ```bash
@@ -117,6 +121,17 @@ biomedagent-db ingest --ctgov-rag-buckets 32
 # Standalone RAG population
 biomedagent-db ingest --ctgov-rag-corpus-only
 biomedagent-db ingest --ctgov-rag-keys-only
+
+# Populate enriched search table (faster flexible search)
+biomedagent-db ingest --ctgov-populate-enriched-search
+biomedagent-db ingest --ctgov-enriched-search-batch-size 2000
+
+# Standalone enriched search table
+biomedagent-db ingest --ctgov-enriched-search-only
+
+# Or via generate-ctgov-search command
+biomedagent-db generate-ctgov-search create
+biomedagent-db generate-ctgov-search populate 1000
 ```
 
 ---
@@ -243,6 +258,55 @@ biomedagent-db ingest --skip-dm-target  # Skip dm_target population
 
 ---
 
+### 9. dm_molecule Unified Molecular Mappings
+
+**Script:** `build_molecular_mappings.py`  
+**Tables Created:**
+- `dm_molecule` - Unified molecule table (all specific forms)
+- `dm_molecule_concept` - Drug concept grouping (Level 1: all forms of same drug)
+- `dm_molecule_stereo` - Stereo forms grouping (Level 2: same stereochemistry)
+- `dm_molecule_synonyms` - Comprehensive synonym dictionary
+- `map_ctgov_molecules` - CT.gov intervention to molecule mappings
+- `map_product_molecules` - OpenFDA/DailyMed to molecule mappings
+- `dm_compound_target_activity` - Unified activity materialized view
+
+**Key Features:**
+- 3-level molecular hierarchy (concept → stereo → molecule)
+- RDKit-based normalization (parent_smiles, parent_inchi_key_14, parent_stereo_inchi_key)
+- Salt/form detection and classification
+- Stereochemistry analysis (ACHIRAL, DEFINED, RACEMIC, etc.)
+- Cross-database unification (ChEMBL + DrugCentral + BindingDB)
+- Morgan fingerprints for similarity search (mfp2, ffp2)
+- RDKit mol column for structure-based queries
+- CT.gov intervention to molecule mapping with confidence scoring
+- Product (OpenFDA/DailyMed) to molecule mapping
+
+**Population:**
+| Phase | Description | Records |
+|-------|-------------|---------|
+| 1 | Create 3-level hierarchy tables | N/A |
+| 2 | Populate from ChEMBL | ~2M molecules |
+| 3 | Add DrugCentral molecules | ~5K |
+| 4 | Add BindingDB molecules | ~1.5M |
+| 5 | Build synonym dictionary | ~10M synonyms |
+| 6 | Map CT.gov interventions | ~200K mappings |
+| 7 | Map product labels | ~50K mappings |
+| 8 | Create activity view | ~5M activities |
+
+**Prerequisites:**
+- ChEMBL must be ingested first
+- DrugCentral must be ingested first
+- BindingDB must be ingested first
+- dm_target must be populated first
+- CT.gov must be ingested for intervention mappings
+
+**Options:**
+```bash
+biomedagent-db ingest --skip-dm-molecule  # Skip molecular mappings
+```
+
+---
+
 ## Database Management
 
 ### Check Database Status
@@ -334,6 +398,7 @@ SELECT COUNT(*) as products FROM orange_book_products;
 
 -- ClinicalTrials.gov
 SELECT COUNT(*) as studies FROM ctgov_studies;
+SELECT COUNT(*) as enriched_rows FROM ctgov_enriched_search;
 
 -- DailyMed
 SELECT COUNT(*) as products FROM dailymed_products;
@@ -352,26 +417,90 @@ FROM dm_target;
 
 -- DrugCentral
 SELECT COUNT(*) as drugs FROM drugcentral_drugs;
+
+-- dm_molecule hierarchy
+SELECT 
+    (SELECT COUNT(*) FROM dm_molecule_concept) as concepts,
+    (SELECT COUNT(*) FROM dm_molecule_stereo) as stereo_forms,
+    (SELECT COUNT(*) FROM dm_molecule) as molecules,
+    (SELECT COUNT(*) FROM dm_molecule_synonyms) as synonyms;
+
+-- CT.gov molecule mappings
+SELECT 
+    COUNT(*) as total_mappings,
+    COUNT(DISTINCT nct_id) as trials_mapped,
+    COUNT(DISTINCT mol_id) as molecules_mapped,
+    AVG(confidence) as avg_confidence
+FROM map_ctgov_molecules;
+
+-- Product molecule mappings
+SELECT 
+    source_table,
+    COUNT(*) as mappings,
+    COUNT(DISTINCT mol_id) as molecules
+FROM map_product_molecules
+GROUP BY source_table;
+
+-- Activity data coverage
+SELECT 
+    COUNT(*) as total_activities,
+    COUNT(DISTINCT mol_id) as molecules,
+    COUNT(DISTINCT gene_symbol) as targets,
+    AVG(pchembl_value) as avg_pchembl
+FROM dm_compound_target_activity;
 ```
 
-### Cross-Source Query Example
+### Cross-Source Query Examples
 
 ```sql
--- Find drugs with FDA labels, clinical trials, and binding data
+-- 1. Find drugs with FDA labels, clinical trials, and binding data (using dm_molecule)
 SELECT DISTINCT
-    lm.title as drug_name,
-    ob.trade_name,
-    ct.nct_id,
-    bs.gene_symbol,
-    bs.pchembl_value
-FROM labels_meta lm
-JOIN mapping_brand_name mbn ON lm.set_id_id = mbn.set_id_id
-LEFT JOIN orange_book_products ob ON LOWER(ob.trade_name) = LOWER(mbn.brand_name)
-LEFT JOIN ctgov_interventions ci ON LOWER(ci.name) ILIKE '%' || LOWER(mbn.brand_name) || '%'
-LEFT JOIN ctgov_studies ct ON ci.nct_id = ct.nct_id
-LEFT JOIN bindingdb_summary bs ON bs.ligand_name ILIKE '%' || LOWER(mbn.brand_name) || '%'
-WHERE lm.title IS NOT NULL
-LIMIT 10;
+    c.preferred_name AS drug_name,
+    m.canonical_smiles,
+    s.nct_id,
+    s.brief_title,
+    a.gene_symbol,
+    a.pchembl_value
+FROM dm_molecule_concept c
+JOIN dm_molecule m ON c.concept_id = m.concept_id
+LEFT JOIN map_ctgov_molecules map ON c.concept_id = map.concept_id
+LEFT JOIN ctgov_studies s ON map.nct_id = s.nct_id
+LEFT JOIN dm_compound_target_activity a ON m.mol_id = a.mol_id
+WHERE c.preferred_name ILIKE '%imatinib%'
+  AND a.pchembl_value > 7
+LIMIT 20;
+
+-- 2. Find trials for drugs targeting a specific gene
+SELECT DISTINCT
+    s.nct_id,
+    s.brief_title,
+    s.phase,
+    s.overall_status,
+    c.preferred_name AS drug,
+    a.pchembl_value
+FROM dm_compound_target_activity a
+JOIN dm_molecule_concept c ON a.concept_id = c.concept_id
+JOIN map_ctgov_molecules map ON a.mol_id = map.mol_id
+JOIN ctgov_studies s ON map.nct_id = s.nct_id
+WHERE a.gene_symbol = 'EGFR'
+  AND a.pchembl_value > 7
+  AND s.overall_status = 'Recruiting'
+ORDER BY a.pchembl_value DESC;
+
+-- 3. Connect FDA products to clinical trials via molecule
+SELECT DISTINCT
+    lm.title AS fda_product,
+    c.preferred_name AS drug_concept,
+    s.nct_id,
+    s.phase
+FROM map_product_molecules pm
+JOIN dm_molecule_concept c ON pm.concept_id = c.concept_id
+JOIN map_ctgov_molecules cm ON c.concept_id = cm.concept_id
+JOIN ctgov_studies s ON cm.nct_id = s.nct_id
+JOIN labels_meta lm ON pm.set_id = lm.set_id_id::text
+WHERE s.overall_status = 'Completed'
+  AND s.has_results = true
+LIMIT 20;
 ```
 
 ---
@@ -415,6 +544,31 @@ dm_target requires both ChEMBL and BindingDB to be ingested first:
 biomedagent-db ingest --skip-openfda --skip-orange-book --skip-ctgov --skip-dailymed --skip-drugcentral
 ```
 
+### "dm_molecule population failed"
+
+dm_molecule requires ChEMBL, DrugCentral, BindingDB, dm_target, and CT.gov:
+```bash
+# Check prerequisites exist
+biomedagent-db tables | grep -E "(chembl|drugcentral|bindingdb|dm_target|ctgov)"
+
+# Re-run only dm_molecule
+biomedagent-db ingest --skip-openfda --skip-orange-book --skip-ctgov --skip-dailymed --skip-bindingdb --skip-chembl --skip-dm-target --skip-drugcentral
+```
+
+### "RDKit extension not available"
+
+The RDKit PostgreSQL extension is optional but required for similarity/substructure search:
+```bash
+# Install RDKit
+biomedagent-db install-rdkit
+
+# Restart PostgreSQL
+sudo systemctl restart postgresql
+
+# Create extension
+biomedagent-db create-rdkit-ext
+```
+
 ---
 
 ## Performance Notes
@@ -424,13 +578,15 @@ biomedagent-db ingest --skip-openfda --skip-orange-book --skip-ctgov --skip-dail
 | OpenFDA | ~3 GB | ~150K labels | 30-60 min |
 | Orange Book | ~2 MB | ~35K products | 1 min |
 | ClinicalTrials.gov | ~1 GB | ~500K studies | 15-30 min |
+| CT.gov Enriched Search | N/A | ~500K rows | 10-20 min |
 | DailyMed | ~4 GB | ~150K labels | 30-60 min |
 | BindingDB | ~3 GB | ~2M activities | 30-60 min |
 | ChEMBL | ~1 GB | ~2M molecules | 20-40 min |
 | dm_target | N/A | ~3.5K targets | 5-10 min |
 | DrugCentral | ~50 MB | ~5K drugs | 2-5 min |
+| dm_molecule | N/A | ~3M molecules | 30-60 min |
 
-**Total:** ~12 GB download, 2-4 hours full ingestion
+**Total:** ~12 GB download, 3-5 hours full ingestion (including molecular mappings)
 
 ---
 
@@ -441,7 +597,7 @@ biomedagent-db ingest --help
 ```
 
 Key options:
-- `--skip-<source>` - Skip specific data source
+- `--skip-<source>` - Skip specific data source (openfda, orange-book, ctgov, dailymed, bindingdb, chembl, dm-target, drugcentral, dm-molecule)
 - `--n-max N` - Limit records per source
 - `--raw-dir PATH` - Custom data directory
 - `--vacuum` - Optimize after ingestion
@@ -450,3 +606,26 @@ Key options:
 - `--reset --force` - Reset database
 - `--dump-db FILE` - Backup database
 - `--restore-db FILE` - Restore database
+
+CT.gov RAG options:
+- `--ctgov-populate-rag` - Populate RAG during ingestion
+- `--ctgov-rag-corpus-only` - Only populate RAG corpus
+- `--ctgov-rag-keys-only` - Only populate RAG keys
+- `--ctgov-rag-buckets N` - Number of buckets (default: 16)
+
+CT.gov Enriched Search options:
+- `--ctgov-populate-enriched-search` - Populate during ingestion
+- `--ctgov-enriched-search-only` - Standalone population
+- `--ctgov-enriched-search-batch-size N` - Batch size (default: 1000)
+
+BindingDB options:
+- `--bindingdb-all-organisms` - Include all organisms (default: human only)
+- `--bindingdb-batch-size N` - Batch size (default: 10000)
+- `--bindingdb-force-recreate` - Drop and recreate tables
+
+ChEMBL options:
+- `--chembl-force-recreate` - Drop and recreate tables
+
+OpenFDA options:
+- `--openfda-files N` - Limit number of files
+- `--openfda-use-local-files` - Use existing downloads

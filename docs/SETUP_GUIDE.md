@@ -8,10 +8,11 @@ Complete guide for setting up the PostgreSQL database for BiomedicalAgent.
 2. [PostgreSQL Installation](#postgresql-installation)
 3. [Database Setup](#database-setup)
 4. [pgvector Extension](#pgvector-extension)
-5. [Data Ingestion](#data-ingestion)
-6. [Post-Ingestion Steps](#post-ingestion-steps)
-7. [Database Management](#database-management)
-8. [Troubleshooting](#troubleshooting)
+5. [RDKit Extension](#rdkit-extension)
+6. [Data Ingestion](#data-ingestion)
+7. [Post-Ingestion Steps](#post-ingestion-steps)
+8. [Database Management](#database-management)
+9. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -169,6 +170,49 @@ SELECT * FROM pg_extension WHERE extname = 'vector';
 
 ---
 
+## RDKit Extension
+
+The RDKit PostgreSQL extension is required for molecular structure operations (similarity search, substructure search, fingerprints) in dm_molecule tables.
+
+### Step 1: Install at System Level
+
+```bash
+# Automatic installation (requires sudo)
+biomedagent-db install-rdkit
+
+# Or manual installation for PostgreSQL 16:
+sudo apt-get install postgresql-16-rdkit
+
+# Restart PostgreSQL
+sudo systemctl restart postgresql
+```
+
+### Step 2: Create Extension in Database
+
+```bash
+# Create the extension (requires superuser)
+biomedagent-db create-rdkit-ext
+```
+
+Or manually:
+```bash
+sudo -u postgres psql -d database -c 'CREATE EXTENSION IF NOT EXISTS rdkit;'
+```
+
+### Verify Installation
+
+```sql
+-- Check extension exists
+SELECT * FROM pg_extension WHERE extname = 'rdkit';
+
+-- Test RDKit functions
+SELECT mol_from_smiles('CCO');
+```
+
+**Note:** RDKit extension is optional but recommended. Without it, similarity search and substructure search features will not be available in dm_molecule tables.
+
+---
+
 ## Data Ingestion
 
 ### Full Ingestion (All Sources)
@@ -235,6 +279,7 @@ The pipeline runs in this order:
 6. **ChEMBL** - Biochemical annotations
 7. **dm_target** - Target mapping (requires 5 & 6)
 8. **DrugCentral** - Molecular structures
+9. **dm_molecule** - Unified molecules + mappings (requires 3, 5, 6, 7, 8)
 
 ---
 
@@ -278,6 +323,43 @@ biomedagent-db info
 | `rag_study_corpus` | Full study JSON for each NCT ID |
 | `rag_study_keys` | Materialized view with searchable keys |
 | Trigram indexes | Fast fuzzy text search |
+
+### ClinicalTrials.gov Enriched Search Table
+
+The enriched search table provides fast, flexible searching with denormalized data and trigram similarity indexes.
+
+#### Creating the Enriched Search Table
+
+```bash
+# During ingestion
+biomedagent-db ingest --ctgov-populate-enriched-search
+
+# After ingestion (standalone)
+biomedagent-db ingest --ctgov-enriched-search-only
+
+# Custom batch size (default: 1000)
+biomedagent-db ingest --ctgov-enriched-search-only --ctgov-enriched-search-batch-size 2000
+
+# Via generate-ctgov-search command
+biomedagent-db generate-ctgov-search create
+biomedagent-db generate-ctgov-search populate 1000
+biomedagent-db generate-ctgov-search verify
+biomedagent-db generate-ctgov-search refresh
+```
+
+#### What Enriched Search Creates
+
+| Table | Description |
+|-------|-------------|
+| `ctgov_enriched_search` | Denormalized table with aggregated data |
+
+**Features:**
+- Aggregated conditions, interventions, sponsors as arrays
+- Normalized text columns for trigram similarity (`_norm` suffix)
+- Full-text search vectors (`_tsv` suffix)
+- Filterable metadata columns (phase, status, enrollment, dates)
+- GIN indexes on array columns
+- GiST indexes for trigram similarity
 
 ### Force Recreate Tables
 
@@ -417,6 +499,50 @@ find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null
 pip install -e .
 ```
 
+### "extension 'rdkit' is not available"
+
+The RDKit system package is not installed:
+
+```bash
+# Install RDKit
+biomedagent-db install-rdkit
+
+# Restart PostgreSQL
+sudo systemctl restart postgresql
+```
+
+### "could not load library rdkit.so"
+
+PostgreSQL cannot find the RDKit library:
+
+```bash
+# Check if RDKit is installed for your PostgreSQL version
+pg_config --version  # Get PostgreSQL version
+apt list --installed | grep rdkit
+
+# Install for correct version
+sudo apt-get install postgresql-16-rdkit  # Replace 16 with your version
+```
+
+### dm_molecule similarity search not working
+
+Ensure RDKit extension is enabled and fingerprints are populated:
+
+```sql
+-- Check extension
+SELECT * FROM pg_extension WHERE extname = 'rdkit';
+
+-- Check fingerprints exist
+SELECT COUNT(*) FROM dm_molecule WHERE mfp2 IS NOT NULL;
+
+-- Regenerate fingerprints if needed (requires RDKit)
+UPDATE dm_molecule SET 
+    mol = mol_from_smiles(canonical_smiles::cstring),
+    mfp2 = morganbv_fp(mol_from_smiles(canonical_smiles::cstring), 2),
+    ffp2 = featmorganbv_fp(mol_from_smiles(canonical_smiles::cstring), 2)
+WHERE canonical_smiles IS NOT NULL AND mol IS NULL;
+```
+
 ---
 
 ## Quick Reference
@@ -427,22 +553,29 @@ pip install -e .
 |---------|-------------|
 | `biomedagent-db setup_postgres` | Full automatic setup |
 | `biomedagent-db install-pgvector` | Install pgvector system package |
+| `biomedagent-db install-rdkit` | Install RDKit system package |
 | `biomedagent-db create-vector-ext` | Create vector extension in DB |
+| `biomedagent-db create-rdkit-ext` | Create RDKit extension in DB |
 | `biomedagent-db ingest` | Run full ingestion |
 | `biomedagent-db info` | Show database status |
 | `biomedagent-db tables` | List all tables |
 | `biomedagent-db vacuum` | Optimize database |
 | `biomedagent-db reset --force` | Reset database |
+| `biomedagent-db generate-ctgov-search` | Manage enriched search table |
 
 ### Ingestion Flags
 
 | Flag | Description |
 |------|-------------|
-| `--skip-<source>` | Skip a data source |
+| `--skip-<source>` | Skip a data source (openfda, orange-book, ctgov, dailymed, bindingdb, chembl, dm-target, drugcentral, dm-molecule) |
 | `--n-max N` | Limit records per source |
 | `--openfda-use-local-files` | Use existing downloads |
 | `--ctgov-rag-corpus-only` | Only populate RAG corpus |
 | `--ctgov-rag-keys-only` | Only create RAG keys |
+| `--ctgov-enriched-search-only` | Only populate enriched search table |
+| `--ctgov-populate-enriched-search` | Populate enriched search during ingestion |
+| `--bindingdb-force-recreate` | Force recreate BindingDB tables |
+| `--chembl-force-recreate` | Force recreate ChEMBL tables |
 | `--vacuum` | Optimize after ingestion |
 | `--dump-db FILE` | Create backup |
 | `--restore-db FILE` | Restore backup |
@@ -454,11 +587,13 @@ pip install -e .
 | OpenFDA | `labels_meta`, `sections` | ~150K | 30-60 min |
 | Orange Book | `orange_book_*` | ~35K | 1 min |
 | ClinicalTrials.gov | `ctgov_*` | ~500K | 15-30 min |
+| CT.gov Enriched | `ctgov_enriched_search` | ~500K | 10-20 min |
 | DailyMed | `dailymed_*` | ~150K | 30-60 min |
 | BindingDB | `bindingdb_*` | ~2M | 30-60 min |
 | ChEMBL | `chembl.*` | ~2M | 20-40 min |
 | dm_target | `dm_target*` | ~3.5K | 5-10 min |
 | DrugCentral | `drugcentral_*` | ~5K | 2-5 min |
+| dm_molecule | `dm_molecule*`, `map_*` | ~3M | 30-60 min |
 
 ---
 
@@ -474,20 +609,27 @@ pip install -e .
 # 3. Install pgvector
 biomedagent-db install-pgvector
 
-# 4. Run setup
+# 4. (Optional) Install RDKit for molecular structure operations
+biomedagent-db install-rdkit
+
+# 5. Run setup
 biomedagent-db setup_postgres
 
-# 5. Create vector extension
+# 6. Create extensions
 biomedagent-db create-vector-ext
+biomedagent-db create-rdkit-ext  # If RDKit installed
 
-# 6. Run full ingestion
+# 7. Run full ingestion
 biomedagent-db ingest --vacuum
 
-# 7. (Optional) Populate RAG corpus for CT.gov
+# 8. (Optional) Populate RAG corpus for CT.gov
 biomedagent-db ingest --ctgov-rag-corpus-only
 biomedagent-db ingest --ctgov-rag-keys-only
 
-# 8. Verify
+# 9. (Optional) Populate CT.gov enriched search table
+biomedagent-db ingest --ctgov-enriched-search-only
+
+# 10. Verify
 biomedagent-db info
 ```
 
