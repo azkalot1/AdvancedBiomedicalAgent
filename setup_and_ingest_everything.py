@@ -16,6 +16,7 @@ Usage:
     python setup_and_ingest_everything.py --reset-db   # Reset database first
     python setup_and_ingest_everything.py --fast       # Fast mode (limited data)
     python setup_and_ingest_everything.py --skip-ext   # Skip extension installation
+    python setup_and_ingest_everything.py --populate-rag  # Include RAG corpus (takes hours!)
 
 Requirements:
     - Ubuntu/Debian system with sudo access
@@ -83,6 +84,10 @@ def main():
                        help="Skip PostgreSQL extension installation")
     parser.add_argument("--skip-ingest", action="store_true",
                        help="Skip data ingestion (setup only)")
+    parser.add_argument("--populate-rag", action="store_true",
+                       help="Populate CT.gov RAG corpus (WARNING: takes hours!)")
+    parser.add_argument("--rag-buckets", type=int, default=16,
+                       help="Number of buckets for RAG corpus population (default: 16)")
 
     args = parser.parse_args()
 
@@ -172,6 +177,10 @@ def main():
         # Skip advanced molecular mappings in fast mode
         if args.fast:
             ingest_cmd += " --skip-dm-target --skip-dm-molecule"
+        
+        # Add RAG corpus population if requested (takes hours!)
+        if args.populate_rag:
+            ingest_cmd += f" --ctgov-populate-rag --ctgov-rag-buckets {args.rag_buckets}"
 
         if run_cli_command(ingest_cmd, "Running complete data ingestion pipeline"):
             success_count += 1
@@ -196,6 +205,9 @@ def main():
             success_count += 1
         else:
             print("⚠️  CT.gov enriched search creation failed - continuing")
+        
+        # Note: RAG corpus is populated during ingestion if --populate-rag flag is used
+        # (This happens in STEP 5 as part of the ingestion command)
 
         # ============================================================================
         # STEP 8: Create Molecular Mappings (if not skipped)

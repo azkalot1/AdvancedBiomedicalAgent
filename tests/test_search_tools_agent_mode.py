@@ -145,7 +145,12 @@ class AgentToolTester:
         checkpointer = InMemorySaver()
         system_prompt = (
             f"You are a biomedical agent testing the {tool_name} tool.\n"
-            f"Use the {tool_name} tool to answer user questions directly and concisely."
+            f"Use the {tool_name} tool to answer user questions directly and concisely.\n\n"
+            "When tool outputs exceed ~4000 characters, they are automatically summarized.\n"
+            "The full output is stored in files and can be retrieved:\n"
+            "- Use list_research_outputs() to browse stored outputs with one-line descriptions.\n"
+            "- Use retrieve_full_output(ref_id) to fetch full content when needed.\n"
+            "Only retrieve full output if the summary indicates critical details are missing."
         )
 
         agent = create_agent(

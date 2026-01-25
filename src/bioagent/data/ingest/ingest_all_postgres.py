@@ -145,7 +145,7 @@ def run_orange_book_ingestion(config: DatabaseConfig, raw_dir: Path) -> bool:
 
 def run_ctgov_ingestion(config: DatabaseConfig, raw_dir: Path, n_max: int | None = None, 
                         populate_rag: bool = False, rag_buckets: int = 16,
-                        populate_enriched_search: bool = False, enriched_search_batch_size: int = 1000) -> bool:
+                        populate_enriched_search: bool = True, enriched_search_batch_size: int = 1000) -> bool:
     """
     Run ClinicalTrials.gov ingestion.
     
@@ -155,7 +155,7 @@ def run_ctgov_ingestion(config: DatabaseConfig, raw_dir: Path, n_max: int | None
         n_max: Maximum number of trials (not currently used for AACT dump)
         populate_rag: Whether to populate RAG corpus after ingestion (can take hours!)
         rag_buckets: Number of buckets for RAG corpus population
-        populate_enriched_search: Whether to populate enriched search table after ingestion
+        populate_enriched_search: Whether to populate enriched search table after ingestion (default: True)
         enriched_search_batch_size: Batch size for enriched search table population
     """
     print("\n" + "=" * 60)
@@ -184,13 +184,11 @@ def run_ctgov_ingestion(config: DatabaseConfig, raw_dir: Path, n_max: int | None
             print("   python build_ctgov.py populate-keys")
         
         if populate_enriched_search:
-            print("\n🔍 Enriched search table population requested")
+            print("\n🔍 Creating and populating enriched search table...")
             if not run_ctgov_enriched_search(config, enriched_search_batch_size):
                 print("⚠️  Enriched search table population failed, but base ingestion succeeded")
         else:
-            print("\n💡 Note: Enriched search table not populated. To populate later, run:")
-            print(f"   biomedagent-db generate-ctgov-search create")
-            print(f"   biomedagent-db generate-ctgov-search populate {enriched_search_batch_size}")
+            print("\n⏭️  Enriched search table creation skipped (enabled by default, use --skip-ctgov-enriched-search to disable)")
         
         return True
     except Exception as e:
@@ -642,7 +640,8 @@ Examples:
   %(prog)s --ctgov-rag-corpus-only          # Only populate CT.gov RAG corpus
   %(prog)s --ctgov-rag-keys-only            # Only populate CT.gov RAG keys
   %(prog)s --ctgov-rag-buckets 32           # Use 32 buckets for RAG population
-  %(prog)s --ctgov-populate-enriched-search # Populate CT.gov enriched search table
+  %(prog)s --skip-ctgov-enriched-search     # Skip CT.gov enriched search table (enabled by default)
+  %(prog)s --ctgov-populate-enriched-search # Explicitly enable enriched search (enabled by default)
   %(prog)s --ctgov-enriched-search-only     # Only populate enriched search table (standalone)
   %(prog)s --ctgov-enriched-search-batch-size 2000  # Batch size for enriched search
   %(prog)s --reset --force --vacuum         # Complete reset: drop all, reimport, optimize
@@ -664,7 +663,8 @@ Examples:
     parser.add_argument("--ctgov-rag-buckets", type=int, default=16, help="Number of buckets for CT.gov RAG corpus (default: 16)")
     parser.add_argument("--ctgov-rag-corpus-only", action="store_true", help="Only populate CT.gov RAG corpus (requires prior ingestion)")
     parser.add_argument("--ctgov-rag-keys-only", action="store_true", help="Only populate CT.gov RAG keys (requires corpus to be populated)")
-    parser.add_argument("--ctgov-populate-enriched-search", action="store_true", help="Populate CT.gov enriched search table after ingestion")
+    parser.add_argument("--ctgov-populate-enriched-search", action="store_true", help="Populate CT.gov enriched search table after ingestion (enabled by default)")
+    parser.add_argument("--skip-ctgov-enriched-search", action="store_true", help="Skip CT.gov enriched search table creation (disabled by default)")
     parser.add_argument("--ctgov-enriched-search-batch-size", type=int, default=1000, help="Batch size for enriched search table population (default: 1000)")
     parser.add_argument("--ctgov-enriched-search-only", action="store_true", help="Only populate CT.gov enriched search table (requires prior CT.gov ingestion)")
     parser.add_argument("--bindingdb-all-organisms", action="store_true", help="Include all organisms in BindingDB (default: human only)")
@@ -832,13 +832,20 @@ Examples:
 
     # 3. ClinicalTrials.gov (clinical trials data)
     if not args.skip_ctgov:
+        # Enriched search is enabled by default, unless explicitly skipped
+        # --ctgov-populate-enriched-search flag is kept for backward compatibility
+        populate_enriched_search = not args.skip_ctgov_enriched_search
+        if args.ctgov_populate_enriched_search:
+            # Explicit flag overrides skip flag
+            populate_enriched_search = True
+        
         results["ctgov"] = run_ctgov_ingestion(
             config, 
             raw_dir, 
             args.n_max,
             populate_rag=args.ctgov_populate_rag,
             rag_buckets=args.ctgov_rag_buckets,
-            populate_enriched_search=args.ctgov_populate_enriched_search,
+            populate_enriched_search=populate_enriched_search,
             enriched_search_batch_size=args.ctgov_enriched_search_batch_size
         )
     else:

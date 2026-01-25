@@ -17,6 +17,7 @@ dependencies = [
   "langchain_openai",
   "langchain_together",
   "langchain_google_genai",
+  "langchain_community",
   "langgraph",
   # Database
   "psycopg2-binary",  # PostgreSQL adapter
@@ -30,6 +31,8 @@ dependencies = [
   "lxml",             # XML/HTML parser
   "python-dateutil",  # Date parsing
   "tavily-python",
+  "ddgs",
+  "pyyaml",
   "tqdm",             # Progress bars
   "numpy",            # Numerical computing
   "sentence-transformers",  # Semantic embeddings
