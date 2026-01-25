@@ -123,15 +123,16 @@ async def _find_molecule_ids(
     if molecule_name:
         name_param = molecule_name.lower()
         params.append(name_param)
+        name_param_idx = len(params)  # Index of name_param (1-based for SQL)
         params.append(f"%{molecule_name}%")
-        name_idx = len(params) - 1
+        pattern_param_idx = len(params)  # Index of pattern parameter (1-based for SQL)
         where_parts.append(
             f"""(
-                m.pref_name ILIKE ${name_idx}
-                OR mc.preferred_name ILIKE ${name_idx}
+                m.pref_name ILIKE ${pattern_param_idx}
+                OR mc.preferred_name ILIKE ${pattern_param_idx}
                 OR EXISTS (
                     SELECT 1 FROM dm_molecule_synonyms s
-                    WHERE s.mol_id = m.mol_id AND s.synonym_lower % ${name_idx - 1}
+                    WHERE s.mol_id = m.mol_id AND s.synonym_lower % ${name_param_idx}
                 )
             )"""
         )

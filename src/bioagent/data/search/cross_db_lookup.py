@@ -113,15 +113,18 @@ async def _fetch_molecules(
         params.append(identifier.upper())
         filters.append(f"m.inchi_key = ${len(params)}")
     else:
-        params.append(identifier.lower())
+        name_param = identifier.lower()
+        params.append(name_param)
+        name_param_idx = len(params)  # Index of name_param (1-based for SQL)
         params.append(f"%{identifier}%")
+        pattern_param_idx = len(params)  # Index of pattern parameter (1-based for SQL)
         filters.append(
             f"""(
-                m.pref_name ILIKE ${len(params)}
-                OR mc.preferred_name ILIKE ${len(params)}
+                m.pref_name ILIKE ${pattern_param_idx}
+                OR mc.preferred_name ILIKE ${pattern_param_idx}
                 OR EXISTS (
                     SELECT 1 FROM dm_molecule_synonyms s
-                    WHERE s.mol_id = m.mol_id AND s.synonym_lower % ${len(params) - 1}
+                    WHERE s.mol_id = m.mol_id AND s.synonym_lower % ${name_param_idx}
                 )
             )"""
         )
