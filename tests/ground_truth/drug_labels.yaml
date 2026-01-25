@@ -1,0 +1,216 @@
+test_cases:
+  # ========================================
+  # BOXED WARNINGS (BLACK BOX)
+  # ========================================
+  - id: "warfarin_warnings_001"
+    tool: "search_drug_labels"
+    input:
+      drug_names:
+        - "warfarin"
+      section_queries:
+        - "boxed warning"
+        - "warnings"
+    expected_facts:
+      required:
+        - "Warfarin label includes warning information"
+        - "Warfarin warnings mention bleeding risk"
+      optional:
+        - "Warfarin label mentions INR monitoring"
+        - "Warfarin interacts with other drugs"
+    source: "DailyMed/OpenFDA"
+    confidence: "high"
+
+  - id: "fluoroquinolone_warnings_002"
+    tool: "search_drug_labels"
+    input:
+      drug_names:
+        - "ciprofloxacin"
+      section_queries:
+        - "boxed warning"
+    expected_facts:
+      required:
+        - "Ciprofloxacin label includes warning information"
+      optional:
+        - "Ciprofloxacin warnings mention tendon rupture"
+        - "Ciprofloxacin warnings mention peripheral neuropathy"
+    source: "DailyMed/OpenFDA"
+    confidence: "high"
+
+  - id: "opioid_warnings_003"
+    tool: "search_drug_labels"
+    input:
+      drug_names:
+        - "oxycodone"
+      section_queries:
+        - "boxed warning"
+        - "warnings"
+    expected_facts:
+      required:
+        - "Oxycodone label includes warning information"
+      optional:
+        - "Oxycodone warnings mention addiction"
+        - "Oxycodone warnings mention respiratory depression"
+        - "Oxycodone warnings mention overdose"
+    source: "DailyMed/OpenFDA"
+    confidence: "high"
+
+  # ========================================
+  # CONTRAINDICATIONS
+  # ========================================
+  - id: "metformin_contraindications_004"
+    tool: "search_drug_labels"
+    input:
+      drug_names:
+        - "metformin"
+      section_queries:
+        - "contraindications"
+    expected_facts:
+      required:
+        - "Metformin label includes a contraindications section"
+      optional:
+        - "Metformin contraindications mention renal impairment"
+        - "Metformin contraindications mention metabolic acidosis"
+    source: "DailyMed/OpenFDA"
+    confidence: "high"
+
+  - id: "aspirin_contraindications_005"
+    tool: "search_drug_labels"
+    input:
+      drug_names:
+        - "aspirin"
+      section_queries:
+        - "contraindications"
+    expected_facts:
+      required:
+        - "Aspirin label includes contraindications"
+      optional:
+        - "Aspirin is contraindicated in children with viral infections"
+        - "Aspirin contraindications mention bleeding disorders"
+    source: "DailyMed/OpenFDA"
+    confidence: "high"
+
+  # ========================================
+  # DRUG INTERACTIONS
+  # ========================================
+  - id: "atorvastatin_interactions_006"
+    tool: "search_drug_labels"
+    input:
+      drug_names:
+        - "atorvastatin"
+      section_queries:
+        - "drug interactions"
+    expected_facts:
+      required:
+        - "Atorvastatin label includes drug interactions section"
+      optional:
+        - "Atorvastatin interactions mention CYP3A4 inhibitors"
+        - "Atorvastatin interactions mention grapefruit"
+        - "Atorvastatin interactions mention fibrates"
+    source: "DailyMed/OpenFDA"
+    confidence: "high"
+
+  - id: "clopidogrel_interactions_007"
+    tool: "search_drug_labels"
+    input:
+      drug_names:
+        - "clopidogrel"
+      section_queries:
+        - "drug interactions"
+    expected_facts:
+      required:
+        - "Clopidogrel label includes drug interactions section"
+      optional:
+        - "Clopidogrel interactions mention omeprazole"
+        - "Clopidogrel interactions mention CYP2C19"
+    source: "DailyMed/OpenFDA"
+    confidence: "high"
+
+  # ========================================
+  # ADVERSE REACTIONS
+  # ========================================
+  - id: "imatinib_adverse_008"
+    tool: "search_drug_labels"
+    input:
+      drug_names:
+        - "imatinib"
+      section_queries:
+        - "adverse reactions"
+    expected_facts:
+      required:
+        - "Imatinib label includes adverse reactions section"
+      optional:
+        - "Imatinib adverse reactions mention edema"
+        - "Imatinib adverse reactions mention nausea"
+        - "Imatinib adverse reactions mention myelosuppression"
+    source: "DailyMed/OpenFDA"
+    confidence: "high"
+
+  - id: "pembrolizumab_adverse_009"
+    tool: "search_drug_labels"
+    input:
+      drug_names:
+        - "pembrolizumab"
+      section_queries:
+        - "adverse reactions"
+    expected_facts:
+      required:
+        - "Pembrolizumab label includes adverse reactions section"
+      optional:
+        - "Pembrolizumab adverse reactions mention immune-related adverse events"
+        - "Pembrolizumab adverse reactions mention fatigue"
+    source: "DailyMed/OpenFDA"
+    confidence: "high"
+
+  # ========================================
+  # INDICATIONS AND USAGE
+  # ========================================
+  - id: "lisinopril_indications_010"
+    tool: "search_drug_labels"
+    input:
+      drug_names:
+        - "lisinopril"
+      section_queries:
+        - "indications"
+    expected_facts:
+      required:
+        - "Lisinopril label includes indications section"
+      optional:
+        - "Lisinopril is indicated for hypertension"
+        - "Lisinopril is indicated for heart failure"
+    source: "DailyMed/OpenFDA"
+    confidence: "high"
+
+  - id: "omeprazole_indications_011"
+    tool: "search_drug_labels"
+    input:
+      drug_names:
+        - "omeprazole"
+      section_queries:
+        - "indications"
+    expected_facts:
+      required:
+        - "Omeprazole label includes indications section"
+      optional:
+        - "Omeprazole is indicated for GERD"
+        - "Omeprazole is indicated for ulcer"
+    source: "DailyMed/OpenFDA"
+    confidence: "high"
+
+  # ========================================
+  # DOSAGE AND ADMINISTRATION
+  # ========================================
+  - id: "methotrexate_dosage_012"
+    tool: "search_drug_labels"
+    input:
+      drug_names:
+        - "methotrexate"
+      section_queries:
+        - "dosage"
+    expected_facts:
+      required:
+        - "Methotrexate label includes dosage section"
+      optional:
+        - "Methotrexate dosage varies by indication"
+        - "Methotrexate dosage mentions weekly administration for rheumatoid arthritis"
+    source: "DailyMed/OpenFDA"
+    confidence: "high"

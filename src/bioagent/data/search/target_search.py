@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 # target_search.py
 """
-Unified Pharmacology Search Module - v2
+Unified Pharmacology Search Module.
 
 Key features:
-- Integrates drug mechanism data (curated MOA) alongside activity data (IC50/Ki)
-- Groups results by compound with nested target/mechanism lists
-- Enhanced error handling with detailed diagnostics for agent use
-- Verbose warnings explaining why searches may return no results
+    - Integrates drug mechanism data (curated MOA) alongside activity data (IC50/Ki)
+    - Supports multiple modes for targets, drugs, trials, indications, pathways
+    - Groups results by compound with nested target/mechanism lists
+    - Enhanced diagnostics and warnings for agent-facing use
+
+Data Sources:
+    - dm_molecule / dm_molecule_concept / dm_molecule_synonyms
+    - dm_compound_target_activity / dm_target / dm_target_uniprot_mappings
+    - dm_mechanism_of_action / drugcentral_indications / drugcentral_drug_interactions
+    - map_ctgov_molecules / rag_study_search
 """
 
 from __future__ import annotations
@@ -45,6 +51,10 @@ class SearchMode(str, Enum):
     COMPARE_DRUGS = "compare_drugs"
     ACTIVITIES_FOR_DRUG = "activities_for_drug"
     ACTIVITIES_FOR_TARGET = "activities_for_target"
+    INDICATIONS_FOR_DRUG = "indications_for_drug"
+    DRUGS_FOR_INDICATION = "drugs_for_indication"
+    TARGET_PATHWAYS = "target_pathways"
+    DRUG_INTERACTIONS = "drug_interactions"
 
 
 class ActivityType(str, Enum):
@@ -125,6 +135,9 @@ class CompoundTargetProfile(BaseModel):
     concept_name: str
     chembl_id: str | None = None
     canonical_smiles: str | None = None
+    is_biotherapeutic: bool = False
+    molecule_type: str | None = None
+    biotherapeutic_type: str | None = None
     activities: list[TargetActivity] = []
     mechanisms: list[TargetMechanism] = []
     n_activity_targets: int = 0
@@ -154,6 +167,9 @@ class DrugForTargetHit(BaseModel):
     concept_name: str
     chembl_id: str | None = None
     canonical_smiles: str | None = None
+    is_biotherapeutic: bool = False
+    molecule_type: str | None = None
+    biotherapeutic_type: str | None = None
     activity_type: str | None = None
     activity_value_nm: float | None = None
     pchembl: float | None = None
@@ -198,11 +214,57 @@ class MoleculeForm(BaseModel):
     chembl_id: str | None = None
 
 
+class IndicationHit(BaseModel):
+    """An indication linked to a drug concept."""
+    indication_id: int
+    preferred_name: str
+    therapeutic_area: str | None = None
+    max_phase: float | None = None
+    is_approved: bool | None = None
+    sources: list[str] = []
+    ref_type: str | None = None
+    ref_id: str | None = None
+    ref_url: str | None = None
+
+
+class DrugIndicationHit(BaseModel):
+    """A drug linked to an indication."""
+    concept_id: int
+    concept_name: str
+    max_phase: float | None = None
+    is_approved: bool | None = None
+    sources: list[str] = []
+
+
+class TargetPathwayHit(BaseModel):
+    """Protein class summary for a target gene."""
+    gene_symbol: str
+    protein_class_id: int | None = None
+    protein_class_desc: str | None = None
+    synonyms: list[str] = []
+
+
+class DrugInteractionHit(BaseModel):
+    """Metabolism-based interaction data."""
+    concept_id: int | None = None
+    concept_name: str | None = None
+    chembl_id: str | None = None
+    interaction_role: str | None = None
+    enzyme_name: str | None = None
+    pathway_key: str | None = None
+    metabolite_chembl_id: str | None = None
+    substrate_chembl_id: str | None = None
+
+
 class DrugProfileResult(BaseModel):
     """Complete drug profile with all data."""
     concept_id: int
     concept_name: str
     canonical_smiles: str | None = None
+    is_biotherapeutic: bool = False
+    molecule_type: str | None = None
+    biotherapeutic_type: str | None = None
+    sequence_info: list[dict] = []
     n_forms: int = 0
     has_salt_forms: bool = False
     n_clinical_trials: int = 0
@@ -238,6 +300,10 @@ class TargetSearchInput(BaseModel):
     include_all_organisms: bool = False
     include_trials: bool = True
     include_forms: bool = True
+    include_pathways: bool = False
+    include_indications: bool = False
+    approval_status: Literal["approved", "investigational", "all"] = "all"
+    max_off_targets: int | None = None  # Selectivity filter
 
     def validate_for_mode(self) -> list[str]:
         """Validate required fields for the search mode."""
@@ -273,6 +339,14 @@ class TargetSearchInput(BaseModel):
             if not self.off_targets:
                 errors.append("'off_targets' list is required for selective_drugs")
         
+        elif self.mode in [SearchMode.INDICATIONS_FOR_DRUG, SearchMode.DRUGS_FOR_INDICATION]:
+            if not self.query:
+                errors.append(f"'query' is required for {self.mode.value}")
+        
+        elif self.mode in [SearchMode.TARGET_PATHWAYS, SearchMode.DRUG_INTERACTIONS]:
+            if not self.query:
+                errors.append(f"'query' (gene symbol or drug name) is required for {self.mode.value}")
+        
         return errors
 
     @property
@@ -304,6 +378,8 @@ class TargetSearchOutput(BaseModel):
     input_params: dict = {}
     execution_time_ms: float | None = None
     diagnostics: SearchDiagnostics | None = None
+    data_source_breakdown: dict[str, int] = {}
+    confidence_explanation: str | None = None
 
     def pretty_print(self, console: Console | None = None, max_hits: int = 20):
         """Pretty print results with improved formatting."""
@@ -358,6 +434,14 @@ class TargetSearchOutput(BaseModel):
             self._print_trial(console, rank, hit)
         elif isinstance(hit, MoleculeForm):
             self._print_form(console, rank, hit)
+        elif isinstance(hit, IndicationHit):
+            self._print_indication(console, rank, hit)
+        elif isinstance(hit, DrugIndicationHit):
+            self._print_drug_indication(console, rank, hit)
+        elif isinstance(hit, TargetPathwayHit):
+            self._print_target_pathway(console, rank, hit)
+        elif isinstance(hit, DrugInteractionHit):
+            self._print_drug_interaction(console, rank, hit)
         else:
             console.print(f"  {rank}. {hit}")
 
@@ -448,6 +532,32 @@ class TargetSearchOutput(BaseModel):
         salt_str = f" [yellow]({hit.salt_form})[/yellow]" if hit.salt_form else ""
         console.print(f"  {rank}. [cyan]{name}[/cyan]{salt_str}")
 
+    def _print_indication(self, console: Console, rank: int, hit: IndicationHit):
+        phase = f"phase {hit.max_phase}" if hit.max_phase is not None else "phase N/A"
+        status = "approved" if hit.is_approved else "investigational"
+        console.print(f"  {rank}. [bold]{hit.preferred_name}[/bold] [{status}, {phase}]")
+        if hit.therapeutic_area:
+            console.print(f"      [dim]Area: {hit.therapeutic_area}[/dim]")
+
+    def _print_drug_indication(self, console: Console, rank: int, hit: DrugIndicationHit):
+        phase = f"phase {hit.max_phase}" if hit.max_phase is not None else "phase N/A"
+        status = "approved" if hit.is_approved else "investigational"
+        console.print(f"  {rank}. [bold cyan]{hit.concept_name}[/bold cyan] [{status}, {phase}]")
+
+    def _print_target_pathway(self, console: Console, rank: int, hit: TargetPathwayHit):
+        desc = hit.protein_class_desc or "Unknown class"
+        console.print(f"  {rank}. [bold]{hit.gene_symbol}[/bold] → {desc}")
+        if hit.synonyms:
+            console.print(f"      [dim]Synonyms: {', '.join(hit.synonyms[:5])}[/dim]")
+
+    def _print_drug_interaction(self, console: Console, rank: int, hit: DrugInteractionHit):
+        role = hit.interaction_role or "interaction"
+        console.print(f"  {rank}. [bold]{hit.chembl_id or 'Unknown'}[/bold] ({role})")
+        if hit.enzyme_name:
+            console.print(f"      [dim]Enzyme: {hit.enzyme_name}[/dim]")
+        if hit.pathway_key:
+            console.print(f"      [dim]Pathway: {hit.pathway_key}[/dim]")
+
 
 # =============================================================================
 # MAIN SEARCH CLASS WITH ENHANCED DIAGNOSTICS
@@ -459,10 +569,18 @@ class PharmacologySearch:
     CONCEPT_LOOKUP_CTE = """
         WITH 
         exact_synonym AS (
-            SELECT DISTINCT dm.concept_id
-            FROM dm_molecule_synonyms dms
-            JOIN dm_molecule dm ON dms.mol_id = dm.mol_id
-            WHERE dms.synonym_lower = LOWER($1)
+            SELECT DISTINCT concept_id
+            FROM (
+                SELECT dm.concept_id
+                FROM dm_molecule_synonyms dms
+                JOIN dm_molecule dm ON dms.mol_id = dm.mol_id
+                WHERE dms.synonym_lower = LOWER($1)
+                UNION
+                SELECT dbt.concept_id
+                FROM dm_biotherapeutic_synonyms dbs
+                JOIN dm_biotherapeutic dbt ON dbs.bio_id = dbt.bio_id
+                WHERE dbs.synonym_lower = LOWER($1)
+            ) syn
             LIMIT 5
         ),
         exact_name AS (
@@ -472,11 +590,19 @@ class PharmacologySearch:
             LIMIT 5
         ),
         trgm_match AS (
-            SELECT DISTINCT dm.concept_id
-            FROM dm_molecule_synonyms dms
-            JOIN dm_molecule dm ON dms.mol_id = dm.mol_id
-            WHERE dms.synonym_lower ILIKE $2
-              AND NOT EXISTS (SELECT 1 FROM exact_synonym)
+            SELECT DISTINCT concept_id
+            FROM (
+                SELECT dm.concept_id
+                FROM dm_molecule_synonyms dms
+                JOIN dm_molecule dm ON dms.mol_id = dm.mol_id
+                WHERE dms.synonym_lower ILIKE $2
+                UNION
+                SELECT dbt.concept_id
+                FROM dm_biotherapeutic_synonyms dbs
+                JOIN dm_biotherapeutic dbt ON dbs.bio_id = dbt.bio_id
+                WHERE dbs.synonym_lower ILIKE $2
+            ) syn
+            WHERE NOT EXISTS (SELECT 1 FROM exact_synonym)
               AND NOT EXISTS (SELECT 1 FROM exact_name)
             LIMIT 10
         ),
@@ -499,6 +625,14 @@ class PharmacologySearch:
             self._async_config = await get_async_connection(self.db_config)
         return self._async_config
 
+    @staticmethod
+    def _summarize_sources(source_lists: list[list[str]]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for sources in source_lists:
+            for source in sources or []:
+                counts[source] = counts.get(source, 0) + 1
+        return counts
+
     async def _find_concept_ids_with_diagnostics(
         self, conn, query: str
     ) -> tuple[list[int], list[dict]]:
@@ -512,10 +646,18 @@ class PharmacologySearch:
         
         # Step 1: Exact synonym match
         exact_syn_sql = """
-            SELECT DISTINCT dm.concept_id, dms.synonym_lower as matched_on
-            FROM dm_molecule_synonyms dms
-            JOIN dm_molecule dm ON dms.mol_id = dm.mol_id
-            WHERE dms.synonym_lower = LOWER($1)
+            SELECT DISTINCT concept_id, matched_on
+            FROM (
+                SELECT dm.concept_id, dms.synonym_lower as matched_on
+                FROM dm_molecule_synonyms dms
+                JOIN dm_molecule dm ON dms.mol_id = dm.mol_id
+                WHERE dms.synonym_lower = LOWER($1)
+                UNION
+                SELECT dbt.concept_id, dbs.synonym_lower as matched_on
+                FROM dm_biotherapeutic_synonyms dbs
+                JOIN dm_biotherapeutic dbt ON dbs.bio_id = dbt.bio_id
+                WHERE dbs.synonym_lower = LOWER($1)
+            ) syn
             LIMIT 5
         """
         rows = await conn.execute_query(exact_syn_sql, query_exact)
@@ -547,10 +689,18 @@ class PharmacologySearch:
         
         # Step 3: Partial synonym match (ILIKE)
         partial_syn_sql = """
-            SELECT DISTINCT dm.concept_id, dms.synonym_lower as matched_on
-            FROM dm_molecule_synonyms dms
-            JOIN dm_molecule dm ON dms.mol_id = dm.mol_id
-            WHERE dms.synonym_lower ILIKE $1
+            SELECT DISTINCT concept_id, matched_on
+            FROM (
+                SELECT dm.concept_id, dms.synonym_lower as matched_on
+                FROM dm_molecule_synonyms dms
+                JOIN dm_molecule dm ON dms.mol_id = dm.mol_id
+                WHERE dms.synonym_lower ILIKE $1
+                UNION
+                SELECT dbt.concept_id, dbs.synonym_lower as matched_on
+                FROM dm_biotherapeutic_synonyms dbs
+                JOIN dm_biotherapeutic dbt ON dbs.bio_id = dbt.bio_id
+                WHERE dbs.synonym_lower ILIKE $1
+            ) syn
             LIMIT 10
         """
         rows = await conn.execute_query(partial_syn_sql, query_pattern)
@@ -645,6 +795,42 @@ class PharmacologySearch:
                     "All drugs must have activity data on the target",
                     "Check drug name spelling if no results"
                 ]
+            },
+            SearchMode.INDICATIONS_FOR_DRUG: {
+                "description": "Find indications for a drug",
+                "required": "query (drug name)",
+                "examples": ["imatinib", "pembrolizumab"],
+                "tips": [
+                    "Try generic name if brand name doesn't work",
+                    "Approved indications have max_phase >= 4"
+                ]
+            },
+            SearchMode.DRUGS_FOR_INDICATION: {
+                "description": "Find drugs associated with an indication",
+                "required": "query (indication name)",
+                "examples": ["melanoma", "non-small cell lung cancer"],
+                "tips": [
+                    "Try broader disease terms if no results",
+                    "Use approval_status='approved' for approved drugs only"
+                ]
+            },
+            SearchMode.TARGET_PATHWAYS: {
+                "description": "Get protein class summary for a target gene",
+                "required": "query (gene symbol)",
+                "examples": ["EGFR", "BRAF"],
+                "tips": [
+                    "Returns protein class hierarchy from ChEMBL",
+                    "Useful for high-level target categorization"
+                ]
+            },
+            SearchMode.DRUG_INTERACTIONS: {
+                "description": "Find metabolism-based interactions for a drug",
+                "required": "query (drug name)",
+                "examples": ["warfarin", "midazolam"],
+                "tips": [
+                    "Uses ChEMBL metabolism records",
+                    "May be sparse for biologics"
+                ]
             }
         }
         return help_info.get(mode, {"description": mode.value, "tips": []})
@@ -731,6 +917,36 @@ class PharmacologySearch:
                 "Drug may not have registered clinical trials",
                 "Try searching with the INN (generic) name",
                 "Biologics may be listed under different names"
+            ])
+
+        elif mode == SearchMode.INDICATIONS_FOR_DRUG:
+            warnings.append(f"No indications found for '{input.query}'")
+            suggestions.extend([
+                "Check the drug name spelling",
+                "Try the generic name or INN",
+                "Set approval_status='all' to include investigational indications"
+            ])
+
+        elif mode == SearchMode.DRUGS_FOR_INDICATION:
+            warnings.append(f"No drugs found for indication '{input.query}'")
+            suggestions.extend([
+                "Try broader disease terms",
+                "Check spelling of the indication",
+                "Set approval_status='all' to include investigational drugs"
+            ])
+
+        elif mode == SearchMode.TARGET_PATHWAYS:
+            warnings.append(f"No protein class data found for '{input.query}'")
+            suggestions.extend([
+                "Verify the gene symbol is correct",
+                "Try an official HGNC symbol (uppercase)"
+            ])
+
+        elif mode == SearchMode.DRUG_INTERACTIONS:
+            warnings.append(f"No metabolism interactions found for '{input.query}'")
+            suggestions.extend([
+                "This dataset is sparse for some drugs",
+                "Try an alternate drug synonym"
             ])
         
         # Add general tips from mode help
@@ -878,6 +1094,10 @@ class PharmacologySearch:
             SearchMode.SELECTIVE_DRUGS: self._search_selective_drugs,
             SearchMode.ACTIVITIES_FOR_DRUG: self._search_activities_for_drug,
             SearchMode.ACTIVITIES_FOR_TARGET: self._search_activities_for_target,
+            SearchMode.INDICATIONS_FOR_DRUG: self._search_indications_for_drug,
+            SearchMode.DRUGS_FOR_INDICATION: self._search_drugs_for_indication,
+            SearchMode.TARGET_PATHWAYS: self._search_target_pathways,
+            SearchMode.DRUG_INTERACTIONS: self._search_drug_interactions,
         }
         return handlers[mode]
 
@@ -908,14 +1128,19 @@ class PharmacologySearch:
         
         # Get concept details
         concept_sql = """
-            SELECT 
+            SELECT DISTINCT ON (mc.concept_id)
                 mc.concept_id,
                 mc.preferred_name as concept_name,
-                dm.chembl_id,
-                dm.canonical_smiles
+                COALESCE(dm.chembl_id, dbt.chembl_id) as chembl_id,
+                dm.canonical_smiles,
+                mc.is_biotherapeutic,
+                dbt.molecule_type,
+                dbt.biotherapeutic_type
             FROM dm_molecule_concept mc
-            JOIN dm_molecule dm ON dm.concept_id = mc.concept_id AND dm.is_salt = FALSE
+            LEFT JOIN dm_molecule dm ON dm.concept_id = mc.concept_id AND dm.is_salt = FALSE
+            LEFT JOIN dm_biotherapeutic dbt ON dbt.concept_id = mc.concept_id
             WHERE mc.concept_id = ANY($1::bigint[])
+            ORDER BY mc.concept_id, dm.mol_id
             LIMIT 10
         """
         concept_rows = await conn.execute_query(concept_sql, concept_ids)
@@ -1010,6 +1235,9 @@ class PharmacologySearch:
                     concept_name=concept_row['concept_name'],
                     chembl_id=concept_row['chembl_id'],
                     canonical_smiles=concept_row['canonical_smiles'],
+                    is_biotherapeutic=concept_row['is_biotherapeutic'] or False,
+                    molecule_type=concept_row['molecule_type'],
+                    biotherapeutic_type=concept_row['biotherapeutic_type'],
                     activities=activities,
                     mechanisms=mechanisms,
                     n_activity_targets=len(activities),
@@ -1033,7 +1261,17 @@ class PharmacologySearch:
         
         if profiles and not any(p.mechanisms for p in profiles):
             warnings.append("No curated mechanism data found - showing activity data only")
-        
+
+        source_lists: list[list[str]] = []
+        for profile in profiles:
+            source_lists.extend([a.sources for a in profile.activities])
+            source_lists.extend([m.ref_type.split(",") if m.ref_type else [] for m in profile.mechanisms])
+        data_source_breakdown = self._summarize_sources(source_lists)
+        confidence_explanation = (
+            f"Activity data filtered at pChEMBL >= {input.min_pchembl}; "
+            f"data_source={input.data_source.value}"
+        )
+
         return TargetSearchOutput(
             status="success" if profiles else "not_found",
             mode=input.mode,
@@ -1041,7 +1279,9 @@ class PharmacologySearch:
             total_hits=len(profiles),
             hits=profiles,
             warnings=warnings,
-            diagnostics=diagnostics if warnings or self.verbose else None
+            diagnostics=diagnostics if warnings or self.verbose else None,
+            data_source_breakdown=data_source_breakdown,
+            confidence_explanation=confidence_explanation
         )
 
     # =========================================================================
@@ -1049,60 +1289,93 @@ class PharmacologySearch:
     # =========================================================================
     
     async def _search_drugs_for_target(self, input: TargetSearchInput) -> TargetSearchOutput:
-        """Find all drugs for a target with enhanced diagnostics."""
+        """Find all drugs for a target with enhanced diagnostics.
+        
+        Respects data_source parameter:
+        - ACTIVITY: Only quantitative binding/activity data from assays
+        - MECHANISM: Only curated drug mechanism data (approved drugs with known MOA)
+        - BOTH: Combines both sources
+        """
         conn = await self._get_conn()
         
         gene_symbol = input.query.upper()
+        activity_rows: list[dict] = []
+        mechanism_rows: list[dict] = []
         
-        # Get activity data
-        activity_sql = """
-            SELECT 
-                concept_id, concept_name,
-                representative_smiles as canonical_smiles,
-                COALESCE(best_ic50_nm, best_ki_nm, best_kd_nm, best_ec50_nm) as activity_value_nm,
-                CASE 
-                    WHEN best_ic50_nm IS NOT NULL THEN 'IC50'
-                    WHEN best_ki_nm IS NOT NULL THEN 'Ki'
-                    WHEN best_kd_nm IS NOT NULL THEN 'Kd'
-                    WHEN best_ec50_nm IS NOT NULL THEN 'EC50'
-                END as activity_type,
-                best_pchembl as pchembl,
-                n_total_measurements,
-                data_confidence,
-                sources
-            FROM dm_molecule_target_summary
-            WHERE gene_symbol = $1 AND best_pchembl >= $2
-            ORDER BY best_pchembl DESC NULLS LAST
-            LIMIT $3
-        """
-        activity_rows = await conn.execute_query(activity_sql, gene_symbol, input.min_pchembl, input.limit)
+        # Get activity data only if requested
+        if input.data_source in [DataSource.ACTIVITY, DataSource.BOTH]:
+            activity_sql = """
+                SELECT 
+                    concept_id, concept_name,
+                    representative_smiles as canonical_smiles,
+                    COALESCE(best_ic50_nm, best_ki_nm, best_kd_nm, best_ec50_nm) as activity_value_nm,
+                    CASE 
+                        WHEN best_ic50_nm IS NOT NULL THEN 'IC50'
+                        WHEN best_ki_nm IS NOT NULL THEN 'Ki'
+                        WHEN best_kd_nm IS NOT NULL THEN 'Kd'
+                        WHEN best_ec50_nm IS NOT NULL THEN 'EC50'
+                    END as activity_type,
+                    best_pchembl as pchembl,
+                    n_total_measurements,
+                    data_confidence,
+                    sources
+                FROM dm_molecule_target_summary
+                WHERE gene_symbol = $1 AND best_pchembl >= $2
+                ORDER BY best_pchembl DESC NULLS LAST
+                LIMIT $3
+            """
+            activity_rows = await conn.execute_query(activity_sql, gene_symbol, input.min_pchembl, input.limit)
         
-        # Get mechanism data
-        mechanism_sql = """
-            SELECT DISTINCT
-                concept_id, concept_name, chembl_id,
-                mechanism_of_action, action_type
-            FROM dm_drug_mechanism
-            WHERE $1 = ANY(gene_symbols)
-            LIMIT $2
-        """
-        mechanism_rows = await conn.execute_query(mechanism_sql, gene_symbol, input.limit)
+        # Get mechanism data only if requested
+        if input.data_source in [DataSource.MECHANISM, DataSource.BOTH]:
+            mechanism_sql = """
+                SELECT DISTINCT
+                    concept_id, concept_name, chembl_id,
+                    mechanism_of_action, action_type
+                FROM dm_drug_mechanism
+                WHERE $1 = ANY(gene_symbols)
+                LIMIT $2
+            """
+            mechanism_rows = await conn.execute_query(mechanism_sql, gene_symbol, input.limit)
         
         mechanism_lookup = {
             r['concept_id']: (r['mechanism_of_action'], r['action_type'])
             for r in mechanism_rows
         }
+
+        concept_ids = list({r['concept_id'] for r in activity_rows} | {r['concept_id'] for r in mechanism_rows})
+        concept_lookup = {}
+        if concept_ids:
+            concept_info_sql = """
+                SELECT
+                    mc.concept_id,
+                    mc.is_biotherapeutic,
+                    dbt.molecule_type,
+                    dbt.biotherapeutic_type
+                FROM dm_molecule_concept mc
+                LEFT JOIN dm_biotherapeutic dbt ON dbt.concept_id = mc.concept_id
+                WHERE mc.concept_id = ANY($1::bigint[])
+            """
+            concept_info_rows = await conn.execute_query(concept_info_sql, concept_ids)
+            concept_lookup = {
+                r['concept_id']: r for r in concept_info_rows
+            }
         
-        hits_by_concept = {}
+        hits_by_concept: dict[int, DrugForTargetHit] = {}
         
+        # Process activity data
         for r in activity_rows:
             concept_id = r['concept_id']
             mech = mechanism_lookup.get(concept_id, (None, None))
+            concept_info = concept_lookup.get(concept_id, {})
             
             hits_by_concept[concept_id] = DrugForTargetHit(
                 concept_id=concept_id,
                 concept_name=r['concept_name'],
                 canonical_smiles=r['canonical_smiles'],
+                is_biotherapeutic=concept_info.get('is_biotherapeutic') or False,
+                molecule_type=concept_info.get('molecule_type'),
+                biotherapeutic_type=concept_info.get('biotherapeutic_type'),
                 activity_type=r['activity_type'],
                 activity_value_nm=float(r['activity_value_nm']) if r['activity_value_nm'] else None,
                 pchembl=float(r['pchembl']) if r['pchembl'] else None,
@@ -1113,21 +1386,35 @@ class PharmacologySearch:
                 action_type=mech[1]
             )
         
+        # Process mechanism data (add drugs not already in activity data)
         for r in mechanism_rows:
             concept_id = r['concept_id']
             if concept_id not in hits_by_concept:
+                concept_info = concept_lookup.get(concept_id, {})
                 hits_by_concept[concept_id] = DrugForTargetHit(
                     concept_id=concept_id,
                     concept_name=r['concept_name'],
                     chembl_id=r['chembl_id'],
+                    is_biotherapeutic=concept_info.get('is_biotherapeutic') or False,
+                    molecule_type=concept_info.get('molecule_type'),
+                    biotherapeutic_type=concept_info.get('biotherapeutic_type'),
                     mechanism_of_action=r['mechanism_of_action'],
                     action_type=r['action_type']
                 )
         
-        hits = sorted(
-            hits_by_concept.values(),
-            key=lambda h: (h.pchembl is None, -(h.pchembl or 0))
-        )
+        # Sort based on data source:
+        # - MECHANISM: Sort by name (curated approved drugs)
+        # - ACTIVITY/BOTH: Sort by pchembl (binding affinity)
+        if input.data_source == DataSource.MECHANISM:
+            hits = sorted(
+                hits_by_concept.values(),
+                key=lambda h: (h.concept_name or "").lower()
+            )
+        else:
+            hits = sorted(
+                hits_by_concept.values(),
+                key=lambda h: (h.pchembl is None, -(h.pchembl or 0))
+            )
         
         # Build diagnostics for not_found
         if not hits:
@@ -1150,18 +1437,28 @@ class PharmacologySearch:
         
         # Build warnings for partial results
         warnings = []
-        if activity_rows and not mechanism_rows:
-            warnings.append(f"No curated mechanism data found for {gene_symbol}")
-        if mechanism_rows and not activity_rows:
-            warnings.append(f"No quantitative activity data found for {gene_symbol} at pChEMBL >= {input.min_pchembl}")
-        
+        if input.data_source == DataSource.BOTH:
+            if activity_rows and not mechanism_rows:
+                warnings.append(f"No curated mechanism data found for {gene_symbol}")
+            if mechanism_rows and not activity_rows:
+                warnings.append(f"No quantitative activity data found for {gene_symbol} at pChEMBL >= {input.min_pchembl}")
+
+        source_lists = [h.sources for h in hits]
+        data_source_breakdown = self._summarize_sources(source_lists)
+        confidence_explanation = (
+            f"Activity data filtered at pChEMBL >= {input.min_pchembl}; "
+            f"data_source={input.data_source.value}"
+        )
+
         return TargetSearchOutput(
             status="success",
             mode=input.mode,
             query_summary=f"drugs for '{gene_symbol}'",
             total_hits=len(hits),
             hits=hits[:input.limit],
-            warnings=warnings
+            warnings=warnings,
+            data_source_breakdown=data_source_breakdown,
+            confidence_explanation=confidence_explanation
         )
 
     # =========================================================================
@@ -1192,18 +1489,23 @@ class PharmacologySearch:
         
         concept_sql = f"""
             {self.CONCEPT_LOOKUP_CTE}
-            SELECT 
+            SELECT DISTINCT ON (mc.concept_id)
                 mc.concept_id,
                 mc.preferred_name as concept_name,
                 dm.canonical_smiles,
                 mc.n_forms,
                 mc.has_salt_forms,
+                mc.is_biotherapeutic,
+                dbt.molecule_type,
+                dbt.biotherapeutic_type,
                 (SELECT COUNT(DISTINCT nct_id) FROM map_ctgov_molecules WHERE concept_id = mc.concept_id) as n_clinical_trials,
                 (SELECT COUNT(DISTINCT gene_symbol) FROM dm_molecule_target_summary WHERE concept_id = mc.concept_id) as n_activity_targets,
                 (SELECT COUNT(*) FROM dm_drug_mechanism WHERE concept_id = mc.concept_id) as n_mechanism_targets
             FROM matched_concepts m
             JOIN dm_molecule_concept mc ON mc.concept_id = m.concept_id
-            JOIN dm_molecule dm ON dm.concept_id = m.concept_id AND dm.is_salt = FALSE
+            LEFT JOIN dm_molecule dm ON dm.concept_id = m.concept_id AND dm.is_salt = FALSE
+            LEFT JOIN dm_biotherapeutic dbt ON dbt.concept_id = m.concept_id
+            ORDER BY mc.concept_id, dm.mol_id
             LIMIT 1
         """
         
@@ -1237,7 +1539,7 @@ class PharmacologySearch:
         
         # Get forms
         forms = []
-        if input.include_forms:
+        if input.include_forms and not r['is_biotherapeutic']:
             forms_sql = """
                 SELECT mol_id, pref_name, inchi_key, canonical_smiles, 
                        is_salt, salt_form, stereo_type, chembl_id
@@ -1259,6 +1561,37 @@ class PharmacologySearch:
                     chembl_id=fr['chembl_id']
                 )
                 for fr in form_rows
+            ]
+        
+        sequence_info = []
+        if r['is_biotherapeutic']:
+            sequence_sql = """
+                SELECT
+                    dbc.component_type,
+                    dbc.description,
+                    dbc.sequence,
+                    dbc.sequence_length,
+                    dbc.organism,
+                    dbc.tax_id,
+                    dbc.uniprot_accession
+                FROM dm_biotherapeutic_component dbc
+                JOIN dm_biotherapeutic dbt ON dbc.bio_id = dbt.bio_id
+                WHERE dbt.concept_id = $1
+                ORDER BY dbc.component_id
+                LIMIT 20
+            """
+            sequence_rows = await conn.execute_query(sequence_sql, concept_id)
+            sequence_info = [
+                {
+                    "component_type": sr["component_type"],
+                    "description": sr["description"],
+                    "sequence": sr["sequence"],
+                    "sequence_length": sr["sequence_length"],
+                    "organism": sr["organism"],
+                    "tax_id": sr["tax_id"],
+                    "uniprot_accession": sr["uniprot_accession"],
+                }
+                for sr in sequence_rows
             ]
         
         # Get trials
@@ -1297,6 +1630,10 @@ class PharmacologySearch:
             concept_id=concept_id,
             concept_name=r['concept_name'],
             canonical_smiles=r['canonical_smiles'],
+            is_biotherapeutic=r['is_biotherapeutic'] or False,
+            molecule_type=r['molecule_type'],
+            biotherapeutic_type=r['biotherapeutic_type'],
+            sequence_info=sequence_info,
             n_forms=r['n_forms'] or 0,
             has_salt_forms=r['has_salt_forms'] or False,
             n_clinical_trials=r['n_clinical_trials'] or 0,
@@ -1349,7 +1686,7 @@ class PharmacologySearch:
                     NULL::float as confidence
                 FROM ctgov_interventions i
                 JOIN ctgov_studies s ON i.nct_id = s.nct_id
-                WHERE i.intervention_type = 'DRUG'
+                WHERE i.intervention_type IN ('DRUG', 'BIOLOGICAL')
                   AND i.name ILIKE $1
                 ORDER BY s.nct_id DESC
                 LIMIT $2
@@ -1912,6 +2249,295 @@ class PharmacologySearch:
     # DELEGATING HANDLERS
     # =========================================================================
     
+    async def _search_indications_for_drug(self, input: TargetSearchInput) -> TargetSearchOutput:
+        """Find indications linked to a drug."""
+        conn = await self._get_conn()
+
+        concept_ids, search_steps = await self._find_concept_ids_with_diagnostics(conn, input.query)
+        if not concept_ids:
+            warnings, diagnostics = self._build_not_found_diagnostics(input.mode, input, search_steps)
+            return TargetSearchOutput(
+                status="not_found",
+                mode=input.mode,
+                query_summary=f"indications for '{input.query}'",
+                total_hits=0,
+                hits=[],
+                warnings=warnings,
+                diagnostics=diagnostics
+            )
+
+        approval_filter = ""
+        if input.approval_status == "approved":
+            approval_filter = "AND d.is_approved = TRUE"
+        elif input.approval_status == "investigational":
+            approval_filter = "AND (d.is_approved IS NOT TRUE)"
+
+        sql = f"""
+            SELECT
+                i.indication_id,
+                i.preferred_name,
+                i.therapeutic_area,
+                d.max_phase,
+                d.is_approved,
+                d.sources,
+                d.ref_type,
+                d.ref_id,
+                d.ref_url
+            FROM dm_drug_indication d
+            JOIN dm_indication i ON d.indication_id = i.indication_id
+            WHERE d.concept_id = ANY($1::bigint[])
+            {approval_filter}
+            ORDER BY d.max_phase DESC NULLS LAST, i.preferred_name
+            LIMIT $2
+        """
+
+        rows = await conn.execute_query(sql, concept_ids, input.limit)
+        hits = [
+            IndicationHit(
+                indication_id=r["indication_id"],
+                preferred_name=r["preferred_name"],
+                therapeutic_area=r["therapeutic_area"],
+                max_phase=float(r["max_phase"]) if r["max_phase"] is not None else None,
+                is_approved=r["is_approved"],
+                sources=r["sources"] or [],
+                ref_type=r["ref_type"],
+                ref_id=r["ref_id"],
+                ref_url=r["ref_url"],
+            )
+            for r in rows
+        ]
+
+        return TargetSearchOutput(
+            status="success" if hits else "not_found",
+            mode=input.mode,
+            query_summary=f"indications for '{input.query}'",
+            total_hits=len(hits),
+            hits=hits,
+            warnings=[] if hits else [f"No indications found for '{input.query}'"]
+        )
+
+    async def _search_drugs_for_indication(self, input: TargetSearchInput) -> TargetSearchOutput:
+        """Find drugs linked to an indication."""
+        conn = await self._get_conn()
+        query_exact = input.query.strip()
+        query_pattern = f"%{query_exact}%"
+
+        approval_filter = ""
+        if input.approval_status == "approved":
+            approval_filter = "AND d.is_approved = TRUE"
+        elif input.approval_status == "investigational":
+            approval_filter = "AND (d.is_approved IS NOT TRUE)"
+
+        sql = f"""
+            WITH matched_indications AS (
+                SELECT indication_id
+                FROM dm_indication
+                WHERE preferred_name_lower = LOWER($1)
+                   OR preferred_name ILIKE $2
+                   OR EXISTS (
+                       SELECT 1 FROM unnest(COALESCE(synonyms, ARRAY[]::text[])) AS s
+                       WHERE LOWER(s) = LOWER($1)
+                   )
+                LIMIT 20
+            )
+            SELECT
+                mc.concept_id,
+                mc.preferred_name AS concept_name,
+                d.max_phase,
+                d.is_approved,
+                d.sources
+            FROM dm_drug_indication d
+            JOIN matched_indications mi ON d.indication_id = mi.indication_id
+            JOIN dm_molecule_concept mc ON d.concept_id = mc.concept_id
+            WHERE mc.preferred_name IS NOT NULL
+            {approval_filter}
+            ORDER BY d.max_phase DESC NULLS LAST, mc.preferred_name
+            LIMIT $3
+        """
+
+        rows = await conn.execute_query(sql, query_exact, query_pattern, input.limit)
+        hits = [
+            DrugIndicationHit(
+                concept_id=r["concept_id"],
+                concept_name=r["concept_name"],
+                max_phase=float(r["max_phase"]) if r["max_phase"] is not None else None,
+                is_approved=r["is_approved"],
+                sources=r["sources"] or [],
+            )
+            for r in rows
+        ]
+
+        status = "success" if hits else "not_found"
+        warnings = [] if hits else [f"No drugs found for indication '{input.query}'"]
+        return TargetSearchOutput(
+            status=status,
+            mode=input.mode,
+            query_summary=f"drugs for indication '{input.query}'",
+            total_hits=len(hits),
+            hits=hits,
+            warnings=warnings
+        )
+
+    async def _search_target_pathways(self, input: TargetSearchInput) -> TargetSearchOutput:
+        """Return protein class summaries for a target gene."""
+        conn = await self._get_conn()
+        gene_symbol = input.query.upper()
+
+        sql = """
+            SELECT
+                t.gene_symbol,
+                t.protein_class_id,
+                pc.protein_class_desc,
+                array_remove(array_agg(DISTINCT pcs.protein_class_synonym), NULL) AS synonyms
+            FROM dm_target t
+            LEFT JOIN protein_classification pc ON t.protein_class_id = pc.protein_class_id
+            LEFT JOIN protein_class_synonyms pcs ON t.protein_class_id = pcs.protein_class_id
+            WHERE t.gene_symbol = $1
+            GROUP BY t.gene_symbol, t.protein_class_id, pc.protein_class_desc
+        """
+
+        rows = await conn.execute_query(sql, gene_symbol)
+        hits = [
+            TargetPathwayHit(
+                gene_symbol=r["gene_symbol"],
+                protein_class_id=r["protein_class_id"],
+                protein_class_desc=r["protein_class_desc"],
+                synonyms=r["synonyms"] or [],
+            )
+            for r in rows
+        ]
+
+        warnings = []
+        if hits and not hits[0].protein_class_desc:
+            warnings.append("Target found but protein class metadata is missing")
+        if not hits:
+            warnings.append(f"No target metadata found for '{gene_symbol}'")
+
+        return TargetSearchOutput(
+            status="success" if hits else "not_found",
+            mode=input.mode,
+            query_summary=f"target pathways for '{gene_symbol}'",
+            total_hits=len(hits),
+            hits=hits,
+            warnings=warnings
+        )
+
+    async def _search_drug_interactions(self, input: TargetSearchInput) -> TargetSearchOutput:
+        """Find metabolism-based interactions for a drug."""
+        conn = await self._get_conn()
+        concept_ids, search_steps = await self._find_concept_ids_with_diagnostics(conn, input.query)
+        if not concept_ids:
+            warnings, diagnostics = self._build_not_found_diagnostics(input.mode, input, search_steps)
+            return TargetSearchOutput(
+                status="not_found",
+                mode=input.mode,
+                query_summary=f"drug interactions for '{input.query}'",
+                total_hits=0,
+                hits=[],
+                warnings=warnings,
+                diagnostics=diagnostics
+            )
+
+        chembl_sql = """
+            SELECT DISTINCT dm.chembl_id, dm.concept_id, mc.preferred_name
+            FROM dm_molecule dm
+            JOIN dm_molecule_concept mc ON dm.concept_id = mc.concept_id
+            WHERE dm.concept_id = ANY($1::bigint[])
+              AND dm.chembl_id IS NOT NULL
+            LIMIT 20
+        """
+        chembl_rows = await conn.execute_query(chembl_sql, concept_ids)
+        chembl_ids = [r["chembl_id"] for r in chembl_rows if r.get("chembl_id")]
+        concept_name_lookup = {r["chembl_id"]: r["preferred_name"] for r in chembl_rows if r.get("chembl_id")}
+        if not chembl_ids:
+            warnings = [f"No ChEMBL IDs found for '{input.query}' to resolve metabolism data"]
+            return TargetSearchOutput(
+                status="not_found",
+                mode=input.mode,
+                query_summary=f"drug interactions for '{input.query}'",
+                total_hits=0,
+                hits=[],
+                warnings=warnings
+            )
+
+        molregno_rows = await conn.execute_query(
+            "SELECT molregno, chembl_id FROM molecule_dictionary WHERE chembl_id = ANY($1::text[])",
+            chembl_ids
+        )
+        molregnos = [r["molregno"] for r in molregno_rows]
+        molregno_to_chembl = {r["molregno"]: r["chembl_id"] for r in molregno_rows}
+
+        if not molregnos:
+            warnings = [f"No ChEMBL molregno records found for '{input.query}'"]
+            return TargetSearchOutput(
+                status="not_found",
+                mode=input.mode,
+                query_summary=f"drug interactions for '{input.query}'",
+                total_hits=0,
+                hits=[],
+                warnings=warnings
+            )
+
+        sql = """
+            SELECT
+                m.drug_record_id,
+                m.substrate_record_id,
+                m.metabolite_record_id,
+                m.pathway_key,
+                m.enzyme_name,
+                md_drug.chembl_id AS drug_chembl_id,
+                md_sub.chembl_id AS substrate_chembl_id,
+                md_met.chembl_id AS metabolite_chembl_id
+            FROM metabolism m
+            LEFT JOIN molecule_dictionary md_drug ON m.drug_record_id = md_drug.molregno
+            LEFT JOIN molecule_dictionary md_sub ON m.substrate_record_id = md_sub.molregno
+            LEFT JOIN molecule_dictionary md_met ON m.metabolite_record_id = md_met.molregno
+            WHERE m.drug_record_id = ANY($1::bigint[])
+               OR m.substrate_record_id = ANY($1::bigint[])
+               OR m.metabolite_record_id = ANY($1::bigint[])
+            ORDER BY m.met_id DESC
+            LIMIT $2
+        """
+
+        rows = await conn.execute_query(sql, molregnos, input.limit)
+        hits = []
+        molregno_set = set(molregnos)
+        for r in rows:
+            interaction_role = None
+            if r["drug_record_id"] in molregno_set:
+                interaction_role = "drug"
+            elif r["substrate_record_id"] in molregno_set:
+                interaction_role = "substrate"
+            elif r["metabolite_record_id"] in molregno_set:
+                interaction_role = "metabolite"
+
+            chembl_id = molregno_to_chembl.get(
+                r["drug_record_id"] or r["substrate_record_id"] or r["metabolite_record_id"]
+            )
+            hits.append(
+                DrugInteractionHit(
+                    concept_id=concept_ids[0] if concept_ids else None,
+                    concept_name=concept_name_lookup.get(chembl_id),
+                    chembl_id=chembl_id,
+                    interaction_role=interaction_role,
+                    enzyme_name=r["enzyme_name"],
+                    pathway_key=r["pathway_key"],
+                    metabolite_chembl_id=r["metabolite_chembl_id"],
+                    substrate_chembl_id=r["substrate_chembl_id"],
+                )
+            )
+
+        status = "success" if hits else "not_found"
+        warnings = [] if hits else [f"No metabolism interactions found for '{input.query}'"]
+        return TargetSearchOutput(
+            status=status,
+            mode=input.mode,
+            query_summary=f"drug interactions for '{input.query}'",
+            total_hits=len(hits),
+            hits=hits,
+            warnings=warnings
+        )
+
     async def _search_activities_for_drug(self, input: TargetSearchInput) -> TargetSearchOutput:
         """Get raw activity measurements for a drug."""
         input_copy = input.model_copy()
@@ -1939,6 +2565,15 @@ async def target_search_async(
     db_config: DatabaseConfig,
     input: TargetSearchInput
 ) -> TargetSearchOutput:
-    """Convenience function for one-off searches."""
+    """
+    Execute a pharmacology search using a TargetSearchInput.
+
+    Args:
+        db_config: Database configuration for the PostgreSQL source.
+        input: TargetSearchInput specifying mode, query, and filters.
+
+    Returns:
+        TargetSearchOutput with status, hits, and diagnostics.
+    """
     searcher = PharmacologySearch(db_config)
     return await searcher.search(input)

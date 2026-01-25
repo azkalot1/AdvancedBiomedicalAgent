@@ -1,0 +1,88 @@
+test_cases:
+  # ========================================
+  # CROSS-DATABASE IDENTIFIER LOOKUPS
+  # ========================================
+  - id: "chembl941_lookup_001"
+    tool: "lookup_drug_identifiers"
+    input:
+      identifier: "CHEMBL941"
+      identifier_type: "chembl"
+    expected_facts:
+      required:
+        - "CHEMBL941 is imatinib"
+      optional:
+        - "imatinib has InChIKey"
+        - "imatinib has SMILES structure"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "aspirin_lookup_002"
+    tool: "lookup_drug_identifiers"
+    input:
+      identifier: "aspirin"
+      identifier_type: "name"
+    expected_facts:
+      required:
+        - "aspirin is found in the database"
+      optional:
+        - "aspirin has ChEMBL ID"
+        - "aspirin has InChIKey BSYNRYMUTXBXSQ"
+        - "aspirin SMILES contains CC(=O)Oc1ccccc1C(=O)O"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "caffeine_lookup_003"
+    tool: "lookup_drug_identifiers"
+    input:
+      identifier: "caffeine"
+      identifier_type: "name"
+    expected_facts:
+      required:
+        - "caffeine is found in the database"
+      optional:
+        - "caffeine has ChEMBL ID"
+        - "caffeine has molecular structure"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "metformin_lookup_004"
+    tool: "lookup_drug_identifiers"
+    input:
+      identifier: "metformin"
+      identifier_type: "name"
+    expected_facts:
+      required:
+        - "metformin is found in the database"
+      optional:
+        - "metformin has ChEMBL ID"
+        - "metformin has labels"
+        - "metformin has trials"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "pembrolizumab_lookup_005"
+    tool: "lookup_drug_identifiers"
+    input:
+      identifier: "pembrolizumab"
+      identifier_type: "name"
+    expected_facts:
+      required:
+        - "pembrolizumab is found in the database"
+      optional:
+        - "pembrolizumab has ChEMBL ID"
+        - "pembrolizumab is a biologic"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "inchikey_aspirin_006"
+    tool: "lookup_drug_identifiers"
+    input:
+      identifier: "BSYNRYMUTXBXSQ-UHFFFAOYSA-N"
+      identifier_type: "inchikey"
+    expected_facts:
+      required:
+        - "InChIKey resolves to aspirin"
+      optional:
+        - "acetylsalicylic acid is found"
+    source: "ChEMBL"
+    confidence: "high"

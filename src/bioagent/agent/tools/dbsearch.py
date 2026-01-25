@@ -31,6 +31,36 @@ from bioagent.data.search.openfda_and_dailymed_search import (
     DailyMedAndOpenFDASearchOutput,
     dailymed_and_openfda_search_async,
 )
+from bioagent.data.search.molecule_trial_search import (
+    MoleculeTrialSearchInput,
+    MoleculeTrialSearchOutput,
+    molecule_trial_search_async,
+)
+from bioagent.data.search.adverse_events_search import (
+    AdverseEventsSearchInput,
+    AdverseEventsSearchOutput,
+    adverse_events_search_async,
+)
+from bioagent.data.search.outcomes_search import (
+    OutcomesSearchInput,
+    OutcomesSearchOutput,
+    outcomes_search_async,
+)
+from bioagent.data.search.orange_book_search import (
+    OrangeBookSearchInput,
+    OrangeBookSearchOutput,
+    orange_book_search_async,
+)
+from bioagent.data.search.cross_db_lookup import (
+    CrossDatabaseLookupInput,
+    CrossDatabaseLookupOutput,
+    cross_database_lookup_async,
+)
+from bioagent.data.search.biotherapeutic_sequence_search import (
+    BiotherapeuticSearchInput,
+    BiotherapeuticSearchOutput,
+    biotherapeutic_sequence_search_async,
+)
 from bioagent.data.search.target_search import (
     PharmacologySearch,
     TargetSearchInput,
@@ -339,6 +369,304 @@ def _format_pharmacology_output(output: TargetSearchOutput) -> str:
     return "\n".join(lines)
 
 
+def _format_molecule_trials_output(output: MoleculeTrialSearchOutput) -> str:
+    """Format molecule-trial connectivity results."""
+    if output.status == "error":
+        return f"❌ Molecule-trial search failed: {output.error}"
+    if output.status == "invalid_input":
+        return f"❌ Invalid input: {output.error}"
+    if output.status == "not_found" or not output.hits:
+        return f"🔍 No molecule-trial results found for: {output.query_summary}"
+
+    lines = [
+        f"✅ Found {output.total_hits} result(s)",
+        f"Mode: {output.mode}",
+        f"Query: {output.query_summary}",
+        "=" * 40,
+    ]
+
+    for i, hit in enumerate(output.hits[:50], 1):
+        if output.mode == "molecules_by_condition":
+            name = getattr(hit, "concept_name", None) or "Unknown"
+            lines.append(f"[{i}] {name} | Trials: {getattr(hit, 'n_trials', 0)}")
+            continue
+
+        nct_id = getattr(hit, "nct_id", "N/A")
+        phase = getattr(hit, "phase", None) or "N/A"
+        status = getattr(hit, "status", None) or "N/A"
+        lines.append(f"[{i}] {nct_id} | {phase} | {status}")
+
+        title = getattr(hit, "brief_title", None)
+        if title:
+            lines.append(f"    {title}")
+
+        concept_name = getattr(hit, "concept_name", None) or getattr(hit, "molecule_name", None)
+        if concept_name:
+            lines.append(f"    Molecule: {concept_name}")
+
+        match_type = getattr(hit, "match_type", None)
+        confidence = getattr(hit, "confidence", None)
+        if match_type or confidence is not None:
+            conf_text = f"{confidence:.2f}" if isinstance(confidence, (int, float)) else "N/A"
+            lines.append(f"    Match: {match_type or 'N/A'} | Confidence: {conf_text}")
+
+        inchi_key = getattr(hit, "inchi_key", None)
+        if inchi_key:
+            lines.append(f"    InChIKey: {inchi_key}")
+
+    if output.total_hits > 50:
+        lines.append(f"\n... and {output.total_hits - 50} more results (truncated)")
+
+    return "\n".join(lines)
+
+
+def _format_adverse_events_output(output: AdverseEventsSearchOutput) -> str:
+    """Format adverse events search results."""
+    if output.status == "error":
+        return f"❌ Adverse event search failed: {output.error}"
+    if output.status == "invalid_input":
+        return f"❌ Invalid input: {output.error}"
+    if output.status == "not_found" or not output.hits:
+        return f"🔍 No adverse event results found for: {output.query_summary}"
+
+    lines = [
+        f"✅ Found {output.total_hits} result(s)",
+        f"Mode: {output.mode}",
+        f"Query: {output.query_summary}",
+        "=" * 40,
+    ]
+
+    for i, hit in enumerate(output.hits[:50], 1):
+        if output.mode == "events_for_drug":
+            term = getattr(hit, "adverse_event_term", None) or "Unknown event"
+            event_type = getattr(hit, "event_type", None) or "N/A"
+            affected = getattr(hit, "subjects_affected", None)
+            at_risk = getattr(hit, "subjects_at_risk", None)
+            n_trials = getattr(hit, "n_trials", None)
+            lines.append(f"[{i}] {term} | {event_type}")
+            lines.append(f"    Affected: {affected if affected is not None else 'N/A'} / {at_risk if at_risk is not None else 'N/A'}")
+            if n_trials is not None:
+                lines.append(f"    Trials: {n_trials}")
+            continue
+
+        if output.mode == "drugs_with_event":
+            nct_id = getattr(hit, "nct_id", "N/A")
+            title = getattr(hit, "brief_title", None)
+            event_term = getattr(hit, "adverse_event_term", None)
+            event_type = getattr(hit, "event_type", None)
+            affected = getattr(hit, "subjects_affected", None)
+            lines.append(f"[{i}] {nct_id} | {event_term or 'event'} | {event_type or 'N/A'}")
+            if title:
+                lines.append(f"    {title}")
+            if affected is not None:
+                lines.append(f"    Subjects affected: {affected}")
+            continue
+
+        # compare_safety
+        drug_name = getattr(hit, "drug_name", None) or "Unknown drug"
+        lines.append(f"[{i}] {drug_name}")
+        top_events = getattr(hit, "top_events", []) or []
+        for ev in top_events[:5]:
+            term = getattr(ev, "adverse_event_term", None) or "Unknown event"
+            event_type = getattr(ev, "event_type", None) or "N/A"
+            affected = getattr(ev, "subjects_affected", None)
+            n_trials = getattr(ev, "n_trials", None)
+            lines.append(
+                f"    - {term} | {event_type} | affected: {affected if affected is not None else 'N/A'} | trials: {n_trials if n_trials is not None else 'N/A'}"
+            )
+
+    if output.total_hits > 50:
+        lines.append(f"\n... and {output.total_hits - 50} more results (truncated)")
+
+    return "\n".join(lines)
+
+
+def _format_outcomes_output(output: OutcomesSearchOutput) -> str:
+    """Format clinical trial outcomes search results."""
+    if output.status == "error":
+        return f"❌ Outcomes search failed: {output.error}"
+    if output.status == "invalid_input":
+        return f"❌ Invalid input: {output.error}"
+    if output.status == "not_found" or not output.hits:
+        return f"🔍 No outcome results found for: {output.query_summary}"
+
+    lines = [
+        f"✅ Found {output.total_hits} result(s)",
+        f"Mode: {output.mode}",
+        f"Query: {output.query_summary}",
+        "=" * 40,
+    ]
+
+    if output.mode == "outcomes_for_trial":
+        for bundle in output.hits[:5]:
+            nct_id = getattr(bundle, "nct_id", "N/A")
+            outcomes = getattr(bundle, "outcomes", []) or []
+            measurements = getattr(bundle, "measurements", []) or []
+            analyses = getattr(bundle, "analyses", []) or []
+            lines.append(f"Trial {nct_id}: outcomes={len(outcomes)}, measurements={len(measurements)}, analyses={len(analyses)}")
+
+            for outcome in outcomes[:5]:
+                title = getattr(outcome, "title", None) or "Unnamed outcome"
+                outcome_type = getattr(outcome, "outcome_type", None) or "N/A"
+                lines.append(f"    - [{outcome_type}] {title}")
+
+            for analysis in analyses[:5]:
+                title = getattr(analysis, "outcome_title", None) or "Outcome analysis"
+                p_value = getattr(analysis, "p_value", None)
+                p_text = f"{p_value:.4f}" if isinstance(p_value, (int, float)) else "N/A"
+                lines.append(f"    * Analysis: {title} | p={p_text}")
+        return "\n".join(lines)
+
+    for i, hit in enumerate(output.hits[:50], 1):
+        if output.mode == "trials_with_outcome":
+            nct_id = getattr(hit, "nct_id", "N/A")
+            title = getattr(hit, "brief_title", None) or ""
+            outcome_title = getattr(hit, "outcome_title", None) or "Outcome"
+            outcome_type = getattr(hit, "outcome_type", None) or "N/A"
+            lines.append(f"[{i}] {nct_id} | {outcome_type} | {outcome_title}")
+            if title:
+                lines.append(f"    {title}")
+            continue
+
+        # efficacy_comparison
+        nct_id = getattr(hit, "nct_id", "N/A")
+        outcome_title = getattr(hit, "outcome_title", None) or "Outcome"
+        outcome_type = getattr(hit, "outcome_type", None) or "N/A"
+        p_value = getattr(hit, "p_value", None)
+        p_text = f"{p_value:.4f}" if isinstance(p_value, (int, float)) else "N/A"
+        lines.append(f"[{i}] {nct_id} | {outcome_type} | {outcome_title} | p={p_text}")
+
+    if output.total_hits > 50:
+        lines.append(f"\n... and {output.total_hits - 50} more results (truncated)")
+
+    return "\n".join(lines)
+
+
+def _format_orange_book_output(output: OrangeBookSearchOutput) -> str:
+    """Format Orange Book search results."""
+    if output.status == "error":
+        return f"❌ Orange Book search failed: {output.error}"
+    if output.status == "invalid_input":
+        return f"❌ Invalid input: {output.error}"
+    if output.status == "not_found" or not output.hits:
+        return f"🔍 No Orange Book results found for: {output.query_summary}"
+
+    lines = [
+        f"✅ Found {output.total_hits} result(s)",
+        f"Mode: {output.mode}",
+        f"Query: {output.query_summary}",
+        "=" * 40,
+    ]
+
+    for i, hit in enumerate(output.hits[:50], 1):
+        trade = getattr(hit, "trade_name", None) or "Unknown"
+        ingredient = getattr(hit, "ingredient", None) or "Unknown ingredient"
+        te_code = getattr(hit, "te_code", None) or "N/A"
+        appl_no = getattr(hit, "appl_no", None) or "N/A"
+        lines.append(f"[{i}] {trade} | {ingredient} | TE: {te_code} | NDA: {appl_no}")
+
+        if getattr(hit, "dosage_form", None) or getattr(hit, "route", None):
+            lines.append(
+                f"    Form: {getattr(hit, 'dosage_form', None) or 'N/A'} | Route: {getattr(hit, 'route', None) or 'N/A'}"
+            )
+
+        patents = getattr(hit, "patents", []) or []
+        exclusivity = getattr(hit, "exclusivity", []) or []
+        if patents:
+            lines.append(f"    Patents: {len(patents)}")
+            for patent in patents[:3]:
+                lines.append(
+                    f"      - {patent.patent_no or 'N/A'} | exp: {patent.patent_expiration_date or 'N/A'}"
+                )
+        if exclusivity:
+            lines.append(f"    Exclusivity: {len(exclusivity)}")
+            for exc in exclusivity[:3]:
+                lines.append(f"      - {exc.exclusivity_code or 'N/A'} | {exc.exclusivity_date or 'N/A'}")
+
+    if output.total_hits > 50:
+        lines.append(f"\n... and {output.total_hits - 50} more results (truncated)")
+
+    return "\n".join(lines)
+
+
+def _format_cross_db_output(output: CrossDatabaseLookupOutput) -> str:
+    """Format cross-database identifier lookup results."""
+    if output.status == "error":
+        return f"❌ Identifier lookup failed: {output.error}"
+    if output.status == "invalid_input":
+        return f"❌ Invalid input: {output.error}"
+    if output.status == "not_found":
+        return f"🔍 No matches found for: {output.identifier}"
+
+    lines = [
+        f"✅ Identifier lookup: {output.identifier} ({output.identifier_type})",
+        f"Molecules: {len(output.molecules)} | Labels: {len(output.labels)} | Trials: {len(output.trials)} | Targets: {len(output.targets)}",
+        "=" * 40,
+    ]
+
+    for i, mol in enumerate(output.molecules[:10], 1):
+        name = mol.concept_name or mol.pref_name or "Unknown"
+        chembl = mol.chembl_id or "N/A"
+        inchi = mol.inchi_key or "N/A"
+        lines.append(f"[{i}] {name} | ChEMBL: {chembl} | InChIKey: {inchi}")
+
+    if output.labels:
+        lines.append("Labels:")
+        for label in output.labels[:10]:
+            lines.append(f"  - {label.title or 'Label'} ({label.set_id}) [{label.source}]")
+
+    if output.trials:
+        lines.append("Trials:")
+        for trial in output.trials[:10]:
+            lines.append(f"  - {trial.nct_id} | {trial.phase or 'N/A'} | {trial.status or 'N/A'}")
+
+    if output.targets:
+        lines.append("Targets:")
+        for target in output.targets[:10]:
+            pchembl = target.best_pchembl
+            p_text = f"{pchembl:.2f}" if isinstance(pchembl, (int, float)) else "N/A"
+            lines.append(f"  - {target.gene_symbol} | best pChEMBL: {p_text} | n={target.n_measurements or 0}")
+
+    return "\n".join(lines)
+
+
+def _format_biotherapeutic_output(output: BiotherapeuticSearchOutput) -> str:
+    """Format biotherapeutic sequence search results."""
+    if output.status == "error":
+        return f"❌ Biotherapeutic search failed: {output.error}"
+    if output.status == "invalid_input":
+        return f"❌ Invalid input: {output.error}"
+    if output.status == "not_found" or not output.hits:
+        return f"🔍 No biotherapeutic results found for: {output.query_summary}"
+
+    lines = [
+        f"✅ Found {output.total_hits} result(s)",
+        f"Mode: {output.mode}",
+        f"Query: {output.query_summary}",
+        "=" * 40,
+    ]
+
+    for i, hit in enumerate(output.hits[:50], 1):
+        name = getattr(hit, "pref_name", None) or "Unknown"
+        chembl = getattr(hit, "chembl_id", None) or "N/A"
+        bio_type = getattr(hit, "biotherapeutic_type", None) or "N/A"
+        organism = getattr(hit, "organism", None) or "N/A"
+        lines.append(f"[{i}] {name} | {bio_type} | ChEMBL: {chembl} | {organism}")
+
+        components = getattr(hit, "components", []) or []
+        for comp in components[:5]:
+            comp_type = getattr(comp, "component_type", None) or "component"
+            accession = getattr(comp, "uniprot_accession", None) or "N/A"
+            seq_len = getattr(comp, "sequence_length", None)
+            seq_text = f"{seq_len} aa" if seq_len else "N/A"
+            lines.append(f"    - {comp_type} | UniProt: {accession} | {seq_text}")
+
+    if output.total_hits > 50:
+        lines.append(f"\n... and {output.total_hits - 50} more results (truncated)")
+
+    return "\n".join(lines)
+
+
 # =============================================================================
 # CLINICAL TRIALS TOOLS
 # =============================================================================
@@ -359,6 +687,10 @@ async def search_clinical_trials(
     status: str | None = None,
     study_type: str | None = None,
     intervention_type: str | None = None,
+    outcome_type: str | None = None,
+    eligibility_gender: str | None = None,
+    eligibility_age_range: list[int] | tuple[int, int] | str | None = None,
+    country: list[str] | str | None = None,
     
     # Date filters
     start_date_from: str | None = None,
@@ -464,6 +796,18 @@ async def search_clinical_trials(
                        • "Combination Product" - Drug-device combinations
                        • "Other" - Other intervention types
                        Example: "Drug, Biological"
+
+    outcome_type: Filter by outcome type. Options:
+                  • "primary", "secondary", "all"
+
+    eligibility_gender: Filter by eligibility gender. Options:
+                        • "male", "female", "all"
+
+    eligibility_age_range: Age range filter for eligible participants.
+                           Format: [min_age, max_age] or "min,max" (years).
+
+    country: Country filter (single or comma-separated list).
+             Examples: "United States", "Germany, France"
     
     ═══════════════════════════════════════════════════════════════════════════════
     DATE FILTERS (format: YYYY-MM-DD)
@@ -658,6 +1002,31 @@ async def search_clinical_trials(
         if intervention_type:
             intervention_type_list = [t.strip() for t in intervention_type.split(",") if t.strip()]
 
+        # Parse comma-separated countries
+        country_list = None
+        if country:
+            if isinstance(country, str):
+                country_list = [c.strip() for c in country.split(",") if c.strip()]
+            elif isinstance(country, list):
+                country_list = [c.strip() for c in country if isinstance(c, str) and c.strip()]
+
+        # Parse eligibility age range
+        age_range = None
+        if eligibility_age_range:
+            if isinstance(eligibility_age_range, (list, tuple)) and len(eligibility_age_range) == 2:
+                try:
+                    age_range = (int(eligibility_age_range[0]), int(eligibility_age_range[1]))
+                except (TypeError, ValueError):
+                    age_range = None
+            elif isinstance(eligibility_age_range, str):
+                separator = "," if "," in eligibility_age_range else "-"
+                parts = [p.strip() for p in eligibility_age_range.split(separator) if p.strip()]
+                if len(parts) == 2:
+                    try:
+                        age_range = (int(parts[0]), int(parts[1]))
+                    except (TypeError, ValueError):
+                        age_range = None
+
         # Auto-enable match_all=True when multiple search criteria are provided
         # Count non-None search criteria
         search_criteria_count = sum([
@@ -718,6 +1087,10 @@ async def search_clinical_trials(
             status=status_list,
             study_type=study_type,
             intervention_type=intervention_type_list,
+            outcome_type=outcome_type,
+            eligibility_gender=eligibility_gender,
+            eligibility_age_range=age_range,
+            country=country_list,
             
             # Date filters
             start_date_from=parse_date(start_date_from),
@@ -775,6 +1148,9 @@ async def search_drug_labels(
     section_queries: list[str] | str | None = None,
     keyword_query: list[str] | str | None = None,
     fetch_all_sections: bool = False,
+    boxed_warnings_only: bool = False,
+    drug_interactions_only: bool = False,
+    adverse_reactions_only: bool = False,
     result_limit: int = 10,
 ) -> str:
     """
@@ -799,6 +1175,9 @@ async def search_drug_labels(
             Use this to find drugs associated with specific conditions or effects.
         fetch_all_sections: If True, returns ALL sections for the specified drugs.
             Use this when you need comprehensive drug information.
+        boxed_warnings_only: If True, fetch only boxed warning sections.
+        drug_interactions_only: If True, fetch only drug interaction sections.
+        adverse_reactions_only: If True, fetch only adverse reaction sections.
         result_limit: Maximum number of results (default: 10, max: 50).
     
     Returns:
@@ -823,6 +1202,10 @@ async def search_drug_labels(
        search_drug_labels(drug_names="Humira",
                          section_queries=["adverse reactions"],
                          keyword_query="infection")
+
+    6. **Quick safety lookups:**
+       search_drug_labels(drug_names="warfarin", boxed_warnings_only=True)
+       search_drug_labels(drug_names="atorvastatin", drug_interactions_only=True)
     """
     try:
         # Normalize inputs to lists
@@ -832,6 +1215,22 @@ async def search_drug_labels(
             section_queries = [section_queries]
         if isinstance(keyword_query, str):
             keyword_query = [keyword_query]
+
+        sections = list(section_queries or [])
+        if boxed_warnings_only:
+            sections.append("boxed warning")
+        if drug_interactions_only:
+            sections.append("drug interactions")
+        if adverse_reactions_only:
+            sections.append("adverse reactions")
+        if sections:
+            # Deduplicate while preserving order
+            seen = set()
+            section_queries = []
+            for section in sections:
+                if section and section not in seen:
+                    section_queries.append(section)
+                    seen.add(section)
         
         search_input = DailyMedAndOpenFDAInput(
             drug_names=drug_names,
@@ -859,6 +1258,267 @@ async def search_drug_labels(
         )
     except Exception as e:
         return f"Error searching drug labels: {type(e).__name__}: {e}"
+
+
+# =============================================================================
+# MOLECULE-TRIAL CONNECTIVITY TOOLS
+# =============================================================================
+
+@tool("search_molecule_trials", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_molecule_trials(
+    mode: str,
+    molecule: str | None = None,
+    inchi_key: str | None = None,
+    condition: str | None = None,
+    target_gene: str | None = None,
+    min_pchembl: float = 6.0,
+    phase: list[str] | str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> str:
+    """
+    Search clinical trials linked to molecules, conditions, or targets.
+
+    Modes:
+        - "trials_by_molecule": Find trials linked to a molecule (name or InChIKey).
+        - "molecules_by_condition": Find molecules associated with a condition.
+        - "trials_by_target": Find trials linked to a target gene.
+
+    Args:
+        mode: Search mode (see above).
+        molecule: Molecule name (preferred name or synonym).
+        inchi_key: InChIKey for precise molecule lookup.
+        condition: Condition name for molecule discovery.
+        target_gene: Target gene symbol for target-linked trials.
+        min_pchembl: Potency threshold for target-linked mode (default: 6.0).
+        phase: Optional list of trial phases (comma-separated or list).
+        limit: Max results (default: 20, max: 500).
+        offset: Offset for pagination (default: 0).
+    """
+    try:
+        if isinstance(phase, str):
+            phase_list = [p.strip() for p in phase.split(",") if p.strip()]
+        elif isinstance(phase, list):
+            phase_list = [p.strip() for p in phase if isinstance(p, str) and p.strip()]
+        else:
+            phase_list = None
+
+        search_input = MoleculeTrialSearchInput(
+            mode=mode,
+            molecule_name=molecule,
+            inchi_key=inchi_key,
+            target_gene=target_gene,
+            condition=condition,
+            min_pchembl=min_pchembl,
+            phase=phase_list,
+            limit=min(limit, 500),
+            offset=offset,
+        )
+        result = await molecule_trial_search_async(DEFAULT_CONFIG, search_input)
+        return _format_molecule_trials_output(result)
+    except Exception as e:
+        return f"Error searching molecule-trial links: {type(e).__name__}: {e}"
+
+
+# =============================================================================
+# ADVERSE EVENTS TOOLS
+# =============================================================================
+
+@tool("search_adverse_events", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_adverse_events(
+    mode: str,
+    drug_name: str | None = None,
+    event_term: str | None = None,
+    drug_names: list[str] | str | None = None,
+    severity: str = "all",
+    min_subjects_affected: int | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> str:
+    """
+    Search ClinicalTrials.gov adverse event data.
+
+    Modes:
+        - "events_for_drug": Top adverse events for a drug.
+        - "drugs_with_event": Trials reporting a specific event.
+        - "compare_safety": Compare adverse events across multiple drugs.
+    """
+    try:
+        if isinstance(drug_names, str):
+            drug_names = [drug_names]
+
+        search_input = AdverseEventsSearchInput(
+            mode=mode,
+            drug_name=drug_name,
+            event_term=event_term,
+            drug_names=drug_names or [],
+            severity=severity,
+            min_subjects_affected=min_subjects_affected,
+            limit=min(limit, 500),
+            offset=offset,
+        )
+        result = await adverse_events_search_async(DEFAULT_CONFIG, search_input)
+        return _format_adverse_events_output(result)
+    except Exception as e:
+        return f"Error searching adverse events: {type(e).__name__}: {e}"
+
+
+# =============================================================================
+# OUTCOMES TOOLS
+# =============================================================================
+
+@tool("search_trial_outcomes", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_trial_outcomes(
+    mode: str,
+    nct_id: str | None = None,
+    outcome_term: str | None = None,
+    drug_name: str | None = None,
+    outcome_type: str = "all",
+    min_p_value: float | None = None,
+    max_p_value: float | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> str:
+    """
+    Search trial outcomes, measurements, and statistical analyses.
+
+    Modes:
+        - "outcomes_for_trial": Outcomes and analyses for a specific NCT ID.
+        - "trials_with_outcome": Trials matching an outcome keyword.
+        - "efficacy_comparison": Analyses for trials involving a drug.
+    """
+    try:
+        search_input = OutcomesSearchInput(
+            mode=mode,
+            nct_id=nct_id,
+            outcome_keyword=outcome_term,
+            drug_name=drug_name,
+            outcome_type=outcome_type,
+            min_p_value=min_p_value,
+            max_p_value=max_p_value,
+            limit=min(limit, 500),
+            offset=offset,
+        )
+        result = await outcomes_search_async(DEFAULT_CONFIG, search_input)
+        return _format_outcomes_output(result)
+    except Exception as e:
+        return f"Error searching trial outcomes: {type(e).__name__}: {e}"
+
+
+# =============================================================================
+# ORANGE BOOK TOOLS
+# =============================================================================
+
+@tool("search_orange_book", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_orange_book(
+    mode: str,
+    drug_name: str | None = None,
+    ingredient: str | None = None,
+    nda_number: str | None = None,
+    include_patents: bool = True,
+    include_exclusivity: bool = True,
+    limit: int = 20,
+    offset: int = 0,
+) -> str:
+    """
+    Search FDA Orange Book for products, TE codes, patents, and exclusivity.
+
+    Modes:
+        - "te_codes": TE codes and product summaries
+        - "patents": Patents for matching products
+        - "exclusivity": Exclusivity data for matching products
+        - "generics": Products with patent/exclusivity details
+    """
+    try:
+        search_input = OrangeBookSearchInput(
+            mode=mode,
+            drug_name=drug_name,
+            ingredient=ingredient,
+            nda_number=nda_number,
+            include_patents=include_patents,
+            include_exclusivity=include_exclusivity,
+            limit=min(limit, 500),
+            offset=offset,
+        )
+        result = await orange_book_search_async(DEFAULT_CONFIG, search_input)
+        return _format_orange_book_output(result)
+    except Exception as e:
+        return f"Error searching Orange Book: {type(e).__name__}: {e}"
+
+
+# =============================================================================
+# CROSS-DATABASE LOOKUP TOOLS
+# =============================================================================
+
+@tool("lookup_drug_identifiers", return_direct=False)
+@robust_unwrap_llm_inputs
+async def lookup_drug_identifiers(
+    identifier: str,
+    identifier_type: str = "auto",
+    include_labels: bool = True,
+    include_trials: bool = True,
+    include_targets: bool = True,
+    limit: int = 10,
+) -> str:
+    """
+    Resolve a drug identifier across internal databases (ChEMBL, DrugCentral, labels, trials).
+    """
+    try:
+        search_input = CrossDatabaseLookupInput(
+            identifier=identifier,
+            identifier_type=identifier_type,
+            include_labels=include_labels,
+            include_trials=include_trials,
+            include_targets=include_targets,
+            limit=min(limit, 200),
+        )
+        result = await cross_database_lookup_async(DEFAULT_CONFIG, search_input)
+        return _format_cross_db_output(result)
+    except Exception as e:
+        return f"Error in cross-database lookup: {type(e).__name__}: {e}"
+
+
+# =============================================================================
+# BIOTHERAPEUTIC SEQUENCE TOOLS
+# =============================================================================
+
+@tool("search_biotherapeutics", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_biotherapeutics(
+    mode: str,
+    sequence: str | None = None,
+    sequence_motif: str | None = None,
+    target_gene: str | None = None,
+    biotherapeutic_type: str = "all",
+    limit: int = 20,
+    offset: int = 0,
+) -> str:
+    """
+    Search biotherapeutics by sequence motif or target gene.
+
+    Modes:
+        - "by_sequence": Match by sequence motif (uses sequence/sequence_motif).
+        - "similar_biologics": Find biologics sharing a motif (uses sequence/sequence_motif).
+        - "by_target": Find biotherapeutics linked to a target gene.
+    """
+    try:
+        sequence_value = sequence or sequence_motif
+        search_input = BiotherapeuticSearchInput(
+            mode=mode,
+            sequence=sequence_value,
+            target_gene=target_gene,
+            biotherapeutic_type=biotherapeutic_type,
+            limit=min(limit, 500),
+            offset=offset,
+        )
+        result = await biotherapeutic_sequence_search_async(DEFAULT_CONFIG, search_input)
+        return _format_biotherapeutic_output(result)
+    except Exception as e:
+        return f"Error searching biotherapeutics: {type(e).__name__}: {e}"
 
 
 # =============================================================================
@@ -1356,6 +2016,18 @@ DBSEARCH_TOOLS = [
     search_clinical_trials,
     # Drug Labels
     search_drug_labels,
+    # Molecule/Trial Connectivity
+    search_molecule_trials,
+    # Adverse Events
+    search_adverse_events,
+    # Outcomes
+    search_trial_outcomes,
+    # Orange Book
+    search_orange_book,
+    # Cross-Database Lookup
+    lookup_drug_identifiers,
+    # Biotherapeutics
+    search_biotherapeutics,
     # Pharmacology
     search_drug_targets,
     search_target_drugs,

@@ -1,0 +1,153 @@
+test_cases:
+  # ========================================
+  # DRUG COMPARISONS ON TARGET
+  # ========================================
+  - id: "abl1_inhibitors_compare_001"
+    tool: "compare_drugs_on_target"
+    input:
+      target: "ABL1"
+      drug_names:
+        - "imatinib"
+        - "dasatinib"
+        - "nilotinib"
+    expected_facts:
+      required:
+        - "Comparison of drugs on ABL1 is returned"
+        - "Activity values are shown"
+      optional:
+        - "imatinib activity on ABL1 shown"
+        - "dasatinib activity on ABL1 shown"
+        - "nilotinib activity on ABL1 shown"
+        - "Relative potency comparison"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "egfr_inhibitors_compare_002"
+    tool: "compare_drugs_on_target"
+    input:
+      target: "EGFR"
+      drug_names:
+        - "erlotinib"
+        - "gefitinib"
+        - "osimertinib"
+    expected_facts:
+      required:
+        - "Comparison of drugs on EGFR is returned"
+      optional:
+        - "erlotinib activity shown"
+        - "gefitinib activity shown"
+        - "osimertinib activity shown"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "jak_inhibitors_compare_003"
+    tool: "compare_drugs_on_target"
+    input:
+      target: "JAK2"
+      drug_names:
+        - "ruxolitinib"
+        - "tofacitinib"
+        - "baricitinib"
+    expected_facts:
+      required:
+        - "Comparison of drugs on JAK2 is returned"
+      optional:
+        - "ruxolitinib activity shown"
+        - "Relative selectivity discussed"
+    source: "ChEMBL"
+    confidence: "high"
+
+  # ========================================
+  # SELECTIVE DRUG SEARCHES
+  # ========================================
+  - id: "jak2_selective_004"
+    tool: "search_selective_drugs"
+    input:
+      target: "JAK2"
+      off_targets:
+        - "JAK1"
+        - "JAK3"
+    expected_facts:
+      required:
+        - "JAK2-selective compounds are returned"
+      optional:
+        - "Selectivity fold values shown"
+        - "fedratinib may appear"
+    source: "ChEMBL"
+    confidence: "medium"
+
+  - id: "cdk4_selective_005"
+    tool: "search_selective_drugs"
+    input:
+      target: "CDK4"
+      off_targets:
+        - "CDK6"
+    expected_facts:
+      required:
+        - "CDK4-selective compounds are returned"
+      optional:
+        - "Selectivity ratios shown"
+    source: "ChEMBL"
+    confidence: "medium"
+
+  - id: "egfr_selective_006"
+    tool: "search_selective_drugs"
+    input:
+      target: "EGFR"
+      off_targets:
+        - "ERBB2"
+        - "ERBB4"
+    expected_facts:
+      required:
+        - "EGFR-selective compounds are returned"
+      optional:
+        - "erlotinib or gefitinib may appear"
+        - "Selectivity over HER2 shown"
+    source: "ChEMBL"
+    confidence: "medium"
+
+  # ========================================
+  # ACTIVITY SEARCHES
+  # ========================================
+  - id: "imatinib_activities_007"
+    tool: "search_drug_activities"
+    input:
+      drug_name: "imatinib"
+    expected_facts:
+      required:
+        - "Activity measurements for imatinib are returned"
+      optional:
+        - "IC50 or Ki values shown"
+        - "ABL1 activity data"
+        - "KIT activity data"
+        - "pChEMBL values shown"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "egfr_target_activities_008"
+    tool: "search_target_activities"
+    input:
+      gene_symbol: "EGFR"
+    expected_facts:
+      required:
+        - "Activity measurements for EGFR are returned"
+      optional:
+        - "Multiple compounds shown"
+        - "IC50 or Ki values"
+        - "erlotinib data included"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "abl1_target_activities_009"
+    tool: "search_target_activities"
+    input:
+      gene_symbol: "ABL1"
+    expected_facts:
+      required:
+        - "Activity measurements for ABL1 are returned"
+      optional:
+        - "imatinib data included"
+        - "dasatinib data included"
+        - "pChEMBL values shown"
+    source: "ChEMBL"
+    confidence: "high"

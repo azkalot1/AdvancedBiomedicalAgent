@@ -1,3 +1,19 @@
+"""
+DailyMed + OpenFDA label search.
+
+Provides drug label section search and property lookup across
+DailyMed and OpenFDA-derived label tables. Supports semantic section
+matching via sentence transformers and optional discovery-mode keyword
+searches that identify matching products and sections.
+
+Data Sources:
+    - drugcentral_drugs / labels_meta / sections / section_names
+    - dailymed_products / dailymed_sections / dailymed_section_names
+
+External API:
+    - DailyMed public SPL API for set IDs
+"""
+
 # openfda_and_dailymed_searches.py
 import asyncio
 import re
@@ -7,6 +23,7 @@ import os
 import sys
 from contextlib import redirect_stderr
 import json
+import requests
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -26,9 +43,29 @@ from bioagent.data.ingest.config import DatabaseConfig
 
 
 async def dailymed_find(drug_name: str, limit: int = 10) -> list[dict]:
-    """Placeholder function for dailymed_find API call."""
-    # TODO: Implement actual DailyMed API search
-    return []
+    """Find DailyMed SPL setids for a drug name using the public API."""
+    if not drug_name or not drug_name.strip():
+        return []
+
+    def _fetch() -> list[dict]:
+        url = "https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json"
+        params = {"drug_name": drug_name.strip(), "pagesize": min(limit, 100)}
+        try:
+            resp = requests.get(url, params=params, timeout=20)
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception:
+            return []
+
+        data = payload.get("data") or []
+        results = []
+        for item in data[:limit]:
+            setid = item.get("setid")
+            if setid:
+                results.append({"setid": setid, "title": item.get("title")})
+        return results
+
+    return await asyncio.to_thread(_fetch)
 
 
 SIMILARITY_THRESHOLD = 0.87
@@ -475,6 +512,17 @@ async def _handle_label_search(
 
 
 async def dailymed_and_openfda_search_async(db_config: DatabaseConfig, search_input: DailyMedAndOpenFDAInput) -> DailyMedAndOpenFDASearchOutput:
+    """
+    Search DailyMed/OpenFDA label data for drug properties and sections.
+
+    Args:
+        db_config: Database configuration for the PostgreSQL source.
+        search_input: DailyMedAndOpenFDAInput with drug names, sections,
+            and keyword queries.
+
+    Returns:
+        DailyMedAndOpenFDASearchOutput with status and result payloads.
+    """
     try:
         async_config = await get_async_connection(db_config)
 

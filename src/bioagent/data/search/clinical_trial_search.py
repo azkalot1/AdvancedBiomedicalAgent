@@ -1,8 +1,15 @@
 # clinical_trials_search.py
 """
-Flexible Clinical Trials Search v2.
+Flexible Clinical Trials Search.
 
-Builds dynamic SQL queries with multiple search strategies and filters.
+Builds dynamic SQL queries across ClinicalTrials.gov-derived tables with
+multiple search strategies (fulltext, trigram, exact) and a rich set of
+filters (status, phase, dates, enrollment, eligibility, geography).
+
+Data Sources:
+    - rag_study_search (trial metadata and search index)
+    - rag_study_corpus (full text)
+    - ctgov_eligibilities / ctgov_outcomes (eligibility/outcome details)
 """
 
 from __future__ import annotations
@@ -573,6 +580,7 @@ class TrialSearchHit:
     condition_score: float | None = None
     intervention_score: float | None = None
     keyword_score: float | None = None
+    relevance_breakdown: dict[str, float] = field(default_factory=dict)
     
     # Full data (optional)
     study_json: dict[str, Any] | None = None
@@ -855,6 +863,10 @@ class ClinicalTrialsSearchInput(BaseModel):
     phase: list[TrialPhase] | None = Field(default=None)
     study_type: StudyType | None = Field(default=None)
     intervention_type: list[InterventionType] | None = Field(default=None)
+    outcome_type: Literal["primary", "secondary", "all"] | None = Field(default=None)
+    eligibility_gender: Literal["male", "female", "all"] | None = Field(default=None)
+    eligibility_age_range: tuple[int, int] | None = Field(default=None)
+    country: list[str] | None = Field(default=None)
     
     start_date_from: date | None = Field(default=None)
     start_date_to: date | None = Field(default=None)
@@ -905,6 +917,30 @@ class ClinicalTrialsSearchInput(BaseModel):
             v = [v]
         if isinstance(v, list):
             return [nct.strip().upper() for nct in v if nct and nct.strip()]
+        return v
+
+    @field_validator('country', mode='before')
+    @classmethod
+    def normalize_countries(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, str):
+            v = [v]
+        if isinstance(v, list):
+            cleaned = [c.strip() for c in v if isinstance(c, str) and c.strip()]
+            return cleaned or None
+        return v
+
+    @field_validator('eligibility_age_range', mode='before')
+    @classmethod
+    def normalize_age_range(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, (list, tuple)) and len(v) == 2:
+            try:
+                return (int(v[0]), int(v[1]))
+            except Exception:
+                return v
         return v
 
     @field_validator('status', mode='before')
@@ -1026,6 +1062,14 @@ class ClinicalTrialsSearchInput(BaseModel):
             filters.append(f"Study Type: {self.study_type.display_name}")
         if self.intervention_type:
             filters.append(f"Intervention Type: {', '.join(i.display_name for i in self.intervention_type)}")
+        if self.outcome_type:
+            filters.append(f"Outcome Type: {self.outcome_type}")
+        if self.eligibility_gender:
+            filters.append(f"Eligibility Gender: {self.eligibility_gender}")
+        if self.eligibility_age_range:
+            filters.append(f"Eligibility Age Range: {self.eligibility_age_range[0]}-{self.eligibility_age_range[1]}")
+        if self.country:
+            filters.append(f"Country: {', '.join(self.country)}")
         if self.start_date_from or self.start_date_to:
             filters.append(f"Start Date: {self.start_date_from or '...'} to {self.start_date_to or '...'}")
         if self.min_enrollment is not None or self.max_enrollment is not None:
@@ -1078,6 +1122,19 @@ class ClinicalTrialQueryBuilder:
         self.param_idx += 1
         self.params.append(value)
         return f"${self.param_idx}"
+
+    @staticmethod
+    def _age_to_years_expr(column_name: str) -> str:
+        return f"""
+            CASE
+                WHEN {column_name} IS NULL THEN NULL
+                WHEN {column_name} ILIKE '%Year%' THEN split_part({column_name}, ' ', 1)::float
+                WHEN {column_name} ILIKE '%Month%' THEN split_part({column_name}, ' ', 1)::float / 12.0
+                WHEN {column_name} ILIKE '%Week%' THEN split_part({column_name}, ' ', 1)::float / 52.0
+                WHEN {column_name} ILIKE '%Day%' THEN split_part({column_name}, ' ', 1)::float / 365.0
+                ELSE NULL
+            END
+        """
 
     def build(self) -> tuple[str, list[Any]]:
         if self.input.nct_ids and not self.input.has_text_query():
@@ -1226,6 +1283,10 @@ class ClinicalTrialQueryBuilder:
                 match_clause = f"({' OR '.join(match_conditions)})"
                 where_clause = f"{where_clause} AND {match_clause}" if where_clause else f"WHERE {match_clause}"
 
+        eligibility_join = ""
+        if self.input.eligibility_gender or self.input.eligibility_age_range:
+            eligibility_join = "LEFT JOIN ctgov_eligibilities e ON rs.nct_id = e.nct_id"
+
         limit_param = self._add_param(self.input.limit + 1)
         offset_param = self._add_param(self.input.offset)
         order_clause = self._build_order_clause()
@@ -1242,6 +1303,7 @@ class ClinicalTrialQueryBuilder:
                 {'km.score' if has_keyword else 'NULL'}::real AS keyword_score
                 {', c.study_json' if self.input.include_study_json else ''}
             FROM public.rag_study_search rs {' '.join(joins)}
+            {eligibility_join}
             {'LEFT JOIN public.rag_study_corpus c ON rs.nct_id = c.nct_id' if self.input.include_study_json else ''}
             {where_clause} {order_clause} LIMIT {limit_param} OFFSET {offset_param}
         """
@@ -1259,6 +1321,11 @@ class ClinicalTrialQueryBuilder:
         if self.input.intervention_type:
             param = self._add_param([i.value for i in self.input.intervention_type])
             filters.append(f"rs.intervention_types && {param}::text[]")
+        if self.input.outcome_type and self.input.outcome_type != "all":
+            outcome = self._add_param(self.input.outcome_type.upper())
+            filters.append(
+                f"EXISTS (SELECT 1 FROM ctgov_outcomes o WHERE o.nct_id = rs.nct_id AND o.outcome_type = {outcome})"
+            )
         if self.input.start_date_from:
             filters.append(f"rs.start_date_parsed >= {self._add_param(self.input.start_date_from)}")
         if self.input.start_date_to:
@@ -1278,6 +1345,23 @@ class ClinicalTrialQueryBuilder:
                 filters.append("(rs.is_fda_regulated_drug = true OR rs.is_fda_regulated_device = true)")
             else:
                 filters.append("(rs.is_fda_regulated_drug IS NOT TRUE AND rs.is_fda_regulated_device IS NOT TRUE)")
+        if self.input.country:
+            normalized = [c.lower() for c in self.input.country]
+            param = self._add_param(normalized)
+            filters.append(
+                f"EXISTS (SELECT 1 FROM unnest(rs.countries) AS c WHERE LOWER(c) = ANY({param}::text[]))"
+            )
+        if self.input.eligibility_gender and self.input.eligibility_gender != "all":
+            gender = self._add_param(self.input.eligibility_gender.upper())
+            filters.append(f"(e.gender = {gender} OR e.gender = 'ALL')")
+        if self.input.eligibility_age_range:
+            min_age, max_age = self.input.eligibility_age_range
+            min_param = self._add_param(min_age)
+            max_param = self._add_param(max_age)
+            min_expr = self._age_to_years_expr("e.minimum_age")
+            max_expr = self._age_to_years_expr("e.maximum_age")
+            filters.append(f"({min_expr} IS NULL OR {min_expr} <= {max_param})")
+            filters.append(f"({max_expr} IS NULL OR {max_expr} >= {min_param})")
         return filters
 
     def _build_order_clause(self) -> str:
@@ -1336,6 +1420,16 @@ class ClinicalTrialSearcher:
             
             hits = []
             for row in rows:
+                relevance_breakdown = {}
+                if row.get('condition_score') is not None:
+                    relevance_breakdown["condition"] = float(row.get('condition_score') or 0)
+                if row.get('intervention_score') is not None:
+                    relevance_breakdown["intervention"] = float(row.get('intervention_score') or 0)
+                if row.get('keyword_score') is not None:
+                    relevance_breakdown["keyword"] = float(row.get('keyword_score') or 0)
+                if row.get('match_reasons') and "sponsor" in (row.get('match_reasons') or []):
+                    relevance_breakdown["sponsor"] = 1.0
+
                 hit = TrialSearchHit(
                     nct_id=row['nct_id'], score=float(row['score']),
                     brief_title=row['brief_title'] or "", phase=row['phase'], status=row['overall_status'],
@@ -1347,6 +1441,7 @@ class ClinicalTrialSearcher:
                     condition_score=row.get('condition_score'),
                     intervention_score=row.get('intervention_score'),
                     keyword_score=row.get('keyword_score'),
+                    relevance_breakdown=relevance_breakdown,
                     study_json=row.get('study_json'),
                 )
                 
@@ -1381,6 +1476,7 @@ class ClinicalTrialSearcher:
             inp.start_date_from, inp.start_date_to, inp.completion_date_from, inp.completion_date_to,
             inp.min_enrollment is not None, inp.max_enrollment is not None,
             inp.has_results is not None, inp.is_fda_regulated is not None,
+            inp.outcome_type, inp.eligibility_gender, inp.eligibility_age_range, inp.country,
         ])
 
     def _build_query_summary(self, inp: ClinicalTrialsSearchInput) -> str:
@@ -1398,6 +1494,7 @@ class ClinicalTrialSearcher:
         if inp.phase: filters.append(f"phase in [{', '.join(p.display_name for p in inp.phase)}]")
         if inp.study_type: filters.append(f"study_type={inp.study_type.display_name}")
         if inp.intervention_type: filters.append(f"intervention_type in [{', '.join(i.display_name for i in inp.intervention_type)}]")
+        if inp.outcome_type: filters.append(f"outcome_type={inp.outcome_type}")
         if inp.start_date_from: filters.append(f"start_date >= {inp.start_date_from}")
         if inp.start_date_to: filters.append(f"start_date <= {inp.start_date_to}")
         if inp.completion_date_from: filters.append(f"completion_date >= {inp.completion_date_from}")
@@ -1406,6 +1503,9 @@ class ClinicalTrialSearcher:
         if inp.max_enrollment is not None: filters.append(f"enrollment <= {inp.max_enrollment}")
         if inp.has_results is not None: filters.append(f"has_results={inp.has_results}")
         if inp.is_fda_regulated is not None: filters.append(f"fda_regulated={inp.is_fda_regulated}")
+        if inp.eligibility_gender: filters.append(f"eligibility_gender={inp.eligibility_gender}")
+        if inp.eligibility_age_range: filters.append(f"eligibility_age_range={inp.eligibility_age_range}")
+        if inp.country: filters.append(f"country={', '.join(inp.country)}")
         return filters
 
 
@@ -1417,6 +1517,15 @@ async def clinical_trials_search_async(
     db_config: DatabaseConfig,
     search_input: ClinicalTrialsSearchInput,
 ) -> ClinicalTrialsSearchOutput:
-    """Convenience function for clinical trial search."""
+    """
+    Execute a clinical trial search using the provided input model.
+
+    Args:
+        db_config: Database configuration for the PostgreSQL source.
+        search_input: ClinicalTrialsSearchInput with queries, filters, and options.
+
+    Returns:
+        ClinicalTrialsSearchOutput with status, hits, and summary metadata.
+    """
     searcher = ClinicalTrialSearcher(db_config)
     return await searcher.search(search_input)

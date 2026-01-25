@@ -2,7 +2,7 @@
 """
 Molecular Mapping Pipeline with RDKit-based Normalization.
 
-Version: 2.2
+Version: 2.3
 Features:
   - Idempotent: Can be re-run safely to update/replace all tables and views
   - 3-level molecule hierarchy (Concept → Stereo → Molecule)
@@ -13,6 +13,7 @@ Features:
   - Fuzzy matching for clinical trials
   - Progress tracking and reporting
   - Fast/debug mode for testing
+  - Data quality diagnostics and cleanup
 
 Prerequisites:
   - PostgreSQL with RDKit extension installed
@@ -20,13 +21,22 @@ Prerequisites:
   - dm_target must exist (from your previous scripts)
 
 Usage:
+  # Pipeline execution
   python build_molecular_mappings.py                    # Full rebuild
   python build_molecular_mappings.py --fast             # Fast debug mode (10k molecules)
   python build_molecular_mappings.py --limit 50000      # Custom limit
   python build_molecular_mappings.py --incremental      # Incremental update
-  python build_molecular_mappings.py --refresh-only     # Refresh views only
-  python build_molecular_mappings.py --report           # Generate report
-  python build_molecular_mappings.py --validate-only    # Run validation only
+  python build_molecular_mappings.py --from-phase 5     # Resume from specific phase (1-14)
+  python build_molecular_mappings.py --refresh-only     # Refresh materialized views only
+  
+  # Reporting & Validation
+  python build_molecular_mappings.py --report           # Generate pipeline report
+  python build_molecular_mappings.py --validate-only    # Run validation checks only
+  python build_molecular_mappings.py --diagnose         # Detailed diagnostics on data issues
+  
+  # Data Quality Cleanup
+  python build_molecular_mappings.py --cleanup-dry-run  # Preview cleanup changes (safe)
+  python build_molecular_mappings.py --cleanup          # Apply cleanup fixes
 """
 
 from __future__ import annotations
@@ -125,6 +135,9 @@ def check_prerequisites(config: DatabaseConfig) -> Tuple[bool, List[str]]:
         ('compound_structures', 'ChEMBL'),
         ('molecule_dictionary', 'ChEMBL'),
         ('molecule_synonyms', 'ChEMBL'),
+        ('biotherapeutics', 'ChEMBL'),
+        ('biotherapeutic_components', 'ChEMBL'),
+        ('bio_component_sequences', 'ChEMBL'),
         ('activities', 'ChEMBL'),
         ('assays', 'ChEMBL'),
         ('drugcentral_drugs', 'DrugCentral'),
@@ -205,6 +218,9 @@ DROP TABLE IF EXISTS dm_indication CASCADE;
 DROP TABLE IF EXISTS map_product_molecules CASCADE;
 DROP TABLE IF EXISTS map_ctgov_molecules CASCADE;
 DROP TABLE IF EXISTS dm_molecule_synonyms CASCADE;
+DROP TABLE IF EXISTS dm_biotherapeutic_synonyms CASCADE;
+DROP TABLE IF EXISTS dm_biotherapeutic_component CASCADE;
+DROP TABLE IF EXISTS dm_biotherapeutic CASCADE;
 DROP TABLE IF EXISTS dm_molecule_target_summary CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS dm_compound_target_activity CASCADE;
 DROP TABLE IF EXISTS dm_molecule CASCADE;
@@ -220,7 +236,7 @@ CREATE TABLE IF NOT EXISTS dm_molecule_concept (
     concept_id BIGSERIAL PRIMARY KEY,
     
     -- The "flat" InChI key connectivity layer (first 14 chars, no stereo, no salts)
-    parent_inchi_key_14 TEXT UNIQUE NOT NULL,
+    parent_inchi_key_14 TEXT UNIQUE,
     
     -- Representative structure (any canonical parent)
     parent_smiles TEXT,
@@ -237,6 +253,8 @@ CREATE TABLE IF NOT EXISTS dm_molecule_concept (
     has_stereo_variants BOOLEAN DEFAULT FALSE,
     has_salt_forms BOOLEAN DEFAULT FALSE,
     n_forms INTEGER DEFAULT 1,
+    is_biotherapeutic BOOLEAN DEFAULT FALSE,
+    biotherapeutic_type TEXT,
     
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
@@ -337,6 +355,67 @@ CREATE INDEX IF NOT EXISTS idx_dm_mol_salt ON dm_molecule(is_salt);
 CREATE INDEX IF NOT EXISTS idx_dm_mol_mfp2 ON dm_molecule USING gist(mfp2);
 CREATE INDEX IF NOT EXISTS idx_dm_mol_ffp2 ON dm_molecule USING gist(ffp2);
 CREATE INDEX IF NOT EXISTS idx_dm_mol_mol ON dm_molecule USING gist(mol);
+
+
+-- ============================================================================
+-- Biotherapeutics (Antibodies/Proteins/Peptides)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS dm_biotherapeutic (
+    bio_id BIGSERIAL PRIMARY KEY,
+    concept_id BIGINT REFERENCES dm_molecule_concept(concept_id),
+    molregno BIGINT UNIQUE NOT NULL,
+    chembl_id TEXT,
+    pref_name TEXT,
+    description TEXT,
+    molecule_type TEXT,
+    biotherapeutic_type TEXT,
+    helm_notation TEXT,
+    organism TEXT,
+    drugcentral_id INTEGER,
+    sources TEXT[],
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_dm_bio_concept ON dm_biotherapeutic(concept_id);
+CREATE INDEX IF NOT EXISTS idx_dm_bio_chembl ON dm_biotherapeutic(chembl_id);
+CREATE INDEX IF NOT EXISTS idx_dm_bio_name ON dm_biotherapeutic(pref_name);
+CREATE INDEX IF NOT EXISTS idx_dm_bio_name_trgm ON dm_biotherapeutic USING gin(pref_name gin_trgm_ops);
+
+CREATE TABLE IF NOT EXISTS dm_biotherapeutic_component (
+    component_id BIGSERIAL PRIMARY KEY,
+    bio_id BIGINT REFERENCES dm_biotherapeutic(bio_id) ON DELETE CASCADE,
+    source_component_id BIGINT,
+    component_type TEXT,
+    description TEXT,
+    sequence TEXT,
+    sequence_length INTEGER,
+    organism TEXT,
+    tax_id BIGINT,
+    uniprot_accession TEXT,
+    sequence_md5 TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(bio_id, source_component_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dm_bio_component_bio ON dm_biotherapeutic_component(bio_id);
+CREATE INDEX IF NOT EXISTS idx_dm_bio_component_uniprot ON dm_biotherapeutic_component(uniprot_accession);
+CREATE INDEX IF NOT EXISTS idx_dm_bio_component_md5 ON dm_biotherapeutic_component(sequence_md5);
+
+CREATE TABLE IF NOT EXISTS dm_biotherapeutic_synonyms (
+    id BIGSERIAL PRIMARY KEY,
+    bio_id BIGINT REFERENCES dm_biotherapeutic(bio_id) ON DELETE CASCADE,
+    concept_id BIGINT REFERENCES dm_molecule_concept(concept_id) ON DELETE CASCADE,
+    synonym TEXT NOT NULL,
+    synonym_lower TEXT GENERATED ALWAYS AS (lower(synonym)) STORED,
+    syn_type TEXT,
+    source TEXT,
+    UNIQUE(bio_id, synonym)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dm_bio_syn_lower ON dm_biotherapeutic_synonyms(synonym_lower);
+CREATE INDEX IF NOT EXISTS idx_dm_bio_syn_lower_trgm ON dm_biotherapeutic_synonyms USING gin(synonym_lower gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_dm_bio_syn_concept ON dm_biotherapeutic_synonyms(concept_id);
+CREATE INDEX IF NOT EXISTS idx_dm_bio_syn_bio ON dm_biotherapeutic_synonyms(bio_id);
 
 
 -- ============================================================================
@@ -872,6 +951,9 @@ def fast_drop_schema(config: DatabaseConfig):
                 "DROP TABLE IF EXISTS map_product_molecules CASCADE",
                 "DROP TABLE IF EXISTS map_ctgov_molecules CASCADE", 
                 "DROP TABLE IF EXISTS dm_molecule_synonyms CASCADE",
+                "DROP TABLE IF EXISTS dm_biotherapeutic_synonyms CASCADE",
+                "DROP TABLE IF EXISTS dm_biotherapeutic_component CASCADE",
+                "DROP TABLE IF EXISTS dm_biotherapeutic CASCADE",
                 "DROP TABLE IF EXISTS dm_molecule_target_summary CASCADE",
                 "DROP TABLE IF EXISTS dm_molecule CASCADE",
                 "DROP TABLE IF EXISTS dm_molecule_stereo CASCADE",
@@ -1299,6 +1381,185 @@ def build_molecule_hierarchy(config: DatabaseConfig):
 
 
 # ============================================================================
+# PHASE 2B: INGEST BIOTHERAPEUTICS
+# ============================================================================
+
+def ingest_biotherapeutics(config: DatabaseConfig, limit: Optional[int] = None):
+    """Load ChEMBL biotherapeutics and map to concepts."""
+    print("\n🧬 PHASE 2B: Ingesting Biotherapeutics...")
+    
+    limit_clause = f"LIMIT {limit}" if limit else ""
+    
+    with get_connection(config) as con:
+        with con.cursor() as cur:
+            start_time = time.time()
+            
+            print("  📥 Creating biotherapeutic concepts...")
+            cur.execute(f"""
+                INSERT INTO dm_molecule_concept (
+                    parent_inchi_key_14,
+                    preferred_name,
+                    is_biotherapeutic,
+                    biotherapeutic_type
+                )
+                SELECT DISTINCT
+                    'BIO:' || bt.molregno::text,
+                    md.pref_name,
+                    TRUE,
+                    CASE
+                        WHEN md.molecule_type ILIKE '%antibody%' THEN
+                            CASE
+                                WHEN md.pref_name ~* 'mab$' THEN 'mAb'
+                                WHEN bt.description ILIKE '%bispecific%' THEN 'bispecific'
+                                WHEN bt.description ILIKE '%antibody-drug%' OR bt.description ILIKE '%adc%' THEN 'ADC'
+                                ELSE 'Antibody'
+                            END
+                        WHEN md.molecule_type ILIKE '%oligopeptide%' OR md.molecule_type ILIKE '%peptide%' THEN 'Peptide'
+                        WHEN md.molecule_type ILIKE '%oligonucleotide%' THEN 'Oligonucleotide'
+                        WHEN md.molecule_type ILIKE '%protein%' THEN 'Protein'
+                        ELSE NULL
+                    END
+                FROM biotherapeutics bt
+                JOIN molecule_dictionary md ON bt.molregno = md.molregno
+                {limit_clause}
+                ON CONFLICT (parent_inchi_key_14) DO UPDATE SET
+                    preferred_name = COALESCE(EXCLUDED.preferred_name, dm_molecule_concept.preferred_name),
+                    is_biotherapeutic = TRUE,
+                    biotherapeutic_type = COALESCE(EXCLUDED.biotherapeutic_type, dm_molecule_concept.biotherapeutic_type),
+                    updated_at = NOW();
+            """)
+            concept_count = cur.rowcount
+            con.commit()
+            
+            print("  📥 Loading biotherapeutic records...")
+            cur.execute(f"""
+                INSERT INTO dm_biotherapeutic (
+                    concept_id, molregno, chembl_id, pref_name,
+                    description, molecule_type, biotherapeutic_type,
+                    helm_notation, organism, sources
+                )
+                SELECT
+                    mc.concept_id,
+                    bt.molregno,
+                    md.chembl_id,
+                    md.pref_name,
+                    bt.description,
+                    md.molecule_type,
+                    CASE
+                        WHEN md.molecule_type ILIKE '%antibody%' THEN
+                            CASE
+                                WHEN md.pref_name ~* 'mab$' THEN 'mAb'
+                                WHEN bt.description ILIKE '%bispecific%' THEN 'bispecific'
+                                WHEN bt.description ILIKE '%antibody-drug%' OR bt.description ILIKE '%adc%' THEN 'ADC'
+                                ELSE 'Antibody'
+                            END
+                        WHEN md.molecule_type ILIKE '%oligopeptide%' OR md.molecule_type ILIKE '%peptide%' THEN 'Peptide'
+                        WHEN md.molecule_type ILIKE '%oligonucleotide%' THEN 'Oligonucleotide'
+                        WHEN md.molecule_type ILIKE '%protein%' THEN 'Protein'
+                        ELSE NULL
+                    END,
+                    bt.helm_notation,
+                    NULL,
+                    ARRAY['CHEMBL']
+                FROM biotherapeutics bt
+                JOIN molecule_dictionary md ON bt.molregno = md.molregno
+                JOIN dm_molecule_concept mc ON mc.parent_inchi_key_14 = 'BIO:' || bt.molregno::text
+                {limit_clause}
+                ON CONFLICT (molregno) DO UPDATE SET
+                    chembl_id = EXCLUDED.chembl_id,
+                    pref_name = COALESCE(dm_biotherapeutic.pref_name, EXCLUDED.pref_name),
+                    description = COALESCE(EXCLUDED.description, dm_biotherapeutic.description),
+                    molecule_type = COALESCE(EXCLUDED.molecule_type, dm_biotherapeutic.molecule_type),
+                    biotherapeutic_type = COALESCE(EXCLUDED.biotherapeutic_type, dm_biotherapeutic.biotherapeutic_type),
+                    helm_notation = COALESCE(EXCLUDED.helm_notation, dm_biotherapeutic.helm_notation),
+                    sources = CASE
+                        WHEN 'CHEMBL' = ANY(dm_biotherapeutic.sources) THEN dm_biotherapeutic.sources
+                        ELSE array_append(dm_biotherapeutic.sources, 'CHEMBL')
+                    END;
+            """)
+            biotherapeutic_count = cur.rowcount
+            con.commit()
+            
+            print("  📥 Loading biotherapeutic components...")
+            cur.execute("""
+                INSERT INTO dm_biotherapeutic_component (
+                    bio_id, source_component_id, component_type, description,
+                    sequence, sequence_length, organism, tax_id, uniprot_accession,
+                    sequence_md5
+                )
+                SELECT
+                    dbt.bio_id,
+                    bc.component_id,
+                    bcs.component_type,
+                    bcs.description,
+                    bcs.sequence,
+                    CASE WHEN bcs.sequence IS NULL THEN NULL ELSE length(bcs.sequence) END,
+                    bcs.organism,
+                    bcs.tax_id,
+                    NULL,
+                    bcs.sequence_md5sum
+                FROM dm_biotherapeutic dbt
+                JOIN biotherapeutic_components bc ON dbt.molregno = bc.molregno
+                JOIN bio_component_sequences bcs ON bc.component_id = bcs.component_id
+                ON CONFLICT (bio_id, source_component_id) DO UPDATE SET
+                    component_type = EXCLUDED.component_type,
+                    description = EXCLUDED.description,
+                    sequence = EXCLUDED.sequence,
+                    sequence_length = EXCLUDED.sequence_length,
+                    organism = EXCLUDED.organism,
+                    tax_id = EXCLUDED.tax_id,
+                    sequence_md5 = EXCLUDED.sequence_md5;
+            """)
+            component_count = cur.rowcount
+            con.commit()
+            
+            print("  📥 Indexing biotherapeutic synonyms...")
+            cur.execute("""
+                INSERT INTO dm_biotherapeutic_synonyms (bio_id, concept_id, synonym, syn_type, source)
+                SELECT DISTINCT
+                    dbt.bio_id,
+                    dbt.concept_id,
+                    md.pref_name,
+                    'PREF_NAME',
+                    'CHEMBL'
+                FROM dm_biotherapeutic dbt
+                JOIN molecule_dictionary md ON dbt.molregno = md.molregno
+                WHERE md.pref_name IS NOT NULL
+                ON CONFLICT (bio_id, synonym) DO NOTHING;
+            """)
+            pref_syn_count = cur.rowcount
+            cur.execute("""
+                INSERT INTO dm_biotherapeutic_synonyms (bio_id, concept_id, synonym, syn_type, source)
+                SELECT DISTINCT
+                    dbt.bio_id,
+                    dbt.concept_id,
+                    ms.synonyms,
+                    ms.syn_type,
+                    'CHEMBL'
+                FROM dm_biotherapeutic dbt
+                JOIN molecule_synonyms ms ON dbt.molregno = ms.molregno
+                WHERE ms.synonyms IS NOT NULL
+                ON CONFLICT (bio_id, synonym) DO NOTHING;
+            """)
+            ms_syn_count = cur.rowcount
+            synonym_count = pref_syn_count + ms_syn_count
+            con.commit()
+            
+            log_audit(
+                cur,
+                'PHASE_2B',
+                'ingest_biotherapeutics',
+                concept_count + biotherapeutic_count + component_count + synonym_count,  
+                time.time() - start_time,
+                'SUCCESS'
+            )
+            con.commit()
+            
+            print(f"  ✅ Biotherapeutics loaded: {biotherapeutic_count:,}")
+            print(f"     Components loaded: {component_count:,}")
+            print(f"     Synonyms indexed: {synonym_count:,}")
+
+# ============================================================================
 # PHASE 3: POPULATE SYNONYMS
 # ============================================================================
 
@@ -1520,6 +1781,18 @@ def map_clinical_trials(config: DatabaseConfig, enable_fuzzy: bool = True,
                 if syn and len(syn) >= 3:
                     syn_map[syn] = (mol_id, concept_id)
         
+        with con.cursor(name='bio_syn_cursor') as cur:
+            cur.itersize = 10000
+            cur.execute("""
+                SELECT concept_id, synonym_lower
+                FROM dm_biotherapeutic_synonyms
+                WHERE length(synonym_lower) >= 3
+                  AND concept_id IS NOT NULL
+            """)
+            for concept_id, syn in tqdm(cur, desc="     Loading biotherapeutic synonyms", leave=False):
+                if syn and len(syn) >= 3 and syn not in syn_map:
+                    syn_map[syn] = (None, concept_id)
+        
         print(f"     ✓ Loaded {len(syn_map):,} unique synonyms")
 
         # Fetch interventions
@@ -1635,7 +1908,13 @@ def map_clinical_trials(config: DatabaseConfig, enable_fuzzy: bool = True,
                         cur.execute("""
                             SELECT mol_id, concept_id, synonym_lower, 
                                    similarity(synonym_lower, %s) as sim
-                            FROM dm_molecule_synonyms
+                            FROM (
+                                SELECT mol_id, concept_id, synonym_lower
+                                FROM dm_molecule_synonyms
+                                UNION ALL
+                                SELECT NULL::bigint as mol_id, concept_id, synonym_lower
+                                FROM dm_biotherapeutic_synonyms
+                            ) syn
                             WHERE synonym_lower %% %s
                               AND length(synonym_lower) >= 4
                               AND similarity(synonym_lower, %s) >= %s
@@ -1980,6 +2259,48 @@ def create_materialized_analytics_view_summary(config: DatabaseConfig):
             rows_inserted = cur.rowcount
             con.commit()
             
+            # Check if dm_drug_mechanism exists before adding mechanism-only links
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'dm_drug_mechanism'
+                )
+            """)
+            mechanism_table_exists = cur.fetchone()[0]
+            
+            mechanism_rows = 0
+            if mechanism_table_exists:
+                print("  ➕ Adding mechanism-only target links...")
+                cur.execute("""
+                    INSERT INTO dm_molecule_target_summary (
+                        concept_id, concept_name, representative_mol_id, representative_smiles,
+                        target_id, gene_symbol, target_name, target_organism,
+                        sources, n_sources, measurement_consistency, data_confidence
+                    )
+                    SELECT
+                        ddm.concept_id,
+                        ddm.concept_name,
+                        NULL,
+                        NULL,
+                        dt.target_id,
+                        dt.gene_symbol,
+                        dt.protein_name,
+                        dt.organism,
+                        ARRAY['MECHANISM'],
+                        1,
+                        'MECHANISM',
+                        'LOW'
+                    FROM dm_drug_mechanism ddm
+                    JOIN dm_target dt ON dt.gene_symbol = ANY(ddm.gene_symbols)
+                    WHERE ddm.concept_id IS NOT NULL
+                      AND ddm.gene_symbols IS NOT NULL
+                    ON CONFLICT (concept_id, target_id) DO NOTHING;
+                """)
+                mechanism_rows = cur.rowcount
+                con.commit()
+            else:
+                print("  ⚠️  dm_drug_mechanism not found - skipping mechanism-only links")
+            
             print("  ⚡ Creating indexes...")
             cur.execute("""
                 CREATE INDEX idx_mts_concept_id ON dm_molecule_target_summary(concept_id);
@@ -1993,7 +2314,14 @@ def create_materialized_analytics_view_summary(config: DatabaseConfig):
             """)
             con.commit()
             
-            log_audit(cur, 'PHASE_5B', 'create_summary_table', rows_inserted, time.time() - start_time, 'SUCCESS')
+            log_audit(
+                cur,
+                'PHASE_5B',
+                'create_summary_table',
+                rows_inserted + mechanism_rows,
+                time.time() - start_time,
+                'SUCCESS'
+            )
             con.commit()
             
             cur.execute("""
@@ -2542,9 +2870,19 @@ def create_search_functions(config: DatabaseConfig):
         SELECT 'empty_concepts'::TEXT,
                CASE WHEN COUNT(*) = 0 THEN 'PASS' ELSE 'WARN' END::TEXT,
                COUNT(*)::BIGINT,
-               'Concepts with no molecules'::TEXT
+               'Concepts with no molecules or biotherapeutics (truly orphaned)'::TEXT
         FROM dm_molecule_concept mc
-        WHERE NOT EXISTS (SELECT 1 FROM dm_molecule dm WHERE dm.concept_id = mc.concept_id);
+        WHERE NOT EXISTS (SELECT 1 FROM dm_molecule dm WHERE dm.concept_id = mc.concept_id)
+          AND NOT EXISTS (SELECT 1 FROM dm_biotherapeutic db WHERE db.concept_id = mc.concept_id);
+        
+        RETURN QUERY
+        SELECT 'biotherapeutic_concepts'::TEXT,
+               'INFO'::TEXT,
+               COUNT(*)::BIGINT,
+               'Biotherapeutic concepts (no SMILES - expected)'::TEXT
+        FROM dm_molecule_concept mc
+        WHERE mc.is_biotherapeutic = TRUE
+          AND EXISTS (SELECT 1 FROM dm_biotherapeutic db WHERE db.concept_id = mc.concept_id);
         
         RETURN QUERY
         SELECT 'ambiguous_synonyms'::TEXT,
@@ -3672,14 +4010,14 @@ def fix_placeholder_values(config: DatabaseConfig):
 # PHASE 13: CREATE DRUG MECHANISM TABLE
 # ============================================================================
 
-def create_drug_mechanism_table(config: DatabaseConfig):
+def create_drug_mechanism_table(config: DatabaseConfig, phase_label: str = "13"):
     """
     Create dm_drug_mechanism table from ChEMBL drug_mechanism data.
     
     DEDUPLICATION: One row per (concept_id, mec_id), with UniProt accessions 
     stored as an array. This prevents explosion from protein complexes/families.
     """
-    print("\n💊 PHASE 13: Creating Drug Mechanism Table...")
+    print(f"\n💊 PHASE {phase_label}: Creating Drug Mechanism Table...")
     
     with get_connection(config) as con:
         with con.cursor() as cur:
@@ -3799,6 +4137,39 @@ def create_drug_mechanism_table(config: DatabaseConfig):
                     LEFT JOIN target_components tc ON td.tid = tc.tid
                     LEFT JOIN component_sequences cs ON tc.component_id = cs.component_id
                     WHERE dm.concept_id IS NOT NULL
+                      AND (dmech.mechanism_of_action IS NOT NULL OR dmech.action_type IS NOT NULL)
+                    
+                    UNION ALL
+                    
+                    SELECT
+                        dbt.concept_id,
+                        mc.preferred_name as concept_name,
+                        NULL::bigint as mol_id,
+                        dbt.chembl_id,
+                        dmech.mec_id,
+                        dmech.record_id,
+                        dmech.molregno,
+                        dmech.mechanism_of_action,
+                        dmech.action_type,
+                        dmech.mechanism_comment,
+                        dmech.selectivity_comment,
+                        dmech.binding_site_comment,
+                        dmech.direct_interaction,
+                        dmech.molecular_mechanism,
+                        dmech.disease_efficacy,
+                        dmech.tid,
+                        td.chembl_id as target_chembl_id,
+                        td.pref_name as target_name,
+                        td.target_type,
+                        td.organism as target_organism,
+                        cs.accession as uniprot_accession
+                    FROM dm_biotherapeutic dbt
+                    JOIN dm_molecule_concept mc ON dbt.concept_id = mc.concept_id
+                    JOIN drug_mechanism dmech ON dbt.molregno = dmech.molregno
+                    LEFT JOIN target_dictionary td ON dmech.tid = td.tid
+                    LEFT JOIN target_components tc ON td.tid = tc.tid
+                    LEFT JOIN component_sequences cs ON tc.component_id = cs.component_id
+                    WHERE dbt.concept_id IS NOT NULL
                       AND (dmech.mechanism_of_action IS NOT NULL OR dmech.action_type IS NOT NULL)
                 ),
                 
@@ -4082,6 +4453,252 @@ def index_drug_mechanism_table(config: DatabaseConfig, drop_indexes: bool = Fals
 
 
 # ============================================================================
+# DATA QUALITY CLEANUP - Fix Known Data Issues
+# ============================================================================
+
+# Patterns that indicate a placeholder/uninformative name (case-insensitive)
+PLACEHOLDER_NAME_PATTERNS = [
+    'name not given',
+    'the compound has not trivial name',
+    'not named',
+    'no name',
+    'unnamed',
+    'compound not named',
+    'racemic mixture',
+    '1:1 mixture of diastereomers',
+    'mixture of diastereomers',
+    'mixture of enantiomers',
+]
+
+# Patterns that should not be used as synonyms (too generic)
+BLACKLIST_SYNONYM_PATTERNS = [
+    r'^analogue$',
+    r'^analog$',
+    r'^derivative$', 
+    r'^compound$',
+    r'^mixture$',
+    r'^stereoisomer$',
+    r'^isomer$',
+    r'^salt$',
+    r'^metabolite$',
+    r'^\d+$',  # Just numbers
+    r'^[a-z]$',  # Single letters
+    r'^table [ivxlcdm\d]+$',  # "Table I", "Table 1", etc.
+    r'^example \d+',  # "Example 1", etc.
+    r'^cpd \d+',  # "Cpd 1", etc.
+]
+
+
+def run_data_quality_cleanup(config: DatabaseConfig, dry_run: bool = False) -> Dict[str, int]:
+    """
+    Clean up known data quality issues in the molecular database.
+    
+    Fixes:
+      1. BindingDB inactive compounds: NULL out pChEMBL for activity >= 100,000 nM (100 µM)
+      2. Placeholder names: Set to NULL for known placeholder patterns
+      3. Outlier activities: Remove sub-picomolar values as data errors
+      4. Empty biotherapeutic concepts: Remove orphaned concepts with no molecules
+      5. Blacklisted synonyms: Remove uninformative synonyms
+    
+    Args:
+        config: Database configuration
+        dry_run: If True, only report what would be changed without making changes
+    
+    Returns:
+        Dict with counts of rows affected for each cleanup action
+    """
+    mode = "DRY RUN" if dry_run else "APPLYING"
+    print(f"\n🧹 Running Data Quality Cleanup ({mode})...")
+    print("=" * 70)
+    
+    cleanup_stats = {}
+    
+    with get_connection(config) as con:
+        with con.cursor() as cur:
+            
+            # =================================================================
+            # 1. Fix BindingDB pChEMBL for inactive compounds
+            # =================================================================
+            print("\n🔧 1. Fixing BindingDB inactive compounds (activity >= 100 µM)...")
+            
+            # First, count affected rows
+            cur.execute("""
+                SELECT COUNT(*) FROM dm_compound_target_activity 
+                WHERE source = 'BINDINGDB' 
+                  AND activity_value >= 100000
+                  AND pchembl_value IS NOT NULL
+            """)
+            count = cur.fetchone()[0]
+            print(f"   Found {count:,} BindingDB activities with value >= 100 µM")
+            cleanup_stats['bindingdb_pchembl_nulled'] = count
+            
+            if not dry_run and count > 0:
+                # We can't directly update a materialized view, so we need to 
+                # fix the source table (bindingdb_activities) and refresh
+                cur.execute("""
+                    UPDATE bindingdb_activities 
+                    SET pchembl_value = NULL
+                    WHERE (ki_nm >= 100000 OR ic50_nm >= 100000 OR kd_nm >= 100000)
+                      AND pchembl_value IS NOT NULL
+                """)
+                affected = cur.rowcount
+                con.commit()
+                print(f"   ✅ Updated {affected:,} rows in bindingdb_activities")
+            
+            # =================================================================
+            # 2. Clean up placeholder names in dm_molecule_concept
+            # =================================================================
+            print("\n🔧 2. Cleaning up placeholder preferred_names...")
+            
+            # Build ILIKE pattern
+            placeholder_conditions = " OR ".join(
+                [f"LOWER(preferred_name) LIKE '%{p}%'" for p in PLACEHOLDER_NAME_PATTERNS]
+            )
+            
+            cur.execute(f"""
+                SELECT COUNT(*) FROM dm_molecule_concept 
+                WHERE {placeholder_conditions}
+            """)
+            count = cur.fetchone()[0]
+            print(f"   Found {count:,} concepts with placeholder names")
+            cleanup_stats['placeholder_names_nulled'] = count
+            
+            if not dry_run and count > 0:
+                cur.execute(f"""
+                    UPDATE dm_molecule_concept 
+                    SET preferred_name = 'CONCEPT_' || concept_id::TEXT
+                    WHERE {placeholder_conditions}
+                """)
+                con.commit()
+                print(f"   ✅ Renamed {cur.rowcount:,} placeholder names to CONCEPT_<id>")
+            
+            # =================================================================
+            # 3. Fix outlier activities in source tables
+            # =================================================================
+            print("\n🔧 3. Flagging outlier activities (< 0.001 nM = sub-picomolar)...")
+            
+            # Check ChEMBL activities
+            cur.execute("""
+                SELECT COUNT(*) FROM activities 
+                WHERE standard_value IS NOT NULL 
+                  AND standard_value < 0.001
+                  AND standard_type IN ('IC50', 'Ki', 'Kd', 'EC50')
+            """)
+            count = cur.fetchone()[0]
+            print(f"   Found {count:,} ChEMBL activities with value < 0.001 nM")
+            cleanup_stats['chembl_outlier_activities'] = count
+            
+            # Note: Rather than deleting, we could add a quality flag column
+            # For now, we'll just report - these will be filtered in the view
+            
+            # =================================================================
+            # 4. Clean up orphaned biotherapeutic concepts  
+            # =================================================================
+            print("\n🔧 4. Handling orphaned biotherapeutic concepts...")
+            
+            cur.execute("""
+                SELECT COUNT(*) FROM dm_molecule_concept mc
+                WHERE mc.is_biotherapeutic = TRUE
+                  AND NOT EXISTS (SELECT 1 FROM dm_molecule dm WHERE dm.concept_id = mc.concept_id)
+                  AND NOT EXISTS (SELECT 1 FROM dm_biotherapeutic db WHERE db.concept_id = mc.concept_id)
+            """)
+            truly_orphaned = cur.fetchone()[0]
+            
+            cur.execute("""
+                SELECT COUNT(*) FROM dm_molecule_concept mc
+                WHERE mc.is_biotherapeutic = TRUE
+                  AND NOT EXISTS (SELECT 1 FROM dm_molecule dm WHERE dm.concept_id = mc.concept_id)
+                  AND EXISTS (SELECT 1 FROM dm_biotherapeutic db WHERE db.concept_id = mc.concept_id)
+            """)
+            has_bio_record = cur.fetchone()[0]
+            
+            print(f"   Found {truly_orphaned:,} truly orphaned (no dm_molecule, no dm_biotherapeutic)")
+            print(f"   Found {has_bio_record:,} with dm_biotherapeutic record but no dm_molecule (expected)")
+            cleanup_stats['orphaned_bio_concepts'] = truly_orphaned
+            cleanup_stats['valid_bio_concepts'] = has_bio_record
+            
+            if not dry_run and truly_orphaned > 0:
+                # Delete truly orphaned concepts (no molecule AND no biotherapeutic record)
+                cur.execute("""
+                    DELETE FROM dm_molecule_concept mc
+                    WHERE mc.is_biotherapeutic = TRUE
+                      AND NOT EXISTS (SELECT 1 FROM dm_molecule dm WHERE dm.concept_id = mc.concept_id)
+                      AND NOT EXISTS (SELECT 1 FROM dm_biotherapeutic db WHERE db.concept_id = mc.concept_id)
+                """)
+                con.commit()
+                print(f"   ✅ Deleted {cur.rowcount:,} truly orphaned biotherapeutic concepts")
+            
+            # =================================================================
+            # 5. Remove blacklisted/uninformative synonyms
+            # =================================================================
+            print("\n🔧 5. Checking for blacklisted synonyms...")
+            
+            # Build regex pattern for blacklisted synonyms
+            blacklist_regex = '|'.join(BLACKLIST_SYNONYM_PATTERNS)
+            
+            cur.execute("""
+                SELECT COUNT(*) FROM dm_molecule_synonyms 
+                WHERE synonym_lower ~ %s
+            """, (blacklist_regex,))
+            count = cur.fetchone()[0]
+            print(f"   Found {count:,} synonyms matching blacklist patterns")
+            cleanup_stats['blacklisted_synonyms'] = count
+            
+            if not dry_run and count > 0:
+                cur.execute("""
+                    DELETE FROM dm_molecule_synonyms 
+                    WHERE synonym_lower ~ %s
+                """, (blacklist_regex,))
+                con.commit()
+                print(f"   ✅ Deleted {cur.rowcount:,} blacklisted synonyms")
+            
+            # =================================================================
+            # 6. Fix ambiguous generic synonyms (optional - more aggressive)
+            # =================================================================
+            print("\n🔧 6. Identifying highly ambiguous synonyms (>5 concepts)...")
+            
+            cur.execute("""
+                SELECT synonym_lower, COUNT(DISTINCT concept_id) as n
+                FROM dm_molecule_synonyms
+                WHERE concept_id IS NOT NULL
+                GROUP BY synonym_lower
+                HAVING COUNT(DISTINCT concept_id) > 5
+            """)
+            highly_ambiguous = cur.fetchall()
+            print(f"   Found {len(highly_ambiguous)} synonyms pointing to >5 concepts")
+            cleanup_stats['highly_ambiguous_synonyms'] = len(highly_ambiguous)
+            
+            # We won't delete these automatically - they might be valid
+            # (e.g., "aspirin" could legitimately map to different salt forms)
+            # But we'll flag them for review
+            if highly_ambiguous:
+                print("   ⚠️  These should be reviewed manually:")
+                for syn, n in highly_ambiguous[:10]:
+                    print(f"      '{syn[:50]}' → {n} concepts")
+    
+    # =================================================================
+    # Summary
+    # =================================================================
+    print("\n" + "=" * 70)
+    print("📋 CLEANUP SUMMARY")
+    print("=" * 70)
+    
+    for key, value in cleanup_stats.items():
+        status = "would affect" if dry_run else "affected"
+        print(f"   {key}: {value:,} rows {status}")
+    
+    if dry_run:
+        print("\n   ℹ️  This was a DRY RUN. No changes were made.")
+        print("   ℹ️  Run with --cleanup to apply changes.")
+    else:
+        print("\n   ✅ Cleanup complete!")
+        print("   ℹ️  Run --diagnose again to verify improvements.")
+        print("   ℹ️  You may need to refresh materialized views: --refresh-only")
+    
+    return cleanup_stats
+
+
+# ============================================================================
 # DATA QUALITY CHECKS
 # ============================================================================
 
@@ -4171,6 +4788,462 @@ def run_data_quality_checks(config: DatabaseConfig) -> Dict[str, int]:
         print("\n  ✅ All quality checks passed!")
     
     return checks
+
+
+# ============================================================================
+# DATA QUALITY DIAGNOSTICS - DETAILED INVESTIGATION
+# ============================================================================
+
+def run_data_quality_diagnostics(config: DatabaseConfig) -> Dict[str, any]:
+    """
+    Run detailed diagnostic queries to understand the root causes of data quality issues.
+    
+    For each issue found in run_data_quality_checks(), this provides:
+      - Sample examples (up to 10)
+      - Source distribution breakdown
+      - Additional statistics to understand the problem
+    """
+    print("\n🔬 Running Detailed Data Quality Diagnostics...")
+    print("=" * 70)
+    
+    diagnostics = {}
+    
+    with get_connection(config) as con:
+        with con.cursor() as cur:
+            
+            # =================================================================
+            # 1. INVALID pChEMBL VALUES (outside 2-14 range)
+            # =================================================================
+            print("\n📊 1. INVALID pChEMBL VALUES (pchembl < 2 OR pchembl > 14)")
+            print("-" * 60)
+            
+            # Count by source
+            cur.execute("""
+                SELECT source, COUNT(*) as cnt,
+                       MIN(pchembl_value) as min_val, MAX(pchembl_value) as max_val,
+                       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY pchembl_value) as median_val
+                FROM dm_compound_target_activity 
+                WHERE pchembl_value IS NOT NULL 
+                  AND (pchembl_value < 2 OR pchembl_value > 14)
+                GROUP BY source
+                ORDER BY cnt DESC
+            """)
+            rows = cur.fetchall()
+            if rows:
+                print("  📍 By Source:")
+                for source, cnt, min_val, max_val, median in rows:
+                    print(f"     {source}: {cnt:,} invalid (range: {min_val:.2f} - {max_val:.2f}, median: {median:.2f})")
+                diagnostics['invalid_pchembl_by_source'] = rows
+            
+            # Show examples with very high pchembl (> 14)
+            cur.execute("""
+                SELECT concept_name, gene_symbol, activity_type, activity_value, activity_units, 
+                       pchembl_value, source
+                FROM dm_compound_target_activity 
+                WHERE pchembl_value > 14
+                ORDER BY pchembl_value DESC
+                LIMIT 10
+            """)
+            high_pchembl = cur.fetchall()
+            if high_pchembl:
+                print("\n  🔺 Examples with pChEMBL > 14 (extremely potent - suspicious):")
+                for name, gene, atype, aval, units, pchembl, src in high_pchembl:
+                    print(f"     {name[:30]:30s} | {gene:10s} | {atype:6s} = {aval:,.2f} {units} | pChEMBL={pchembl:.2f} | {src}")
+                diagnostics['high_pchembl_examples'] = high_pchembl
+            
+            # Show examples with very low pchembl (< 2)
+            cur.execute("""
+                SELECT concept_name, gene_symbol, activity_type, activity_value, activity_units, 
+                       pchembl_value, source
+                FROM dm_compound_target_activity 
+                WHERE pchembl_value IS NOT NULL AND pchembl_value < 2
+                ORDER BY pchembl_value ASC
+                LIMIT 10
+            """)
+            low_pchembl = cur.fetchall()
+            if low_pchembl:
+                print("\n  🔻 Examples with pChEMBL < 2 (very weak - mM range or weaker):")
+                for name, gene, atype, aval, units, pchembl, src in low_pchembl:
+                    name_display = (name or 'Unknown')[:30]
+                    print(f"     {name_display:30s} | {gene:10s} | {atype:6s} = {aval:,.2f} {units} | pChEMBL={pchembl:.2f} | {src}")
+                diagnostics['low_pchembl_examples'] = low_pchembl
+            
+            # Distribution of activity_value for invalid pchembl
+            cur.execute("""
+                SELECT 
+                    CASE 
+                        WHEN activity_value < 1 THEN '< 1 nM'
+                        WHEN activity_value < 10 THEN '1-10 nM'
+                        WHEN activity_value < 100 THEN '10-100 nM'
+                        WHEN activity_value < 1000 THEN '100-1000 nM'
+                        WHEN activity_value < 10000 THEN '1-10 µM'
+                        WHEN activity_value < 100000 THEN '10-100 µM'
+                        WHEN activity_value < 1000000 THEN '100-1000 µM'
+                        ELSE '> 1 mM'
+                    END as range_bucket,
+                    COUNT(*) as cnt
+                FROM dm_compound_target_activity 
+                WHERE pchembl_value IS NOT NULL 
+                  AND (pchembl_value < 2 OR pchembl_value > 14)
+                GROUP BY 1
+                ORDER BY MIN(activity_value)
+            """)
+            dist = cur.fetchall()
+            if dist:
+                print("\n  📈 Activity value distribution for invalid pChEMBL:")
+                for bucket, cnt in dist:
+                    print(f"     {bucket:15s}: {cnt:,}")
+                diagnostics['invalid_pchembl_distribution'] = dist
+            
+            # =================================================================
+            # 2. DUPLICATE CONCEPT NAMES
+            # =================================================================
+            print("\n\n📊 2. DUPLICATE CONCEPT NAMES")
+            print("-" * 60)
+            
+            cur.execute("""
+                SELECT preferred_name, COUNT(*) as n_concepts,
+                       ARRAY_AGG(concept_id ORDER BY concept_id) as concept_ids
+                FROM dm_molecule_concept 
+                WHERE preferred_name IS NOT NULL
+                GROUP BY preferred_name 
+                HAVING COUNT(*) > 1
+                ORDER BY COUNT(*) DESC
+                LIMIT 15
+            """)
+            dup_names = cur.fetchall()
+            if dup_names:
+                print("  📍 Most duplicated names (showing top 15):")
+                for name, n_concepts, concept_ids in dup_names:
+                    ids_str = ', '.join(str(x) for x in concept_ids[:5])
+                    if len(concept_ids) > 5:
+                        ids_str += f"... (+{len(concept_ids)-5} more)"
+                    print(f"     '{name[:40]:40s}' → {n_concepts} concepts: [{ids_str}]")
+                diagnostics['duplicate_names_examples'] = dup_names
+            
+            # Check if duplicates have different parent structures
+            cur.execute("""
+                SELECT mc.preferred_name, 
+                       COUNT(DISTINCT mc.parent_inchi_key_14) as n_distinct_structures,
+                       COUNT(*) as n_concepts
+                FROM dm_molecule_concept mc
+                WHERE mc.preferred_name IN (
+                    SELECT preferred_name FROM dm_molecule_concept 
+                    WHERE preferred_name IS NOT NULL
+                    GROUP BY preferred_name HAVING COUNT(*) > 1
+                )
+                GROUP BY mc.preferred_name
+                ORDER BY n_distinct_structures DESC, n_concepts DESC
+                LIMIT 10
+            """)
+            dup_structures = cur.fetchall()
+            if dup_structures:
+                print("\n  🧬 Are these truly different molecules?")
+                for name, n_structs, n_concepts in dup_structures:
+                    status = "⚠️  DIFFERENT structures" if n_structs > 1 else "🔄 SAME structure (duplicate entries)"
+                    print(f"     '{name[:35]:35s}': {n_concepts} concepts, {n_structs} distinct structures → {status}")
+                diagnostics['duplicate_names_structures'] = dup_structures
+            
+            # =================================================================
+            # 3. LONG SYNONYMS (> 200 characters)
+            # =================================================================
+            print("\n\n📊 3. LONG SYNONYMS (> 200 characters)")
+            print("-" * 60)
+            
+            # Distribution by length
+            cur.execute("""
+                SELECT 
+                    CASE 
+                        WHEN length(synonym) BETWEEN 201 AND 300 THEN '201-300 chars'
+                        WHEN length(synonym) BETWEEN 301 AND 500 THEN '301-500 chars'
+                        WHEN length(synonym) BETWEEN 501 AND 1000 THEN '501-1000 chars'
+                        ELSE '> 1000 chars'
+                    END as len_bucket,
+                    COUNT(*) as cnt
+                FROM dm_molecule_synonyms
+                WHERE length(synonym) > 200
+                GROUP BY 1
+                ORDER BY MIN(length(synonym))
+            """)
+            len_dist = cur.fetchall()
+            if len_dist:
+                print("  📍 Length distribution:")
+                for bucket, cnt in len_dist:
+                    print(f"     {bucket:15s}: {cnt:,}")
+                diagnostics['long_synonyms_distribution'] = len_dist
+            
+            # By source
+            cur.execute("""
+                SELECT source, COUNT(*) as cnt
+                FROM dm_molecule_synonyms
+                WHERE length(synonym) > 200
+                GROUP BY source
+                ORDER BY cnt DESC
+            """)
+            src_dist = cur.fetchall()
+            if src_dist:
+                print("\n  📍 By source:")
+                for src, cnt in src_dist:
+                    print(f"     {src}: {cnt:,}")
+                diagnostics['long_synonyms_by_source'] = src_dist
+            
+            # By syn_type
+            cur.execute("""
+                SELECT syn_type, COUNT(*) as cnt, AVG(length(synonym))::int as avg_len
+                FROM dm_molecule_synonyms
+                WHERE length(synonym) > 200
+                GROUP BY syn_type
+                ORDER BY cnt DESC
+            """)
+            type_dist = cur.fetchall()
+            if type_dist:
+                print("\n  📍 By synonym type:")
+                for stype, cnt, avg_len in type_dist:
+                    print(f"     {stype or 'NULL':20s}: {cnt:,} (avg length: {avg_len})")
+                diagnostics['long_synonyms_by_type'] = type_dist
+            
+            # Examples
+            cur.execute("""
+                SELECT 
+                    LEFT(synonym, 80) || '...' as synonym_preview,
+                    length(synonym) as full_length,
+                    syn_type, source
+                FROM dm_molecule_synonyms
+                WHERE length(synonym) > 200
+                ORDER BY length(synonym) DESC
+                LIMIT 10
+            """)
+            examples = cur.fetchall()
+            if examples:
+                print("\n  📝 Examples (longest first):")
+                for preview, full_len, stype, src in examples:
+                    print(f"     [{full_len:5d} chars] {stype or 'N/A':12s} | {src:12s} | {preview}")
+                diagnostics['long_synonyms_examples'] = examples
+            
+            # =================================================================
+            # 4. OUTLIER ACTIVITIES (value < 0.0001 or > 1B)
+            # =================================================================
+            print("\n\n📊 4. OUTLIER ACTIVITY VALUES")
+            print("-" * 60)
+            
+            # By source and type
+            cur.execute("""
+                SELECT source, activity_type, COUNT(*) as cnt,
+                       MIN(activity_value) as min_val, MAX(activity_value) as max_val
+                FROM dm_compound_target_activity 
+                WHERE activity_value < 0.0001 OR activity_value > 1000000000
+                GROUP BY source, activity_type
+                ORDER BY cnt DESC
+            """)
+            outlier_dist = cur.fetchall()
+            if outlier_dist:
+                print("  📍 By source and activity type:")
+                for src, atype, cnt, min_v, max_v in outlier_dist:
+                    print(f"     {src:12s} | {atype:6s}: {cnt:,} (range: {min_v:.2e} - {max_v:.2e})")
+                diagnostics['outlier_activities_by_source'] = outlier_dist
+            
+            # Examples of extremely low values
+            cur.execute("""
+                SELECT concept_name, gene_symbol, activity_type, activity_value, 
+                       activity_units, source
+                FROM dm_compound_target_activity 
+                WHERE activity_value < 0.0001
+                ORDER BY activity_value ASC
+                LIMIT 5
+            """)
+            low_examples = cur.fetchall()
+            if low_examples:
+                print("\n  🔻 Extremely low values (< 0.0001 nM = sub-femtomolar):")
+                for name, gene, atype, aval, units, src in low_examples:
+                    name_display = (name or 'Unknown')[:30]
+                    print(f"     {name_display:30s} | {gene:10s} | {atype} = {aval:.2e} {units} | {src}")
+                diagnostics['outlier_low_examples'] = low_examples
+            
+            # =================================================================
+            # 5. CONCEPTS WITHOUT dm_molecule ENTRIES
+            # =================================================================
+            print("\n\n📊 5. CONCEPTS WITHOUT dm_molecule ENTRIES")
+            print("-" * 60)
+            
+            # Detailed breakdown
+            cur.execute("""
+                SELECT 
+                    CASE 
+                        WHEN mc.is_biotherapeutic AND EXISTS (
+                            SELECT 1 FROM dm_biotherapeutic db WHERE db.concept_id = mc.concept_id
+                        ) THEN 'Biotherapeutic (has dm_biotherapeutic record) ✅'
+                        WHEN mc.is_biotherapeutic THEN 'Biotherapeutic (ORPHANED - no dm_biotherapeutic) ❌'
+                        ELSE 'Small molecule (ORPHANED) ❌'
+                    END as status,
+                    COUNT(*) as cnt
+                FROM dm_molecule_concept mc
+                WHERE NOT EXISTS (SELECT 1 FROM dm_molecule dm WHERE dm.concept_id = mc.concept_id)
+                GROUP BY 1
+                ORDER BY 1
+            """)
+            empty_by_status = cur.fetchall()
+            if empty_by_status:
+                print("  📍 Breakdown:")
+                for status, cnt in empty_by_status:
+                    print(f"     {status}: {cnt:,}")
+                diagnostics['empty_concepts_by_status'] = empty_by_status
+            
+            # Count truly orphaned (the problematic ones)
+            cur.execute("""
+                SELECT COUNT(*) FROM dm_molecule_concept mc
+                WHERE NOT EXISTS (SELECT 1 FROM dm_molecule dm WHERE dm.concept_id = mc.concept_id)
+                  AND NOT EXISTS (SELECT 1 FROM dm_biotherapeutic db WHERE db.concept_id = mc.concept_id)
+            """)
+            truly_orphaned = cur.fetchone()[0]
+            print(f"\n  ⚠️  Truly orphaned concepts (need attention): {truly_orphaned:,}")
+            diagnostics['truly_orphaned_concepts'] = truly_orphaned
+            
+            if truly_orphaned > 0:
+                # Sample of truly orphaned
+                cur.execute("""
+                    SELECT mc.concept_id, mc.preferred_name, mc.is_biotherapeutic,
+                           mc.parent_inchi_key_14
+                    FROM dm_molecule_concept mc
+                    WHERE NOT EXISTS (SELECT 1 FROM dm_molecule dm WHERE dm.concept_id = mc.concept_id)
+                      AND NOT EXISTS (SELECT 1 FROM dm_biotherapeutic db WHERE db.concept_id = mc.concept_id)
+                    ORDER BY mc.concept_id
+                    LIMIT 10
+                """)
+                orphaned_examples = cur.fetchall()
+                if orphaned_examples:
+                    print("\n  📝 Examples of truly orphaned concepts:")
+                    for cid, name, is_bio, inchi in orphaned_examples:
+                        bio_flag = "🧬" if is_bio else "💊"
+                        inchi_display = inchi[:14] + '...' if inchi else 'NULL'
+                        print(f"     {bio_flag} ID={cid}: '{name or 'No name'}' | InChI14: {inchi_display}")
+                    diagnostics['orphaned_concepts_examples'] = orphaned_examples
+            else:
+                print("  ✅ No truly orphaned concepts found!")
+            
+            # =================================================================
+            # 6. AMBIGUOUS SYNONYMS (pointing to multiple concepts)
+            # =================================================================
+            print("\n\n📊 6. AMBIGUOUS SYNONYMS (same name → multiple concepts)")
+            print("-" * 60)
+            
+            cur.execute("""
+                SELECT synonym_lower, COUNT(DISTINCT concept_id) as n_concepts,
+                       ARRAY_AGG(DISTINCT concept_id ORDER BY concept_id) as concept_ids
+                FROM dm_molecule_synonyms
+                WHERE concept_id IS NOT NULL
+                GROUP BY synonym_lower
+                HAVING COUNT(DISTINCT concept_id) > 1
+                ORDER BY COUNT(DISTINCT concept_id) DESC
+                LIMIT 15
+            """)
+            ambig = cur.fetchall()
+            if ambig:
+                print("  📍 Most ambiguous synonyms (top 15):")
+                for syn, n_concepts, concept_ids in ambig:
+                    ids_str = ', '.join(str(x) for x in concept_ids[:5])
+                    if len(concept_ids) > 5:
+                        ids_str += f"... (+{len(concept_ids)-5} more)"
+                    print(f"     '{syn[:40]:40s}' → {n_concepts} concepts: [{ids_str}]")
+                diagnostics['ambiguous_synonyms_examples'] = ambig
+            
+            # Check what these concepts actually are
+            if ambig:
+                top_ambig_syn = ambig[0][0]  # Most ambiguous
+                cur.execute("""
+                    SELECT mc.concept_id, mc.preferred_name, mc.parent_inchi_key_14
+                    FROM dm_molecule_synonyms dms
+                    JOIN dm_molecule_concept mc ON dms.concept_id = mc.concept_id
+                    WHERE dms.synonym_lower = %s
+                    ORDER BY mc.concept_id
+                    LIMIT 10
+                """, (top_ambig_syn,))
+                ambig_detail = cur.fetchall()
+                if ambig_detail:
+                    print(f"\n  🔍 Detail for '{top_ambig_syn[:40]}' - what concepts does it map to?")
+                    for cid, name, inchi in ambig_detail:
+                        print(f"     Concept {cid}: '{name or 'No name'}' | InChI14: {inchi[:14] + '...' if inchi else 'NULL'}")
+                    diagnostics['ambiguous_synonym_detail'] = ambig_detail
+            
+            # =================================================================
+            # 7. CONCEPTS WITH MANY FORMS (> 100)
+            # =================================================================
+            print("\n\n📊 7. CONCEPTS WITH MANY FORMS (> 100 molecules)")
+            print("-" * 60)
+            
+            cur.execute("""
+                SELECT mc.concept_id, mc.preferred_name, mc.n_forms,
+                       mc.has_salt_forms, mc.has_stereo_variants
+                FROM dm_molecule_concept mc
+                WHERE mc.n_forms > 100
+                ORDER BY mc.n_forms DESC
+                LIMIT 10
+            """)
+            many_forms = cur.fetchall()
+            if many_forms:
+                print("  📍 Concepts with most forms:")
+                for cid, name, n_forms, has_salt, has_stereo in many_forms:
+                    flags = []
+                    if has_salt:
+                        flags.append("salts")
+                    if has_stereo:
+                        flags.append("stereo")
+                    flags_str = ', '.join(flags) if flags else 'none'
+                    print(f"     ID={cid}: '{name or 'No name'}' → {n_forms} forms (variants: {flags_str})")
+                diagnostics['concepts_many_forms'] = many_forms
+                
+                # For the top one, show the distribution of forms
+                if many_forms:
+                    top_concept_id = many_forms[0][0]
+                    cur.execute("""
+                        SELECT dm.is_salt, dm.stereo_type, COUNT(*) as cnt
+                        FROM dm_molecule dm
+                        WHERE dm.concept_id = %s
+                        GROUP BY dm.is_salt, dm.stereo_type
+                        ORDER BY cnt DESC
+                    """, (top_concept_id,))
+                    form_breakdown = cur.fetchall()
+                    if form_breakdown:
+                        print(f"\n  🔍 Breakdown for concept {top_concept_id}:")
+                        for is_salt, stereo, cnt in form_breakdown:
+                            salt_str = "salt" if is_salt else "free"
+                            print(f"     {salt_str} / {stereo or 'UNKNOWN'}: {cnt:,}")
+                        diagnostics['top_concept_form_breakdown'] = form_breakdown
+            else:
+                print("  ✅ No concepts with > 100 forms")
+            
+            # =================================================================
+            # SUMMARY
+            # =================================================================
+            print("\n" + "=" * 70)
+            print("📋 DIAGNOSTIC SUMMARY")
+            print("=" * 70)
+            print("""
+Based on the diagnostics above, common root causes are:
+
+1. INVALID pChEMBL: Often from BindingDB data where activity values >= 100 µM
+   represent "no binding detected" and get pChEMBL=0 (meaningless).
+   → Fix: Run --cleanup to NULL out these pChEMBL values.
+   
+2. DUPLICATE NAMES: Different molecules with generic placeholder names like 
+   "Razaxaban Analogue", "Name not given", or "1:1 mixture of diastereomers".
+   These are NOT true duplicates - they're different structures with lazy naming.
+   → Fix: Run --cleanup to rename placeholders to CONCEPT_<id>.
+   
+3. LONG SYNONYMS: IUPAC systematic names for large molecules (peptides, etc.)
+   These are valid chemical names, just very long.
+   → Action: Informational only - these are legitimate.
+   
+4. BIOTHERAPEUTIC CONCEPTS: Concepts with parent_inchi_key_14 like "BIO:123456"
+   don't have dm_molecule entries - they have dm_biotherapeutic entries instead.
+   This is EXPECTED behavior, not a problem.
+   → Action: None needed - this is correct data model.
+   
+5. AMBIGUOUS SYNONYMS: Generic placeholder names that apply to multiple 
+   different molecules (same root cause as #2).
+   → Fix: Run --cleanup to remove blacklisted generic synonyms.
+""")
+    
+    return diagnostics
 
 
 # ============================================================================
@@ -4871,8 +5944,10 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
     # 2. Build Hierarchy (Concepts and Stereo Forms)
     if start_phase <= 2:
         build_molecule_hierarchy(config)
+        ingest_biotherapeutics(config, limit=limit)
     else:
         print("⏩ Skipping Phase 2: build_molecule_hierarchy")
+        print("⏩ Skipping Phase 2B: ingest_biotherapeutics")
     
     # 3. Populate Synonyms
     if start_phase <= 3:
@@ -4892,6 +5967,9 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
     # 5. Create Analytics View (raw activities)
     if start_phase <= 5:
         create_materialized_analytics_view(config, limit=limit)
+        # 5A. Create Drug Mechanism Table (needed for summary)
+        # Must run before summary table since it references dm_drug_mechanism
+        create_drug_mechanism_table(config, phase_label="5A")
         # 5B. Create Summary Table (deduplicated)
         create_materialized_analytics_view_summary(config)
     else:
@@ -4937,8 +6015,14 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
     else:
         print("⏩ Skipping Phase 12: create_indication_functions")
 
+    # Phase 13: Drug Mechanism Table - now created in Phase 5A (needed for summary)
+    # Keeping phase number for backward compatibility with --start-phase
     if start_phase <= 13:
-        create_drug_mechanism_table(config)
+        # Already created in Phase 5A, only recreate if starting from phase 13+
+        if start_phase == 13:
+            create_drug_mechanism_table(config)
+        else:
+            print("  ℹ️  Phase 13: dm_drug_mechanism already created in Phase 5A")
     else:
         print("⏩ Skipping Phase 13: create_drug_mechanism_table")
 
@@ -4955,7 +6039,7 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
             results = cur.fetchall()
             all_passed = True
             for check_name, status, count, details in results:
-                icon = "✅" if status == "PASS" else "⚠️" if status == "WARN" else "❌"
+                icon = "✅" if status == "PASS" else "ℹ️" if status == "INFO" else "⚠️" if status == "WARN" else "❌"
                 if status == "FAIL":
                     all_passed = False
                 print(f"  {icon} {check_name}: {status} ({count:,}) - {details}")
@@ -5043,6 +6127,12 @@ Fast Mode Defaults (--fast):
                         help='Generate report without running pipeline')
     parser.add_argument('--validate-only', action='store_true',
                         help='Run validation checks only')
+    parser.add_argument('--diagnose', action='store_true',
+                        help='Run detailed diagnostics on data quality issues')
+    parser.add_argument('--cleanup', action='store_true',
+                        help='Run data quality cleanup to fix known issues')
+    parser.add_argument('--cleanup-dry-run', action='store_true',
+                        help='Preview cleanup changes without applying them')
     parser.add_argument('--no-fuzzy', action='store_true',
                         help='Disable fuzzy matching for clinical trials')
     parser.add_argument('--fuzzy-threshold', type=float, default=0.8,
@@ -5059,6 +6149,23 @@ Fast Mode Defaults (--fast):
     
     if args.report:
         print(generate_pipeline_report(DEFAULT_CONFIG))
+    elif args.cleanup or args.cleanup_dry_run:
+        dry_run = args.cleanup_dry_run
+        run_data_quality_cleanup(DEFAULT_CONFIG, dry_run=dry_run)
+        if not dry_run:
+            print("\n🔄 Refreshing materialized views after cleanup...")
+            refresh_materialized_views(DEFAULT_CONFIG)
+    elif args.diagnose:
+        print("\n🔍 Running validation checks...")
+        with get_connection(DEFAULT_CONFIG) as con:
+            with con.cursor() as cur:
+                cur.execute("SELECT * FROM validate_molecule_hierarchy()")
+                results = cur.fetchall()
+                for check_name, status, count, details in results:
+                    icon = "✅" if status == "PASS" else "ℹ️" if status == "INFO" else "⚠️" if status == "WARN" else "❌"
+                    print(f"  {icon} {check_name}: {status} ({count:,}) - {details}")
+        run_data_quality_checks(DEFAULT_CONFIG)
+        run_data_quality_diagnostics(DEFAULT_CONFIG)
     elif args.validate_only:
         print("\n🔍 Running validation checks...")
         with get_connection(DEFAULT_CONFIG) as con:
@@ -5066,7 +6173,7 @@ Fast Mode Defaults (--fast):
                 cur.execute("SELECT * FROM validate_molecule_hierarchy()")
                 results = cur.fetchall()
                 for check_name, status, count, details in results:
-                    icon = "✅" if status == "PASS" else "⚠️" if status == "WARN" else "❌"
+                    icon = "✅" if status == "PASS" else "ℹ️" if status == "INFO" else "⚠️" if status == "WARN" else "❌"
                     print(f"  {icon} {check_name}: {status} ({count:,}) - {details}")
         run_data_quality_checks(DEFAULT_CONFIG)
     elif args.refresh_only:

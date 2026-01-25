@@ -1,0 +1,203 @@
+test_cases:
+  # ========================================
+  # SMALL MOLECULE KINASE INHIBITORS
+  # ========================================
+  - id: "imatinib_targets_001"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "imatinib"
+    expected_facts:
+      required:
+        - "ABL1 is a target of imatinib"
+        - "KIT is a target of imatinib"
+        - "PDGFRA is a target of imatinib"
+      optional:
+        - "imatinib has ChEMBL ID CHEMBL941"
+        - "PDGFRB is a target of imatinib"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "erlotinib_targets_002"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "erlotinib"
+    expected_facts:
+      required:
+        - "EGFR is a target of erlotinib"
+      optional:
+        - "erlotinib is an EGFR inhibitor"
+        - "erlotinib is used for lung cancer"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "ruxolitinib_targets_003"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "ruxolitinib"
+    expected_facts:
+      required:
+        - "JAK1 is a target of ruxolitinib"
+        - "JAK2 is a target of ruxolitinib"
+      optional:
+        - "ruxolitinib is a JAK inhibitor"
+        - "ruxolitinib is used for myelofibrosis"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "vemurafenib_targets_004"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "vemurafenib"
+    expected_facts:
+      required:
+        - "BRAF is a target of vemurafenib"
+      optional:
+        - "vemurafenib targets BRAF V600E mutation"
+        - "vemurafenib is used for melanoma"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "palbociclib_targets_005"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "palbociclib"
+    expected_facts:
+      required:
+        - "CDK4 is a target of palbociclib"
+        - "CDK6 is a target of palbociclib"
+      optional:
+        - "palbociclib is a CDK4/6 inhibitor"
+        - "palbociclib is used for breast cancer"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  # ========================================
+  # COX INHIBITORS / NSAIDs
+  # ========================================
+  - id: "aspirin_targets_006"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "aspirin"
+    expected_facts:
+      required:
+        - "PTGS1 (COX-1) is a target of aspirin"
+        - "PTGS2 (COX-2) is a target of aspirin"
+      optional:
+        - "aspirin inhibits cyclooxygenase enzymes"
+        - "aspirin is used for pain and inflammation"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "celecoxib_targets_007"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "celecoxib"
+    expected_facts:
+      required:
+        - "PTGS2 (COX-2) is a target of celecoxib"
+      optional:
+        - "celecoxib is a selective COX-2 inhibitor"
+        - "celecoxib is used for arthritis"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  # ========================================
+  # BIOLOGICS / MONOCLONAL ANTIBODIES
+  # ========================================
+  - id: "pembrolizumab_targets_008"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "pembrolizumab"
+    expected_facts:
+      required:
+        - "PDCD1 (PD-1) is a target of pembrolizumab"
+      optional:
+        - "pembrolizumab is a monoclonal antibody"
+        - "pembrolizumab is an immune checkpoint inhibitor"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "trastuzumab_targets_009"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "trastuzumab"
+    expected_facts:
+      required:
+        - "ERBB2 (HER2) is a target of trastuzumab"
+      optional:
+        - "trastuzumab is a monoclonal antibody"
+        - "trastuzumab is used for HER2-positive breast cancer"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "nivolumab_targets_010"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "nivolumab"
+    expected_facts:
+      required:
+        - "PDCD1 (PD-1) is a target of nivolumab"
+      optional:
+        - "nivolumab is a monoclonal antibody"
+        - "nivolumab is used for melanoma"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "rituximab_targets_011"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "rituximab"
+    expected_facts:
+      required:
+        - "MS4A1 (CD20) is a target of rituximab"
+      optional:
+        - "rituximab is a monoclonal antibody"
+        - "rituximab is used for lymphoma"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "adalimumab_targets_012"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "adalimumab"
+    expected_facts:
+      required:
+        - "TNF is a target of adalimumab"
+      optional:
+        - "adalimumab is a TNF-alpha inhibitor"
+        - "adalimumab is used for rheumatoid arthritis"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  # ========================================
+  # STATINS
+  # ========================================
+  - id: "atorvastatin_targets_013"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "atorvastatin"
+    expected_facts:
+      required:
+        - "HMGCR is a target of atorvastatin"
+      optional:
+        - "atorvastatin is an HMG-CoA reductase inhibitor"
+        - "atorvastatin is used to lower cholesterol"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  # ========================================
+  # DIABETES DRUGS
+  # ========================================
+  - id: "metformin_targets_014"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "metformin"
+    expected_facts:
+      required:
+        - "metformin has known pharmacological activity"
+      optional:
+        - "PRKAB1 is associated with metformin mechanism"
+        - "metformin activates AMPK"
+        - "metformin is used for type 2 diabetes"
+    source: "ChEMBL/DrugCentral"
+    confidence: "medium"

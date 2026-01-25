@@ -1,0 +1,109 @@
+test_cases:
+  # ========================================
+  # BIOTHERAPEUTICS BY TARGET
+  # ========================================
+  - id: "pdcd1_biologics_001"
+    tool: "search_biotherapeutics"
+    input:
+      mode: "by_target"
+      target_gene: "PDCD1"
+    expected_facts:
+      required:
+        - "Results include biologics targeting PDCD1"
+      optional:
+        - "pembrolizumab targets PDCD1"
+        - "nivolumab targets PDCD1"
+        - "Results include antibody components"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "erbb2_biologics_002"
+    tool: "search_biotherapeutics"
+    input:
+      mode: "by_target"
+      target_gene: "ERBB2"
+    expected_facts:
+      required:
+        - "Results include biologics targeting ERBB2"
+      optional:
+        - "trastuzumab targets ERBB2"
+        - "pertuzumab targets ERBB2"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "tnf_biologics_003"
+    tool: "search_biotherapeutics"
+    input:
+      mode: "by_target"
+      target_gene: "TNF"
+    expected_facts:
+      required:
+        - "Results include biologics targeting TNF"
+      optional:
+        - "adalimumab targets TNF"
+        - "infliximab targets TNF"
+        - "etanercept targets TNF"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "cd20_biologics_004"
+    tool: "search_biotherapeutics"
+    input:
+      mode: "by_target"
+      target_gene: "MS4A1"
+    expected_facts:
+      required:
+        - "Results include biologics targeting MS4A1 (CD20)"
+      optional:
+        - "rituximab targets CD20"
+        - "obinutuzumab targets CD20"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "vegfa_biologics_005"
+    tool: "search_biotherapeutics"
+    input:
+      mode: "by_target"
+      target_gene: "VEGFA"
+    expected_facts:
+      required:
+        - "Results include biologics targeting VEGFA"
+      optional:
+        - "bevacizumab targets VEGFA"
+        - "ranibizumab targets VEGFA"
+        - "aflibercept targets VEGFA"
+    source: "ChEMBL"
+    confidence: "high"
+
+  # ========================================
+  # ANTIBODY SEQUENCE SEARCHES
+  # ========================================
+  - id: "heavy_chain_motif_006"
+    tool: "search_biotherapeutics"
+    input:
+      mode: "by_sequence"
+      sequence: "EVQLVESGG"
+      biotherapeutic_type: "antibody"
+    expected_facts:
+      required:
+        - "Results include antibodies with EVQLVESGG motif"
+      optional:
+        - "Results include heavy chain variable regions"
+        - "EVQLVESGG is a common VH framework motif"
+    source: "ChEMBL"
+    confidence: "medium"
+
+  - id: "light_chain_motif_007"
+    tool: "search_biotherapeutics"
+    input:
+      mode: "by_sequence"
+      sequence: "DIQMTQ"
+      biotherapeutic_type: "antibody"
+    expected_facts:
+      required:
+        - "Results include antibodies with DIQMTQ motif"
+      optional:
+        - "Results include light chain variable regions"
+        - "DIQMTQ is a common VL framework motif"
+    source: "ChEMBL"
+    confidence: "medium"

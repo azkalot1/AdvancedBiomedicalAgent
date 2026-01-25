@@ -1,0 +1,154 @@
+test_cases:
+  # ========================================
+  # TRIALS BY MOLECULE
+  # ========================================
+  - id: "imatinib_trials_001"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_molecule"
+      molecule: "imatinib"
+    expected_facts:
+      required:
+        - "Trials linked to imatinib are returned"
+      optional:
+        - "NCT IDs are included"
+        - "CML or GIST trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "pembrolizumab_trials_002"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_molecule"
+      molecule: "pembrolizumab"
+    expected_facts:
+      required:
+        - "Trials linked to pembrolizumab are returned"
+      optional:
+        - "KEYNOTE trials may be included"
+        - "Cancer trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "metformin_trials_003"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_molecule"
+      molecule: "metformin"
+    expected_facts:
+      required:
+        - "Trials linked to metformin are returned"
+      optional:
+        - "Diabetes trials included"
+        - "Oncology repurposing trials may appear"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  # ========================================
+  # MOLECULES BY CONDITION
+  # ========================================
+  - id: "breast_cancer_molecules_004"
+    tool: "search_molecule_trials"
+    input:
+      mode: "molecules_by_condition"
+      condition: "breast cancer"
+    expected_facts:
+      required:
+        - "Molecules associated with breast cancer trials are returned"
+      optional:
+        - "trastuzumab is included"
+        - "palbociclib is included"
+        - "tamoxifen is included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "diabetes_molecules_005"
+    tool: "search_molecule_trials"
+    input:
+      mode: "molecules_by_condition"
+      condition: "type 2 diabetes"
+    expected_facts:
+      required:
+        - "Molecules associated with diabetes trials are returned"
+      optional:
+        - "metformin is included"
+        - "insulin is included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "melanoma_molecules_006"
+    tool: "search_molecule_trials"
+    input:
+      mode: "molecules_by_condition"
+      condition: "melanoma"
+    expected_facts:
+      required:
+        - "Molecules associated with melanoma trials are returned"
+      optional:
+        - "pembrolizumab is included"
+        - "nivolumab is included"
+        - "vemurafenib is included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  # ========================================
+  # TRIALS BY TARGET
+  # ========================================
+  - id: "egfr_target_trials_007"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_target"
+      target_gene: "EGFR"
+    expected_facts:
+      required:
+        - "Trials linked to EGFR-targeting molecules are returned"
+      optional:
+        - "erlotinib trials included"
+        - "gefitinib trials included"
+        - "Lung cancer trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "jak2_target_trials_008"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_target"
+      target_gene: "JAK2"
+    expected_facts:
+      required:
+        - "Trials linked to JAK2-targeting molecules are returned"
+      optional:
+        - "ruxolitinib trials included"
+        - "Myelofibrosis or MPN trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  # ========================================
+  # DRUG TRIALS (via pharmacology search)
+  # ========================================
+  - id: "imatinib_drug_trials_009"
+    tool: "search_drug_trials"
+    input:
+      drug_name: "imatinib"
+    expected_facts:
+      required:
+        - "Clinical trials for imatinib are returned"
+      optional:
+        - "NCT IDs are included"
+        - "Trial phases shown"
+        - "Trial status shown"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "trastuzumab_drug_trials_010"
+    tool: "search_drug_trials"
+    input:
+      drug_name: "trastuzumab"
+    expected_facts:
+      required:
+        - "Clinical trials for trastuzumab are returned"
+      optional:
+        - "Breast cancer trials included"
+        - "HER2 mentioned"
+    source: "ClinicalTrials.gov"
+    confidence: "high"

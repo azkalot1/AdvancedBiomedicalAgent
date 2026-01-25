@@ -1,0 +1,157 @@
+test_cases:
+  # ========================================
+  # DRUG INDICATIONS (search_drug_indications)
+  # ========================================
+  - id: "imatinib_indications_001"
+    tool: "search_drug_indications"
+    input:
+      drug_name: "imatinib"
+    expected_facts:
+      required:
+        - "imatinib is indicated for chronic myeloid leukemia (CML)"
+      optional:
+        - "imatinib is indicated for gastrointestinal stromal tumor (GIST)"
+        - "imatinib is indicated for Philadelphia chromosome positive ALL"
+    source: "DrugCentral"
+    confidence: "high"
+
+  - id: "metformin_indications_002"
+    tool: "search_drug_indications"
+    input:
+      drug_name: "metformin"
+    expected_facts:
+      required:
+        - "metformin is indicated for type 2 diabetes"
+      optional:
+        - "metformin is indicated for diabetes mellitus"
+        - "metformin is used for glycemic control"
+    source: "DrugCentral"
+    confidence: "high"
+
+  - id: "pembrolizumab_indications_003"
+    tool: "search_drug_indications"
+    input:
+      drug_name: "pembrolizumab"
+    expected_facts:
+      required:
+        - "pembrolizumab is indicated for melanoma"
+      optional:
+        - "pembrolizumab is indicated for non-small cell lung cancer"
+        - "pembrolizumab is indicated for head and neck cancer"
+        - "pembrolizumab is indicated for Hodgkin lymphoma"
+    source: "DrugCentral"
+    confidence: "high"
+
+  - id: "trastuzumab_indications_004"
+    tool: "search_drug_indications"
+    input:
+      drug_name: "trastuzumab"
+    expected_facts:
+      required:
+        - "trastuzumab is indicated for HER2-positive breast cancer"
+      optional:
+        - "trastuzumab is indicated for gastric cancer"
+        - "trastuzumab is indicated for HER2-overexpressing cancer"
+    source: "DrugCentral"
+    confidence: "high"
+
+  - id: "atorvastatin_indications_005"
+    tool: "search_drug_indications"
+    input:
+      drug_name: "atorvastatin"
+    expected_facts:
+      required:
+        - "atorvastatin is indicated for hypercholesterolemia"
+      optional:
+        - "atorvastatin is indicated for hyperlipidemia"
+        - "atorvastatin is indicated for cardiovascular risk reduction"
+    source: "DrugCentral"
+    confidence: "high"
+
+  - id: "adalimumab_indications_006"
+    tool: "search_drug_indications"
+    input:
+      drug_name: "adalimumab"
+    expected_facts:
+      required:
+        - "adalimumab is indicated for rheumatoid arthritis"
+      optional:
+        - "adalimumab is indicated for psoriasis"
+        - "adalimumab is indicated for Crohn's disease"
+        - "adalimumab is indicated for ulcerative colitis"
+    source: "DrugCentral"
+    confidence: "high"
+
+  # ========================================
+  # INDICATION DRUGS (search_indication_drugs)
+  # ========================================
+  - id: "cml_drugs_007"
+    tool: "search_indication_drugs"
+    input:
+      indication: "chronic myeloid leukemia"
+    expected_facts:
+      required:
+        - "imatinib is used for chronic myeloid leukemia"
+      optional:
+        - "dasatinib is used for chronic myeloid leukemia"
+        - "nilotinib is used for chronic myeloid leukemia"
+        - "bosutinib is used for chronic myeloid leukemia"
+    source: "DrugCentral"
+    confidence: "high"
+
+  - id: "diabetes_drugs_008"
+    tool: "search_indication_drugs"
+    input:
+      indication: "type 2 diabetes"
+    expected_facts:
+      required:
+        - "metformin is used for type 2 diabetes"
+      optional:
+        - "sitagliptin is used for type 2 diabetes"
+        - "liraglutide is used for type 2 diabetes"
+        - "empagliflozin is used for type 2 diabetes"
+    source: "DrugCentral"
+    confidence: "high"
+
+  - id: "melanoma_drugs_009"
+    tool: "search_indication_drugs"
+    input:
+      indication: "melanoma"
+    expected_facts:
+      required:
+        - "pembrolizumab is used for melanoma"
+      optional:
+        - "nivolumab is used for melanoma"
+        - "vemurafenib is used for melanoma"
+        - "dabrafenib is used for melanoma"
+        - "ipilimumab is used for melanoma"
+    source: "DrugCentral"
+    confidence: "high"
+
+  - id: "rheumatoid_arthritis_drugs_010"
+    tool: "search_indication_drugs"
+    input:
+      indication: "rheumatoid arthritis"
+    expected_facts:
+      required:
+        - "adalimumab is used for rheumatoid arthritis"
+      optional:
+        - "methotrexate is used for rheumatoid arthritis"
+        - "etanercept is used for rheumatoid arthritis"
+        - "tofacitinib is used for rheumatoid arthritis"
+    source: "DrugCentral"
+    confidence: "high"
+
+  - id: "breast_cancer_drugs_011"
+    tool: "search_indication_drugs"
+    input:
+      indication: "breast cancer"
+    expected_facts:
+      required:
+        - "trastuzumab is used for breast cancer"
+      optional:
+        - "palbociclib is used for breast cancer"
+        - "tamoxifen is used for breast cancer"
+        - "letrozole is used for breast cancer"
+    source: "DrugCentral"
+    confidence: "high"

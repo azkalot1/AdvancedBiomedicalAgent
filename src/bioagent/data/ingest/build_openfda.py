@@ -48,10 +48,10 @@ from tqdm import tqdm
 # Handle imports for both direct execution and module import
 try:
     from .config import DatabaseConfig, get_connection, DEFAULT_CONFIG
-    from .constants import MAPPING_TABLES, OPENFDA_DOWNLOAD_INDEX
+    from .constants import MAPPING_TABLES, OPENFDA_DOWNLOAD_INDEX, DEFAULT_HEADERS
 except ImportError:
     from config import DatabaseConfig, get_connection, DEFAULT_CONFIG
-    from constants import MAPPING_TABLES, OPENFDA_DOWNLOAD_INDEX
+    from constants import MAPPING_TABLES, OPENFDA_DOWNLOAD_INDEX, DEFAULT_HEADERS
 
 DOWNLOAD_INDEX = OPENFDA_DOWNLOAD_INDEX
 
@@ -202,7 +202,7 @@ def format_table_for_llm(cleaned_table):
 
 
 def _fetch_index() -> dict:
-    r = requests.get(DOWNLOAD_INDEX, timeout=60)
+    r = requests.get(DOWNLOAD_INDEX, headers=DEFAULT_HEADERS, timeout=60)
     r.raise_for_status()
     return r.json()
 
@@ -235,7 +235,7 @@ def _download(url: str, dest_dir: Path) -> Path:
     if dest.exists():
         return dest
 
-    with requests.get(url, stream=True, timeout=300) as r:
+    with requests.get(url, headers=DEFAULT_HEADERS, stream=True, timeout=300) as r:
         r.raise_for_status()
         total_size = int(r.headers.get('content-length', 0))
 

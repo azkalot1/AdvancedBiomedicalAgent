@@ -14,6 +14,8 @@ from bioagent.data.search.target_search import (
     TargetSearchInput,
     TargetSearchOutput,
     SearchMode,
+    ActivityType,
+    DataConfidence,
     DataSource,
     CompoundTargetProfile,
     DrugForTargetHit,
@@ -376,6 +378,13 @@ def _validate_gene_symbol(gene_symbol: str | None) -> tuple[str | None, str | No
     return gene_symbol, None
 
 
+def _validate_text_query(value: str | None, label: str) -> tuple[str | None, str | None]:
+    """Validate a generic text query parameter."""
+    if not value or not isinstance(value, str) or not value.strip():
+        return None, f"{label} is required and cannot be empty"
+    return value.strip(), None
+
+
 def _validate_smiles(smiles: str | None) -> tuple[str | None, str | None]:
     """Validate SMILES input. Returns (cleaned_smiles, error_message)."""
     if not smiles:
@@ -395,6 +404,43 @@ def _validate_smiles(smiles: str | None) -> tuple[str | None, str | None]:
         return None, f"smiles contains invalid characters: {invalid}. Check SMILES syntax."
     
     return smiles, None
+
+
+def _validate_activity_type(activity_type: str) -> tuple[ActivityType | None, str | None]:
+    """Validate activity_type parameter. Returns (value, error_message)."""
+    if not isinstance(activity_type, str) or not activity_type.strip():
+        return ActivityType.ALL, None
+
+    key = activity_type.strip().upper()
+    mapping = {
+        "IC50": ActivityType.IC50,
+        "KI": ActivityType.KI,
+        "KD": ActivityType.KD,
+        "EC50": ActivityType.EC50,
+        "ALL": ActivityType.ALL,
+    }
+    if key not in mapping:
+        allowed = ", ".join(mapping.keys())
+        return None, f"activity_type must be one of: {allowed}"
+    return mapping[key], None
+
+
+def _validate_confidence(confidence: str) -> tuple[DataConfidence | None, str | None]:
+    """Validate min_confidence parameter. Returns (value, error_message)."""
+    if not isinstance(confidence, str) or not confidence.strip():
+        return DataConfidence.ANY, None
+
+    key = confidence.strip().upper()
+    mapping = {
+        "HIGH": DataConfidence.HIGH,
+        "MEDIUM": DataConfidence.MEDIUM,
+        "LOW": DataConfidence.LOW,
+        "ANY": DataConfidence.ANY,
+    }
+    if key not in mapping:
+        allowed = ", ".join(mapping.keys())
+        return None, f"min_confidence must be one of: {allowed}"
+    return mapping[key], None
 
 
 def _validate_data_source(data_source: str) -> tuple[DataSource | None, str | None]:
@@ -1075,6 +1121,244 @@ async def search_selective_drugs(
 
 
 # =============================================================================
+# ADDITIONAL PHARMACOLOGY MODES
+# =============================================================================
+
+@tool("search_drug_activities", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_drug_activities(
+    drug_name: str,
+    min_pchembl: float = 5.0,
+    activity_type: str = "all",
+    min_confidence: str = "any",
+    data_source: str = "activity",
+    include_all_organisms: bool = False,
+    limit: int = 50,
+) -> str:
+    """
+    Retrieve quantitative activity measurements for a drug.
+
+    Useful for viewing IC50/Ki/Kd/EC50 measurements across targets.
+    """
+    drug_name, error = _validate_drug_name(drug_name)
+    if error:
+        return f"✗ Input error: {error}"
+
+    min_pchembl, error = _validate_pchembl(min_pchembl)
+    if error:
+        return f"✗ Input error: {error}"
+
+    activity_enum, error = _validate_activity_type(activity_type)
+    if error:
+        return f"✗ Input error: {error}"
+
+    confidence_enum, error = _validate_confidence(min_confidence)
+    if error:
+        return f"✗ Input error: {error}"
+
+    ds, error = _validate_data_source(data_source)
+    if error:
+        return f"✗ Input error: {error}"
+
+    limit, error = _validate_limit(limit)
+    if error:
+        return f"✗ Input error: {error}"
+
+    try:
+        search_input = TargetSearchInput(
+            mode=SearchMode.ACTIVITIES_FOR_DRUG,
+            query=drug_name,
+            min_pchembl=min_pchembl,
+            activity_type=activity_enum,
+            min_confidence=confidence_enum,
+            data_source=ds,
+            include_all_organisms=include_all_organisms,
+            limit=limit,
+        )
+
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+
+    except Exception as e:
+        return f"✗ Error searching drug activities: {type(e).__name__}: {e}"
+
+
+@tool("search_target_activities", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_target_activities(
+    gene_symbol: str,
+    min_pchembl: float = 5.0,
+    activity_type: str = "all",
+    min_confidence: str = "any",
+    data_source: str = "activity",
+    limit: int = 50,
+) -> str:
+    """Retrieve quantitative activity measurements for a target gene."""
+    gene_symbol, error = _validate_gene_symbol(gene_symbol)
+    if error:
+        return f"✗ Input error: {error}"
+
+    min_pchembl, error = _validate_pchembl(min_pchembl)
+    if error:
+        return f"✗ Input error: {error}"
+
+    activity_enum, error = _validate_activity_type(activity_type)
+    if error:
+        return f"✗ Input error: {error}"
+
+    confidence_enum, error = _validate_confidence(min_confidence)
+    if error:
+        return f"✗ Input error: {error}"
+
+    ds, error = _validate_data_source(data_source)
+    if error:
+        return f"✗ Input error: {error}"
+
+    limit, error = _validate_limit(limit)
+    if error:
+        return f"✗ Input error: {error}"
+
+    try:
+        search_input = TargetSearchInput(
+            mode=SearchMode.ACTIVITIES_FOR_TARGET,
+            query=gene_symbol,
+            min_pchembl=min_pchembl,
+            activity_type=activity_enum,
+            min_confidence=confidence_enum,
+            data_source=ds,
+            limit=limit,
+        )
+
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+
+    except Exception as e:
+        return f"✗ Error searching target activities: {type(e).__name__}: {e}"
+
+
+@tool("search_drug_indications", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_drug_indications(
+    drug_name: str,
+    limit: int = 50,
+) -> str:
+    """Find indications (approved or reported) for a drug."""
+    drug_name, error = _validate_drug_name(drug_name)
+    if error:
+        return f"✗ Input error: {error}"
+
+    limit, error = _validate_limit(limit)
+    if error:
+        return f"✗ Input error: {error}"
+
+    try:
+        search_input = TargetSearchInput(
+            mode=SearchMode.INDICATIONS_FOR_DRUG,
+            query=drug_name,
+            limit=limit,
+        )
+
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+
+    except Exception as e:
+        return f"✗ Error searching drug indications: {type(e).__name__}: {e}"
+
+
+@tool("search_indication_drugs", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_indication_drugs(
+    indication: str,
+    limit: int = 50,
+) -> str:
+    """Find drugs associated with an indication or disease term."""
+    indication, error = _validate_text_query(indication, "indication")
+    if error:
+        return f"✗ Input error: {error}"
+
+    limit, error = _validate_limit(limit)
+    if error:
+        return f"✗ Input error: {error}"
+
+    try:
+        search_input = TargetSearchInput(
+            mode=SearchMode.DRUGS_FOR_INDICATION,
+            query=indication,
+            limit=limit,
+        )
+
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+
+    except Exception as e:
+        return f"✗ Error searching drugs for indication: {type(e).__name__}: {e}"
+
+
+@tool("search_target_pathways", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_target_pathways(
+    gene_symbol: str,
+    limit: int = 50,
+) -> str:
+    """Find pathway annotations for a target gene."""
+    gene_symbol, error = _validate_gene_symbol(gene_symbol)
+    if error:
+        return f"✗ Input error: {error}"
+
+    limit, error = _validate_limit(limit)
+    if error:
+        return f"✗ Input error: {error}"
+
+    try:
+        search_input = TargetSearchInput(
+            mode=SearchMode.TARGET_PATHWAYS,
+            query=gene_symbol,
+            limit=limit,
+        )
+
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+
+    except Exception as e:
+        return f"✗ Error searching target pathways: {type(e).__name__}: {e}"
+
+
+@tool("search_drug_interactions", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_drug_interactions(
+    drug_name: str,
+    limit: int = 50,
+) -> str:
+    """Find known drug-drug interactions for a drug."""
+    drug_name, error = _validate_drug_name(drug_name)
+    if error:
+        return f"✗ Input error: {error}"
+
+    limit, error = _validate_limit(limit)
+    if error:
+        return f"✗ Input error: {error}"
+
+    try:
+        search_input = TargetSearchInput(
+            mode=SearchMode.DRUG_INTERACTIONS,
+            query=drug_name,
+            limit=limit,
+        )
+
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(result)
+
+    except Exception as e:
+        return f"✗ Error searching drug interactions: {type(e).__name__}: {e}"
+
+
+# =============================================================================
 # UNIFIED PHARMACOLOGY SEARCH TOOL
 # =============================================================================
 
@@ -1408,4 +1692,10 @@ TARGET_SEARCH_TOOLS = [
     search_drug_trials,
     compare_drugs_on_target,
     search_selective_drugs,
+    search_drug_activities,
+    search_target_activities,
+    search_drug_indications,
+    search_indication_drugs,
+    search_target_pathways,
+    search_drug_interactions,
 ]

@@ -18,8 +18,10 @@ from tqdm import tqdm
 # Handle imports for both direct execution and module import
 try:
     from .config import DatabaseConfig, get_connection
+    from .constants import DEFAULT_HEADERS
 except ImportError:
     from config import DatabaseConfig, get_connection
+    from constants import DEFAULT_HEADERS
 
 # CTTI AACT dump URL
 CTGOV_DUMP_URL = "https://ctti-aact.nyc3.digitaloceanspaces.com/yr48nmlriax3euffw45a773wx2ha"
@@ -46,7 +48,7 @@ def _download_dump(dest: Path) -> Path:
 
     print(f"📥 Downloading CTTI AACT dump from: {CTGOV_DUMP_URL}")
     try:
-        with requests.get(CTGOV_DUMP_URL, stream=True, timeout=300) as r:
+        with requests.get(CTGOV_DUMP_URL, headers=DEFAULT_HEADERS, stream=True, timeout=300) as r:
             r.raise_for_status()
             total_size = int(r.headers.get('content-length', 0))
 

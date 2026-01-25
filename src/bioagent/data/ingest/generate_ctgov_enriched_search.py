@@ -91,6 +91,8 @@ CREATE TABLE public.rag_study_search (
     lead_sponsor TEXT,
     collaborators TEXT[] DEFAULT ARRAY[]::TEXT[],
     countries TEXT[] DEFAULT ARRAY[]::TEXT[],
+    outcome_measures TEXT[] DEFAULT ARRAY[]::TEXT[],
+    arm_descriptions TEXT[] DEFAULT ARRAY[]::TEXT[],
     
     -- === Normalized Text (for trigram similarity) ===
     conditions_norm TEXT,
@@ -186,6 +188,12 @@ CREATE INDEX IF NOT EXISTS idx_rag_search_countries_arr
 CREATE INDEX IF NOT EXISTS idx_rag_search_intervention_types_arr 
     ON public.rag_study_search USING gin (intervention_types);
 
+CREATE INDEX IF NOT EXISTS idx_rag_search_outcomes_arr
+    ON public.rag_study_search USING gin (outcome_measures);
+
+CREATE INDEX IF NOT EXISTS idx_rag_search_arms_arr
+    ON public.rag_study_search USING gin (arm_descriptions);
+
 -- === Lead sponsor index ===
 CREATE INDEX IF NOT EXISTS idx_rag_search_lead_sponsor 
     ON public.rag_study_search (lead_sponsor);
@@ -270,6 +278,33 @@ countries_agg AS (
     GROUP BY co.nct_id
 ),
 
+-- Aggregate outcome measures
+outcomes_agg AS (
+    SELECT
+        o.nct_id,
+        array_agg(
+            DISTINCT (o.outcome_type || ': ' || o.title)
+        ) FILTER (WHERE o.outcome_type IS NOT NULL AND o.title IS NOT NULL AND o.title != '') AS outcome_measures
+    FROM ctgov_outcomes o
+    INNER JOIN nct_batch b ON o.nct_id = b.nct_id
+    GROUP BY o.nct_id
+),
+
+-- Aggregate arm/group descriptions
+design_groups_agg AS (
+    SELECT
+        dg.nct_id,
+        array_agg(
+            DISTINCT (
+                COALESCE(dg.title, '') ||
+                CASE WHEN dg.description IS NOT NULL AND dg.description != '' THEN ' — ' || dg.description ELSE '' END
+            )
+        ) FILTER (WHERE dg.title IS NOT NULL OR dg.description IS NOT NULL) AS arm_descriptions
+    FROM ctgov_design_groups dg
+    INNER JOIN nct_batch b ON dg.nct_id = b.nct_id
+    GROUP BY dg.nct_id
+),
+
 -- Get brief summary for full-text
 summaries AS (
     SELECT bs.nct_id, bs.description
@@ -311,6 +346,8 @@ SELECT
     sp.lead_sponsor,
     COALESCE(sp.collaborators, ARRAY[]::text[]) AS collaborators,
     COALESCE(cou.countries, ARRAY[]::text[]) AS countries,
+    COALESCE(oa.outcome_measures, ARRAY[]::text[]) AS outcome_measures,
+    COALESCE(dga.arm_descriptions, ARRAY[]::text[]) AS arm_descriptions,
     
     -- Normalized text for trigram
     lower(unaccent(COALESCE(c.conditions_text, ''))) AS conditions_norm,
@@ -338,6 +375,8 @@ LEFT JOIN interventions_agg i ON s.nct_id = i.nct_id
 LEFT JOIN mesh_interventions_agg mi ON s.nct_id = mi.nct_id
 LEFT JOIN sponsors_agg sp ON s.nct_id = sp.nct_id
 LEFT JOIN countries_agg cou ON s.nct_id = cou.nct_id
+LEFT JOIN outcomes_agg oa ON s.nct_id = oa.nct_id
+LEFT JOIN design_groups_agg dga ON s.nct_id = dga.nct_id
 LEFT JOIN summaries sum ON s.nct_id = sum.nct_id
 LEFT JOIN details det ON s.nct_id = det.nct_id
 """
@@ -371,6 +410,8 @@ INSERT INTO public.rag_study_search (
     lead_sponsor,
     collaborators,
     countries,
+    outcome_measures,
+    arm_descriptions,
     conditions_norm,
     mesh_conditions_norm,
     interventions_norm,
@@ -406,6 +447,8 @@ ON CONFLICT (nct_id) DO UPDATE SET
     lead_sponsor = EXCLUDED.lead_sponsor,
     collaborators = EXCLUDED.collaborators,
     countries = EXCLUDED.countries,
+    outcome_measures = EXCLUDED.outcome_measures,
+    arm_descriptions = EXCLUDED.arm_descriptions,
     conditions_norm = EXCLUDED.conditions_norm,
     mesh_conditions_norm = EXCLUDED.mesh_conditions_norm,
     interventions_norm = EXCLUDED.interventions_norm,
@@ -527,6 +570,8 @@ def row_to_insert_tuple(row: dict) -> tuple:
         row['lead_sponsor'],
         row['collaborators'],
         row['countries'],
+        row.get('outcome_measures', []),
+        row.get('arm_descriptions', []),
         row['conditions_norm'],
         row['mesh_conditions_norm'],
         row['interventions_text'],  # -> interventions_norm
@@ -656,6 +701,8 @@ def populate_table(config: DatabaseConfig, batch_size: int = 1000) -> None:
                                 row['lead_sponsor'],
                                 row['collaborators'],
                                 row['countries'],
+                                row['outcome_measures'],
+                                row['arm_descriptions'],
                                 row['conditions_norm'],
                                 row['mesh_conditions_norm'],
                                 row['interventions_text'],
@@ -672,7 +719,7 @@ def populate_table(config: DatabaseConfig, batch_size: int = 1000) -> None:
                             %s::date, %s, %s::date, %s, %s::date, %s,
                             %s, %s, %s,
                             %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s,
                             to_tsvector('english', %s),
                             to_tsvector('english', %s)
                         )"""

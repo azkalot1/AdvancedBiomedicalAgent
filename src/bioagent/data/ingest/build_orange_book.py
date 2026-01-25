@@ -17,10 +17,10 @@ from tqdm import tqdm
 # Handle imports for both direct execution and module import
 try:
     from .config import DatabaseConfig, get_connection
-    from .constants import ORANGE_BOOK_URL
+    from .constants import ORANGE_BOOK_URL, DEFAULT_HEADERS
 except ImportError:
     from config import DatabaseConfig, get_connection
-    from constants import ORANGE_BOOK_URL
+    from constants import ORANGE_BOOK_URL, DEFAULT_HEADERS
 
 OB_URL = ORANGE_BOOK_URL
 
@@ -32,7 +32,7 @@ def _download(url: str, dest: Path) -> Path:
         print(f"🔄 Reusing existing {dest.name}")
         return dest
 
-    with requests.get(url, stream=True, timeout=300) as r:
+    with requests.get(url, headers=DEFAULT_HEADERS, stream=True, timeout=300) as r:
         r.raise_for_status()
         total_size = int(r.headers.get('content-length', 0))
 
@@ -107,6 +107,42 @@ def _init_schema(con: psycopg2.extensions.connection) -> None:
                 BEFORE UPDATE ON orange_book_products
                 FOR EACH ROW
                 EXECUTE FUNCTION update_updated_at_column();
+
+            -- Orange Book patents
+            CREATE TABLE IF NOT EXISTS orange_book_patents(
+              id SERIAL PRIMARY KEY,
+              appl_no TEXT,
+              product_no TEXT,
+              patent_no TEXT,
+              patent_expiration_date TEXT,
+              drug_substance_flag TEXT,
+              drug_product_flag TEXT,
+              patent_use_code TEXT,
+              patent_use_code_description TEXT,
+              created_at TIMESTAMP DEFAULT NOW(),
+              updated_at TIMESTAMP DEFAULT NOW(),
+              UNIQUE(appl_no, product_no, patent_no, patent_use_code)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_orange_book_patents_appl ON orange_book_patents(appl_no);
+            CREATE INDEX IF NOT EXISTS idx_orange_book_patents_product ON orange_book_patents(product_no);
+            CREATE INDEX IF NOT EXISTS idx_orange_book_patents_patent_no ON orange_book_patents(patent_no);
+
+            -- Orange Book exclusivity
+            CREATE TABLE IF NOT EXISTS orange_book_exclusivity(
+              id SERIAL PRIMARY KEY,
+              appl_no TEXT,
+              product_no TEXT,
+              exclusivity_code TEXT,
+              exclusivity_date TEXT,
+              created_at TIMESTAMP DEFAULT NOW(),
+              updated_at TIMESTAMP DEFAULT NOW(),
+              UNIQUE(appl_no, product_no, exclusivity_code)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_orange_book_excl_appl ON orange_book_exclusivity(appl_no);
+            CREATE INDEX IF NOT EXISTS idx_orange_book_excl_product ON orange_book_exclusivity(product_no);
+            CREATE INDEX IF NOT EXISTS idx_orange_book_excl_code ON orange_book_exclusivity(exclusivity_code);
         """
         )
         con.commit()
@@ -124,6 +160,9 @@ def ingest_orange_book(config: DatabaseConfig, raw_dir: Path) -> None:
 
             n_rows = 0
             records_to_insert = []
+            patent_records = []
+            exclusivity_records = []
+            use_code_map: dict[str, str] = {}
 
             print("📋 Processing Orange Book ZIP file...")
             with zipfile.ZipFile(dest, "r") as zf:
@@ -155,6 +194,60 @@ def ingest_orange_book(config: DatabaseConfig, raw_dir: Path) -> None:
                                         row.get("RLD"),  # Reference Listed Drug
                                         row.get("RS"),  # Reference Standard
                                         row.get("Applicant_Full_Name"),
+                                    )
+                                )
+                        break
+
+                # Optional: usecode.txt for patent use code descriptions
+                for info in zf.infolist():
+                    if info.filename.lower().endswith("usecode.txt"):
+                        with zf.open(info) as f:
+                            text = io.TextIOWrapper(f, encoding="utf-8", errors="replace")
+                            reader = csv.DictReader(text, delimiter="~")
+                            for row in reader:
+                                code = row.get("Patent_Use_Code") or row.get("Patent_Use_Code_Number")
+                                desc = row.get("Patent_Use_Description") or row.get("Use_Code_Description")
+                                if code and desc:
+                                    use_code_map[code] = desc
+                        break
+
+                # Optional: patents.txt
+                for info in zf.infolist():
+                    if info.filename.lower().endswith("patent.txt"):
+                        print(f"📄 Found patents file: {info.filename}")
+                        with zf.open(info) as f:
+                            text = io.TextIOWrapper(f, encoding="utf-8", errors="replace")
+                            reader = csv.DictReader(text, delimiter="~")
+                            for row in reader:
+                                code = row.get("Patent_Use_Code")
+                                patent_records.append(
+                                    (
+                                        row.get("Appl_No"),
+                                        row.get("Product_No"),
+                                        row.get("Patent_No"),
+                                        row.get("Patent_Expiration_Date"),
+                                        row.get("Drug_Substance_Flag"),
+                                        row.get("Drug_Product_Flag"),
+                                        code,
+                                        use_code_map.get(code),
+                                    )
+                                )
+                        break
+
+                # Optional: exclusivity.txt
+                for info in zf.infolist():
+                    if info.filename.lower().endswith("exclusivity.txt"):
+                        print(f"📄 Found exclusivity file: {info.filename}")
+                        with zf.open(info) as f:
+                            text = io.TextIOWrapper(f, encoding="utf-8", errors="replace")
+                            reader = csv.DictReader(text, delimiter="~")
+                            for row in reader:
+                                exclusivity_records.append(
+                                    (
+                                        row.get("Appl_No"),
+                                        row.get("Product_No"),
+                                        row.get("Exclusivity_Code"),
+                                        row.get("Exclusivity_Date"),
                                     )
                                 )
                         break
@@ -234,6 +327,40 @@ def ingest_orange_book(config: DatabaseConfig, raw_dir: Path) -> None:
                             con.commit()
 
         print(f"✅ [Orange Book] Successfully loaded {n_rows:,} product records.")
+        if patent_records:
+            with con.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO orange_book_patents
+                    (appl_no, product_no, patent_no, patent_expiration_date, drug_substance_flag,
+                     drug_product_flag, patent_use_code, patent_use_code_description)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (appl_no, product_no, patent_no, patent_use_code) DO UPDATE SET
+                        patent_expiration_date = EXCLUDED.patent_expiration_date,
+                        drug_substance_flag = EXCLUDED.drug_substance_flag,
+                        drug_product_flag = EXCLUDED.drug_product_flag,
+                        patent_use_code_description = EXCLUDED.patent_use_code_description,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    patent_records,
+                )
+                con.commit()
+            print(f"✅ [Orange Book] Loaded {len(patent_records):,} patent records.")
+        if exclusivity_records:
+            with con.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO orange_book_exclusivity
+                    (appl_no, product_no, exclusivity_code, exclusivity_date)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (appl_no, product_no, exclusivity_code) DO UPDATE SET
+                        exclusivity_date = EXCLUDED.exclusivity_date,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    exclusivity_records,
+                )
+                con.commit()
+            print(f"✅ [Orange Book] Loaded {len(exclusivity_records):,} exclusivity records.")
         print("🔍 Data available in orange_book_products table")
 
     except Exception as e:
@@ -242,3 +369,47 @@ def ingest_orange_book(config: DatabaseConfig, raw_dir: Path) -> None:
 
 
 # Search functions have been moved to src/curebench/data/app/search_orange_book.py
+
+
+if __name__ == "__main__":
+    # Command line interface for Orange Book ingestion
+    import argparse
+    import sys
+
+    # Handle imports for both direct execution and module import
+    try:
+        from .config import DEFAULT_CONFIG
+    except ImportError:
+        from config import DEFAULT_CONFIG
+
+    parser = argparse.ArgumentParser(
+        description="Orange Book ingestion for PostgreSQL",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python build_orange_book.py --raw-dir ./data/raw
+  python build_orange_book.py -d /path/to/data/raw
+        """,
+    )
+    parser.add_argument(
+        "--raw-dir",
+        "-d",
+        type=Path,
+        default=Path("./raw"),
+        help="Directory to store downloaded Orange Book data (default: ./raw)",
+    )
+
+    args = parser.parse_args()
+
+    print("🍊 Orange Book Ingestion")
+    print("=" * 50)
+    print(f"📁 Raw directory: {args.raw_dir.absolute()}")
+    print()
+
+    try:
+        ingest_orange_book(DEFAULT_CONFIG, args.raw_dir)
+        print()
+        print("✅ Orange Book ingestion completed successfully!")
+    except Exception as e:
+        print(f"\n❌ Ingestion failed: {e}")
+        sys.exit(1)
