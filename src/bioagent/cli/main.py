@@ -82,6 +82,10 @@ def show_help() -> None:
     print("  ChEMBL Options:")
     print("  ingest --chembl-force-recreate - Force recreate ChEMBL tables")
     print()
+    print("Agent Chat:")
+    print("  chat                    - Terminal chat with the biomedical agent (persistent threads)")
+    print("  chat --help             - Chat options (--thread-id, --checkpoint-db, --model, etc.)")
+    print()
     print("Search Index Commands:")
     print("  generate-search          - Create full-text search indexes (tsvector + GIN)")
     print("  generate-ctgov-search    - Create enriched CT.gov search table")
@@ -254,6 +258,26 @@ def route_create_dm_target() -> NoReturn:
     sys.exit(0)
 
 
+def route_chat() -> NoReturn:
+    """Run terminal chat with the biomedical agent."""
+    try:
+        original_argv = sys.argv.copy()
+        sys.argv = ["chat"] + sys.argv[2:]
+        from bioagent.cli.chat import main as chat_main
+        chat_main()
+    except ImportError as e:
+        print(f"❌ Error importing chat: {e}")
+        print("Make sure all dependencies are installed: pip install -e .[all] (langgraph-checkpoint-sqlite).")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error running chat: {e}")
+        sys.exit(1)
+    finally:
+        if "original_argv" in locals():
+            sys.argv = original_argv
+    sys.exit(0)
+
+
 def route_create_dm_molecule() -> NoReturn:
     """Route to dm_molecule unified molecular mappings creation."""
     try:
@@ -349,6 +373,8 @@ def main() -> NoReturn:
     # Route commands to their handlers
     if command == "setup_postgres":
         route_setup_postgres()
+    elif command == "chat":
+        route_chat()
     elif command == "ingest":
         route_ingest_command()
     elif command == "extract-schema":

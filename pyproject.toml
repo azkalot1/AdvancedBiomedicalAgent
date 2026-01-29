@@ -19,6 +19,7 @@ dependencies = [
   "langchain_google_genai",
   "langchain_community",
   "langgraph",
+  "langgraph-checkpoint-sqlite",
   # Database
   "psycopg2-binary",  # PostgreSQL adapter
   "asyncpg",          # Async PostgreSQL adapter
