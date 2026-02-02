@@ -39,8 +39,7 @@ class CrossDatabaseLookupInput(BaseModel):
     @classmethod
     def strip_identifier(cls, v):
         if isinstance(v, str):
-            v = v.strip()
-            return v if v else None
+            return v.strip()
         return v
 
 

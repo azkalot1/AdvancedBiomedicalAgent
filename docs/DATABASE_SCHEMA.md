@@ -217,13 +217,14 @@ The database is organized into several logical layers:
 ---
 
 #### `dm_molecule_concept` (Level 1: Drug Concepts)
-**Purpose:** Groups all forms of the same drug (therapeutic equivalence level). Represents the "drug" regardless of salt form or stereochemistry.
+**Purpose:** Groups all forms of the same drug (therapeutic equivalence level). Represents the "drug" regardless of salt form or stereochemistry. Concepts may be small-molecule (with dm_molecule rows) or biotherapeutic (with dm_biotherapeutic rows; no dm_molecule).
 
 **Data Stored:**
-- Connectivity-only InChI key (parent_inchi_key_14) - first 14 chars, no stereo, no salts
+- Connectivity-only InChI key (parent_inchi_key_14) - first 14 chars, no stereo, no salts; biotherapeutics use values like `BIO:<molregno>`
 - Representative canonical parent structure (parent_smiles)
 - Preferred drug name (preferred_name)
 - External identifiers (rxnorm_cui, drugbank_id, unii)
+- Biotherapeutic flags: is_biotherapeutic (boolean), biotherapeutic_type (e.g. mAb, Antibody, ADC, Peptide, Protein)
 - Metadata on variants (has_stereo_variants, has_salt_forms, n_forms)
 - Source tracking (primary_source, sources array)
 - Timestamps (created_at, updated_at)
@@ -334,6 +335,60 @@ The database is organized into several logical layers:
 **Relationships:**
 - bindingdb_molecules → dm_molecule (via inchi_key)
 - bindingdb_activities links molecules to targets (N:N)
+
+---
+
+### Biotherapeutics (Antibodies/Biologics)
+
+Biotherapeutic concepts share the same concept level as small molecules (dm_molecule_concept) but have no dm_molecule rows; they use parent_inchi_key_14 like `BIO:<molregno>` and are linked via dm_biotherapeutic and dm_biotherapeutic_synonyms.
+
+#### `dm_biotherapeutic`
+**Purpose:** Biotherapeutic entities (antibodies, peptides, proteins, oligonucleotides) from ChEMBL. One row per biotherapeutic; links to a drug concept.
+
+**Data Stored:**
+- Primary key (bio_id) and concept link (concept_id → dm_molecule_concept)
+- ChEMBL identifiers (molregno UNIQUE, chembl_id)
+- Names and description (pref_name, description)
+- Classification (molecule_type, biotherapeutic_type)
+- biotherapeutic_type values: mAb, Antibody, ADC, bispecific, Peptide, Oligonucleotide, Protein (or NULL)
+- HELM notation (helm_notation), organism, sources array
+
+**Key Columns:** bio_id (PRIMARY), concept_id (FOREIGN KEY → dm_molecule_concept), molregno (UNIQUE)
+
+**Indexes:** concept_id, chembl_id, pref_name, trigram on pref_name
+
+**Relationship:** concept_id → dm_molecule_concept (same concept level as small molecules)
+
+---
+
+#### `dm_biotherapeutic_component`
+**Purpose:** Sequence components of biotherapeutics (e.g. heavy/light chains, domains). Used for sequence-based search and target mapping.
+
+**Data Stored:**
+- Link to biotherapeutic (bio_id → dm_biotherapeutic)
+- Source component id, component_type, description
+- sequence, sequence_length, organism, tax_id
+- uniprot_accession, sequence_md5 (for motif/target lookup)
+
+**Key Columns:** component_id (PRIMARY), bio_id (FOREIGN KEY → dm_biotherapeutic), UNIQUE(bio_id, source_component_id)
+
+**Indexes:** bio_id, uniprot_accession, sequence_md5
+
+**Relationship:** Many components per biotherapeutic (N:1)
+
+---
+
+#### `dm_biotherapeutic_synonyms`
+**Purpose:** Name lookup for biotherapeutics (trial intervention matching, search). Used with dm_molecule_synonyms when building map_ctgov_molecules so interventions can match either small molecules or biologics.
+
+**Data Stored:**
+- bio_id, concept_id, synonym, synonym_lower (generated), syn_type, source
+
+**Key Columns:** id (PRIMARY), UNIQUE(bio_id, synonym)
+
+**Indexes:** synonym_lower, trigram on synonym_lower, concept_id, bio_id
+
+**Relationship:** Many synonyms per biotherapeutic; concept_id links to same dm_molecule_concept used by map_ctgov_molecules.
 
 ---
 
@@ -481,22 +536,17 @@ The database is organized into several logical layers:
 ### Clinical Trial to Molecular Mappings
 
 #### `map_ctgov_molecules`
-**Purpose:** Links clinical trials to specific molecules via intervention names
+**Purpose:** Links clinical trials to specific molecules or biotherapeutic concepts via intervention names. Supports both small molecules (with mol_id) and biologics (concept only).
 
 **Data Stored:**
 - Trial reference (nct_id)
 - Intervention reference (intervention_id → ctgov_interventions)
-- Molecule reference (mol_id → dm_molecule)
-- Concept reference (concept_id → dm_molecule_concept)
-- Stereo reference (stereo_id → dm_molecule_stereo)
-- Original intervention name (intervention_name)
-- Matched synonym (matched_synonym) - the synonym that matched
-- Match type (EXACT, FUZZY, SALT_STRIPPED, COMBO_PART, SYNONYM)
-- Confidence score (0.0-1.0)
-- Match method (EXACT_NAME, SYNONYM_MATCH, FUZZY_MATCH)
+- Molecule reference (mol_id → dm_molecule); **mol_id may be NULL** when the intervention matched only via a biotherapeutic concept (dm_biotherapeutic_synonyms), i.e. no small-molecule structure
+- Concept reference (concept_id → dm_molecule_concept) — always set when a match is found (small molecule or biotherapeutic)
+- Match name (match_name), match type (EXACT, FUZZY, SALT_STRIPPED, COMBO_PART, SYNONYM), confidence score (0.0-1.0)
 - Timestamps (created_at)
 
-**Key Columns:** id (PRIMARY), intervention_id, mol_id (UNIQUE combination)
+**Key Columns:** id (PRIMARY), intervention_id, mol_id (UNIQUE(intervention_id, mol_id); mol_id nullable for biotherapeutic-only matches)
 
 **Indexes:**
 - `idx_map_ctgov_molecules_nct_id` - Trial lookup
@@ -506,17 +556,16 @@ The database is organized into several logical layers:
 - `idx_map_ctgov_molecules_confidence` - Confidence filtering
 
 **Relationships:**
-- Connects ctgov_interventions to dm_molecule
-- Connects trials to drug concepts
-- Links to stereo forms for precise matching
+- Connects ctgov_interventions to dm_molecule (when mol_id is set) or to dm_molecule_concept only (when mol_id is NULL, biotherapeutic)
+- Connects trials to drug concepts (small molecule or biotherapeutic)
 
-**Purpose:** Enable queries like "What trials use drug X?" or "What drugs are in trial Y?"
+**Purpose:** Enable queries like "What trials use drug X?" or "What drugs are in trial Y?" (including biologics when matched via dm_biotherapeutic_synonyms)
 
 **Matching Strategy:**
-1. Exact match on preferred name
-2. Exact match on synonyms (dm_molecule_synonyms)
-3. Fuzzy match with trigram similarity (threshold 0.6)
-4. Salt-stripped matching (remove HCl, sodium, etc.)
+1. Exact match on preferred name (dm_molecule_synonyms or dm_biotherapeutic_synonyms)
+2. Exact match on synonyms (dm_molecule_synonyms for small molecules)
+3. Fuzzy match with trigram similarity (threshold 0.6) over dm_molecule_synonyms and dm_biotherapeutic_synonyms (fuzzy matches for biologics yield concept_id with mol_id NULL)
+4. Salt-stripped matching (remove HCl, sodium, etc.) for small molecules
 5. Combination drug parsing (e.g., "Drug A + Drug B")
 
 ---
@@ -596,27 +645,24 @@ The database is organized into several logical layers:
 
 ```
 Drug Concept (dm_molecule_concept)
-├── parent_inchi_key_14 (connectivity only, no stereo, no salts)
-├── preferred_name (e.g., "atorvastatin")
+├── parent_inchi_key_14 (connectivity only, or BIO:<molregno> for biotherapeutics)
+├── preferred_name (e.g., "atorvastatin" or "pembrolizumab")
+├── is_biotherapeutic, biotherapeutic_type (for biologics)
 │
-├── Stereo Forms (dm_molecule_stereo)
-│   ├── parent_stereo_inchi_key (with stereo, no salts)
-│   ├── stereo_type (ACHIRAL, DEFINED, RACEMIC, etc.)
-│   │
-│   └── Specific Molecules (dm_molecule)
-│       ├── inchi_key (full, with salts)
-│       ├── canonical_smiles
-│       ├── is_salt, salt_form
-│       ├── Synonyms (dm_molecule_synonyms)
-│       ├── Activities (dm_compound_target_activity)
-│       ├── Trial Mappings (map_ctgov_molecules)
-│       └── Product Mappings (map_product_molecules)
+├── SMALL-MOLECULE BRANCH (when concept has dm_molecule rows):
+│   ├── Stereo Forms (dm_molecule_stereo)
+│   │   └── Specific Molecules (dm_molecule)
+│   │       ├── Synonyms (dm_molecule_synonyms)
+│   │       ├── Activities (dm_compound_target_activity)
+│   │       ├── Trial Mappings (map_ctgov_molecules, mol_id set)
+│   │       └── Product Mappings (map_product_molecules)
+│   └── Cross-db: chembl_id, drugcentral_id, bindingdb_monomer_id, pubchem_cid
 │
-└── Cross-db Links:
-    ├── chembl_id → ChEMBL molecule_dictionary
-    ├── drugcentral_id → drugcentral_drugs
-    ├── bindingdb_monomer_id → bindingdb_molecules
-    └── pubchem_cid → PubChem (external)
+└── BIOTHERAPEUTIC BRANCH (when concept has dm_biotherapeutic rows, no dm_molecule):
+    ├── dm_biotherapeutic (bio_id, chembl_id, biotherapeutic_type)
+    ├── dm_biotherapeutic_component (sequences, uniprot_accession)
+    ├── dm_biotherapeutic_synonyms (name lookup)
+    └── map_ctgov_molecules (concept_id set, mol_id NULL)
 ```
 
 ### 3-Level Molecular Hierarchy Example
@@ -683,6 +729,20 @@ dm_molecule (specific form - Level 3)
     ├── mol (RDKit mol object)
     ├── mfp2 (Morgan fingerprint, radius 2)
     └── ffp2 (Feature fingerprint)
+```
+
+### Biotherapeutic vs small-molecule path to trials
+
+Both small molecules and biotherapeutics attach to the same concept layer and feed into `map_ctgov_molecules` (concept_id always set; mol_id set for small molecules, NULL for biotherapeutic-only matches).
+
+```
+dm_molecule_concept (Level 1)
+        │
+        ├──► dm_molecule ──► dm_molecule_synonyms ──┐
+        │                                          │
+        └──► dm_biotherapeutic ──► dm_biotherapeutic_component   map_ctgov_molecules
+                 │                dm_biotherapeutic_synonyms ──┘
+                 └──────────────────────────────────────────────► (concept_id; mol_id nullable)
 ```
 
 ### Product/Label Relationships

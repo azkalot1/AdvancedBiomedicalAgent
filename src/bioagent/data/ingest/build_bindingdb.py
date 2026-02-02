@@ -30,7 +30,10 @@ except ImportError:
     from config import DatabaseConfig, get_connection
 
 # BindingDB download URL
-BINDINGDB_TSV_URL = "https://www.bindingdb.org/rwd/bind/downloads/BindingDB_All_202510_tsv.zip"
+BINDINGDB_TSV_URL = "https://www.bindingdb.org/rwd/bind/downloads/BindingDB_All_202602_tsv.zip"
+
+# Infer download zip filename from URL (e.g. .../BindingDB_All_202602_tsv.zip)
+BINDINGDB_ZIP_NAME = Path(BINDINGDB_TSV_URL).name
 
 
 def _download_tsv(dest: Path) -> Path:
@@ -852,8 +855,8 @@ def ingest_bindingdb_full(config: DatabaseConfig, raw_dir: Path, limit: int | No
     
     # Create bindingdb subdirectory in raw_dir (following OpenFDA/CTGov pattern)
     bindingdb_dir = Path(raw_dir) / "bindingdb"
-    zip_path = bindingdb_dir / "BindingDB_All_202510_tsv.zip"
-    tsv_path = bindingdb_dir / "BindingDB_All.tsv"
+    zip_path = bindingdb_dir / BINDINGDB_ZIP_NAME
+    tsv_path = bindingdb_dir / "BindingDB_All.tsv"  # name used inside the zip
     
     # Step 1: Download (if needed)
     if not zip_path.exists():

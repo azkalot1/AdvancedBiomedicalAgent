@@ -45,7 +45,9 @@ dependencies = [
   # Environment and data
   "python-dotenv",
   # printing
-  "rich"
+  "rich",
+  # Chemistry
+  "rdkit"
 ]
 
 [project.scripts]
@@ -61,21 +63,6 @@ dev = [
   "pytest",
   "pytest-cov",
   "ipykernel",
-]
-
-# Optional dependencies for advanced features
-chem = [
-  "rdkit",  # Chemistry toolkit for molecular property computation
-]
-
-mcp = [
-  "httpx",    # Async HTTP client for MCP services
-  "asyncpg"   # for tools
-]
-
-all = [
-  "rdkit",
-  "httpx",
 ]
 
 
