@@ -232,9 +232,18 @@ class DailyMedAndOpenFDAInput(BaseModel):
         )
         is_get_all_info = self.drug_names and self.fetch_all_sections
         is_global_keyword_search = self.keyword_query and not self.drug_names and not self.section_queries
-        is_advanced_label_search = (self.keyword_query or self.section_queries) and not self.fetch_all_sections
+        # Pattern (4): drug_names and/or keyword_query with section_queries (section_queries alone is invalid)
+        is_advanced_label_search = (
+            (self.drug_names or self.keyword_query) and self.section_queries and not self.fetch_all_sections
+        )
         if not (is_property_lookup or is_get_all_info or is_global_keyword_search or is_advanced_label_search):
-            raise ValueError("Invalid search combination. Please consult the tool's documentation for valid patterns.")
+            raise ValueError(
+                "Invalid search combination. Valid patterns: "
+                "(1) drug_names only; "
+                "(2) drug_names + fetch_all_sections=True; "
+                "(3) keyword_query only; "
+                "(4) drug_names and/or keyword_query with section_queries (no fetch_all_sections)."
+            )
         return self
 
 

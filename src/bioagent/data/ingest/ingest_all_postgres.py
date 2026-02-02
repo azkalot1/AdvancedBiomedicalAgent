@@ -40,6 +40,7 @@ try:
         verify_table as verify_enriched_search_table,
         test_search as test_enriched_search,
     )
+    from .generate_search import create_full_text_search_indexes_sync
     from .config import (
         DEFAULT_CONFIG,
         DatabaseConfig,
@@ -68,6 +69,7 @@ except ImportError:
         verify_table as verify_enriched_search_table,
         test_search as test_enriched_search,
     )
+    from generate_search import create_full_text_search_indexes_sync
     from config import (
         DEFAULT_CONFIG,
         DatabaseConfig,
@@ -78,6 +80,15 @@ except ImportError:
         show_database_info,
         vacuum_database,
     )
+
+
+def _get_repo_root() -> Path:
+    """Return the repository root (directory containing pyproject.toml). Used for default raw_dir."""
+    path = Path(__file__).resolve()
+    for parent in path.parents:
+        if (parent / "pyproject.toml").exists():
+            return parent
+    return path.parents[3]  # fallback: src/bioagent/data/ingest -> repo root
 
 
 def run_drugcentral_ingestion(config: DatabaseConfig, raw_dir: Path) -> bool:
@@ -644,6 +655,7 @@ Examples:
   %(prog)s --ctgov-populate-enriched-search # Explicitly enable enriched search (enabled by default)
   %(prog)s --ctgov-enriched-search-only     # Only populate enriched search table (standalone)
   %(prog)s --ctgov-enriched-search-batch-size 2000  # Batch size for enriched search
+  %(prog)s --generate-search                # Only create full-text indexes on raw CT.gov tables (standalone)
   %(prog)s --reset --force --vacuum         # Complete reset: drop all, reimport, optimize
   %(prog)s --dump-db backup.sql             # Create database dump
   %(prog)s --restore-db backup.sql          # Restore database from dump
@@ -667,6 +679,7 @@ Examples:
     parser.add_argument("--skip-ctgov-enriched-search", action="store_true", help="Skip CT.gov enriched search table creation (disabled by default)")
     parser.add_argument("--ctgov-enriched-search-batch-size", type=int, default=1000, help="Batch size for enriched search table population (default: 1000)")
     parser.add_argument("--ctgov-enriched-search-only", action="store_true", help="Only populate CT.gov enriched search table (requires prior CT.gov ingestion)")
+    parser.add_argument("--generate-search", action="store_true", help="Only create full-text search indexes on raw CT.gov tables (tsvector + GIN, requires prior CT.gov ingestion)")
     parser.add_argument("--bindingdb-all-organisms", action="store_true", help="Include all organisms in BindingDB (default: human only)")
     parser.add_argument("--bindingdb-batch-size", type=int, default=10000, help="Batch size for BindingDB processing (default: 10000)")
     parser.add_argument("--bindingdb-force-recreate", action="store_true", help="Force recreate BindingDB tables (WARNING: deletes existing data)")
@@ -675,7 +688,12 @@ Examples:
     parser.add_argument("--openfda-use-local-files", action="store_true", help="Use existing local files in raw_dir/openfda (skip download)")
     parser.add_argument("--n-max", type=int, help="Max entries to process")
     parser.add_argument("--vacuum", action="store_true", help="Run VACUUM after ingestion")
-    parser.add_argument("--raw-dir", type=Path, help="Raw directory", default=Path("./raw"))
+    parser.add_argument(
+        "--raw-dir",
+        type=Path,
+        default=None,
+        help="Raw data directory (default: <repo_root>/raw, i.e. relative to project root)",
+    )
     parser.add_argument("--get-db-info", action="store_true", help="Show database information and sample data")
     parser.add_argument("--sample-size", type=int, default=3, help="Number of sample rows to show per table (default: 3)")
     parser.add_argument("--tables", action="store_true", help="List all tables in the database")
@@ -793,6 +811,18 @@ Examples:
             sys.exit(1)
         return
 
+    # Handle --generate-search command (standalone)
+    if args.generate_search:
+        print("🔍 Full-Text Search Indexes on Raw CT.gov Tables (Standalone)")
+        print("=" * 50)
+        try:
+            create_full_text_search_indexes_sync(config)
+            print("\n🎉 Full-text search indexes created successfully!")
+        except Exception as e:
+            print(f"\n❌ Full-text search index creation failed: {e}")
+            sys.exit(1)
+        return
+
     # Show initial database info
     print("\n📊 Initial Database State:")
     show_database_info(config)
@@ -809,7 +839,9 @@ Examples:
     # Track results
     results = {}
     total_start_time = time.time()
-    raw_dir = Path(args.raw_dir)
+    # Default raw_dir to repo_root/raw so it's predictable regardless of cwd
+    raw_dir = (args.raw_dir if args.raw_dir is not None else _get_repo_root() / "raw")
+    raw_dir = Path(raw_dir).resolve()
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. OpenFDA (normalized structure) - foundation for other data

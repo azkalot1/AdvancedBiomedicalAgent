@@ -6,85 +6,26 @@ Biomedical research agent that integrates OpenFDA, DailyMed, ClinicalTrials.gov,
 
 **Prerequisites:** PostgreSQL 14+, Python 3.12+, ~50 GB disk, 8+ GB RAM for full ingestion.
 
-```bash
-git clone <repository-url>
-cd AdvancedBiomedicalAgent
-pip install -e .
-# Optional: pip install -e ".[chem]"  # RDKit; pip install -e ".[dev]"  # dev
-```
+### 1. Install PostgreSQL
 
-**Database:** See [Setup Guide](docs/SETUP_GUIDE.md).
+- **Ubuntu/Debian:** `sudo apt-get install postgresql postgresql-contrib`
+- **macOS:** `brew install postgresql`
+- **Windows:** [Download from postgresql.org](https://www.postgresql.org/download/)
 
-```bash
-biomedagent-db setup-db
-biomedagent-db install-extensions
-biomedagent-db ingest   # full ingestion; see docs/README_POPULATE.md for options
-```
-
-## Chat (recommended)
-
-Terminal chat with the agent (LangGraph + SQLite checkpoints, per-thread research outputs):
+### 2. After that
 
 ```bash
-export OPENROUTER_API_KEY=...   # or use .env; or --provider openai with OPENAI_API_KEY
-biomedagent-db chat
+pip install -e ./
+biomedagent-db verify-deps
+biomedagent-db setup_postgres
+biomedagent-db ingest
+biomedagent-db ingest --ctgov-rag-corpus-only
+biomedagent-db ingest --ctgov-rag-keys-only
+biomedagent-db ingest --generate-search
 ```
 
-**Example session:**
+**Data available.** The database unifies clinical trials (ClinicalTrials.gov), molecular structures and biotherapeutics (ChEMBL, DrugCentral, BindingDB), biological targets, drug labels (OpenFDA, DailyMed), and regulatory data (Orange Book), with mappings from trials and products to molecules. Full schema: [docs/DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md).
 
-```
-Biomedical Agent — terminal chat
-Commands: /new, /thread [id], /list, /history, /quit
-Thread: <uuid>
+**Tools available.** Retrieval tools cover clinical trial search, drug labels, molecule–trial connectivity, adverse events, outcomes, Orange Book, cross-database lookup, biotherapeutic sequence search, and target/drug pharmacology; agent tools wrap these with LLM-friendly formatting. Full reference: [docs/tools.md](docs/tools.md).
 
-You> What phase 3 trials are recruiting for NSCLC and pembrolizumab?
-Agent> [uses search_clinical_trials, summarizes] ...
-  [Refs: search_clinical_trials_abc123]
-
-You> /list
-  **Stored Research Outputs (current thread):**
-  - search_clinical_trials_abc123 (12,340 chars)
-  Use retrieve_full_output(ref_id) in a message to fetch full content.
-
-You> /quit
-Bye.
-```
-
-**Chat options:** `biomedagent-db chat --help` (e.g. `--thread-id`, `--checkpoint-db`, `--model`, `--provider`, `--debug`).
-
-## Using tools in code
-
-```python
-from bioagent.agent.tools import get_summarized_tools
-from bioagent.agent import get_chat_model
-
-llm = get_chat_model("google/gemini-2.5-flash", "openrouter", {"temperature": 0.5})
-tools = get_summarized_tools(llm, session_id="my-session")
-# Use tools with your agent (see docs/tools.md)
-```
-
-## Documentation
-
-| Doc | Description |
-|-----|-------------|
-| [Setup Guide](docs/SETUP_GUIDE.md) | PostgreSQL setup, extensions, troubleshooting |
-| [Data Population](docs/README_POPULATE.md) | Ingestion and source options |
-| [Database Schema](docs/DATABASE_SCHEMA.md) | Table layout |
-| [Tools](docs/tools.md) | Retrieval vs agent tools, API reference |
-| [Molecular Mapping](docs/MOLECULAR_MAPPING_GUIDE.md) | Molecule/target mappings |
-
-## CLI summary
-
-```bash
-biomedagent-db setup-db              # Create DB
-biomedagent-db install-extensions    # pgvector, RDKit
-biomedagent-db verify-deps          # Check dependencies
-biomedagent-db ingest [--skip-*]     # Ingest data
-biomedagent-db chat [options]        # Chat REPL
-biomedagent-db vacuum               # Optimize DB
-biomedagent-db stats                 # DB statistics
-```
-
-## License
-
-See [LICENSE](LICENSE). For schema, tool development, and ingestion details, see the docs above.
+For pipeline order and script roles, see [docs/INGESTION.md](docs/INGESTION.md).

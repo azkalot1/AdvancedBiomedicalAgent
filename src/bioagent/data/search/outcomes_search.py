@@ -344,7 +344,7 @@ async def outcomes_search_async(
         return OutcomesSearchOutput(
             status="invalid_input",
             mode=search_input.mode,
-            error="Unsupported mode",
+            error="Unsupported mode. Supported: outcomes_for_trial, trials_with_outcome, efficacy_comparison",
             query_summary="invalid mode",
         )
     except Exception as exc:

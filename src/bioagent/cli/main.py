@@ -16,17 +16,11 @@ def show_help() -> None:
     print()
     print("Database Setup Commands:")
     print("  setup_postgres           - Run full PostgreSQL setup")
-    print("  install-pgvector         - Install pgvector extension (requires sudo)")
-    print("  create-vector-ext        - Create vector extension in database (requires sudo)")
-    print("  install-rdkit            - Install RDKit extension (requires sudo)")
-    print("  create-rdkit-ext         - Create RDKit extension in database (requires sudo)")
     print("  info                     - Show database information")
     print("  reset                    - Reset database (with confirmation)")
     print("  reset --force            - Reset database (no confirmation)")
     print("  vacuum                   - Vacuum database")
     print("  tables                   - List all tables")
-    print("  create-schema            - Create public schema if missing")
-    print("  fix-permissions          - Fix user permissions on public schema")
     print("  verify-deps              - Verify Python dependencies are installed")
     print()
     print("Data Ingestion Commands:")
@@ -58,7 +52,7 @@ def show_help() -> None:
     print()
     print("  General Options:")
     print("  ingest --n-max 1000      - Max entries to process per source")
-    print("  ingest --raw-dir ./data  - Directory for raw data files (default: ./raw)")
+    print("  ingest --raw-dir ./data  - Directory for raw data files (default: <repo_root>/raw)")
     print()
     print("  OpenFDA Options:")
     print("  ingest --openfda-files 10 - Max OpenFDA files to process (default: all)")
@@ -73,6 +67,7 @@ def show_help() -> None:
     print("  ingest --ctgov-populate-enriched-search - Explicitly enable enriched search (enabled by default)")
     print("  ingest --ctgov-enriched-search-batch-size 2000 - Batch size for enriched search (default: 1000)")
     print("  ingest --ctgov-enriched-search-only - Only populate enriched search table (standalone)")
+    print("  ingest --generate-search - Only create full-text indexes on raw CT.gov tables (standalone)")
     print()
     print("  BindingDB Options:")
     print("  ingest --bindingdb-all-organisms - Include all organisms (default: human only)")
@@ -81,21 +76,6 @@ def show_help() -> None:
     print()
     print("  ChEMBL Options:")
     print("  ingest --chembl-force-recreate - Force recreate ChEMBL tables")
-    print()
-    print("Search Index Commands:")
-    print("  generate-search          - Create full-text search indexes (tsvector + GIN)")
-    print("  generate-ctgov-search    - Create enriched CT.gov search table")
-    print("    create                 - Create table and indexes")
-    print("    populate [batch_size]  - Populate data (default batch: 1000)")
-    print("    refresh [batch_size]   - Refresh data (truncate + reload)")
-    print("    verify                 - Verify table state")
-    print("    test                   - Test search queries")
-    print("    drop                   - Drop table and indexes")
-    print("    full [batch_size]      - Create + populate + verify + test")
-    print()
-    print("Molecular Mapping Commands:")
-    print("  create-dm-target         - Create canonical target mappings (ChEMBL + BindingDB)")
-    print("  create-dm-molecule       - Create unified molecular mappings (all sources)")
     print()
     print()
     print("Usage:")
@@ -124,12 +104,8 @@ def show_help() -> None:
     print("  biomedagent-db ingest --vacuum")
     print("  biomedagent-db ingest --dump-db backup.sql")
     print("  biomedagent-db ingest --restore-db backup.sql")
-    print("  biomedagent-db generate-search")
-    print("  biomedagent-db generate-ctgov-search create")
-    print("  biomedagent-db generate-ctgov-search populate 2000")
-    print("  biomedagent-db generate-ctgov-search full")
-    print("  biomedagent-db create-dm-target")
-    print("  biomedagent-db create-dm-molecule")
+    print("  biomedagent-db ingest --generate-search   # full-text indexes on raw CT.gov tables")
+    print("  biomedagent-db ingest --ctgov-enriched-search-only   # standalone enriched search table")
     print("  biomedagent-db extract-schema --output schema.txt --sample-rows 5")
 
 
@@ -171,23 +147,6 @@ def route_ingest_command() -> NoReturn:
     sys.exit(0)
 
 
-def route_generate_search() -> NoReturn:
-    """Route to full-text search index generation."""
-    try:
-        from bioagent.data.ingest.generate_search import create_full_text_search_indexes_sync, DEFAULT_CONFIG
-        print("🔍 Starting full-text search index generation...")
-        create_full_text_search_indexes_sync(DEFAULT_CONFIG)
-        print("✅ Full-text search indexes created successfully!")
-    except ImportError as e:
-        print(f"❌ Error importing generate_search: {e}")
-        print("Make sure all dependencies are installed with: pip install -e .")
-        sys.exit(1)
-    except Exception as e:
-        print(f"❌ Error generating search indexes: {e}")
-        sys.exit(1)
-    sys.exit(0)
-
-
 def route_extract_schema() -> NoReturn:
     """Route to schema and examples extraction utility."""
     try:
@@ -210,65 +169,6 @@ def route_extract_schema() -> NoReturn:
             sys.argv = original_argv
 
 
-def route_generate_ctgov_search() -> NoReturn:
-    """Route to CT.gov enriched search table generation."""
-    try:
-        from bioagent.data.ingest.generate_ctgov_enriched_search import main
-        # Preserve original argv while forwarding only subcommand args
-        original_argv = sys.argv.copy()
-        # Replace the script name so argparse help looks correct
-        sys.argv = ["generate_ctgov_enriched_search.py"] + sys.argv[2:]
-        main()
-    except ImportError as e:
-        print(f"❌ Error importing generate_ctgov_enriched_search: {e}")
-        print("Make sure all dependencies are installed with: pip install -e .")
-        sys.exit(1)
-    except Exception as e:
-        print(f"❌ Error running CT.gov enriched search generation: {e}")
-        sys.exit(1)
-    finally:
-        if "original_argv" in locals():
-            sys.argv = original_argv
-    sys.exit(0)
-
-
-
-
-
-
-
-def route_create_dm_target() -> NoReturn:
-    """Route to dm_target canonical target mapping creation."""
-    try:
-        from bioagent.data.ingest.create_and_populate_dm_target import main
-        print("🎯 Starting canonical target mapping creation...")
-        main()
-        print("✅ Canonical target mapping completed successfully!")
-    except ImportError as e:
-        print(f"❌ Error importing create_and_populate_dm_target: {e}")
-        print("Make sure all dependencies are installed with: pip install -e .")
-        sys.exit(1)
-    except Exception as e:
-        print(f"❌ Error creating canonical target mapping: {e}")
-        sys.exit(1)
-    sys.exit(0)
-
-
-def route_create_dm_molecule() -> NoReturn:
-    """Route to dm_molecule unified molecular mappings creation."""
-    try:
-        from bioagent.data.ingest.build_molecular_mappings import main
-        print("🧬 Starting unified molecular mappings creation...")
-        main()
-        print("✅ Unified molecular mappings completed successfully!")
-    except ImportError as e:
-        print(f"❌ Error importing build_molecular_mappings: {e}")
-        print("Make sure all dependencies are installed with: pip install -e .")
-        sys.exit(1)
-    except Exception as e:
-        print(f"❌ Error creating unified molecular mappings: {e}")
-        sys.exit(1)
-    sys.exit(0)
 
 
 def route_db_command(command: str, args: list[str]) -> NoReturn:
@@ -280,17 +180,9 @@ def route_db_command(command: str, args: list[str]) -> NoReturn:
             reset_database,
             vacuum_database,
             get_all_tables,
-            ensure_public_schema,
-            fix_user_permissions,
         )
-        from bioagent.data.ingest.setup_postgres import (
-            verify_python_dependencies,
-            install_pgvector_extension,
-            create_vector_extension_in_database,
-            install_rdkit_extension,
-            create_rdkit_extension_in_database,
-        )
-        
+        from bioagent.data.ingest.setup_postgres import verify_python_dependencies
+
         if command == "info":
             show_database_info(DEFAULT_CONFIG)
         elif command == "reset":
@@ -303,24 +195,8 @@ def route_db_command(command: str, args: list[str]) -> NoReturn:
             print(f"📋 Tables in {DEFAULT_CONFIG.database}:")
             for table in tables:
                 print(f"   - {table}")
-        elif command == "create-schema":
-            ensure_public_schema(DEFAULT_CONFIG)
-        elif command == "fix-permissions":
-            fix_user_permissions(DEFAULT_CONFIG)
         elif command == "verify-deps":
             success = verify_python_dependencies()
-            sys.exit(0 if success else 1)
-        elif command == "install-pgvector":
-            success = install_pgvector_extension()
-            sys.exit(0 if success else 1)
-        elif command == "create-vector-ext":
-            success = create_vector_extension_in_database()
-            sys.exit(0 if success else 1)
-        elif command == "install-rdkit":
-            success = install_rdkit_extension()
-            sys.exit(0 if success else 1)
-        elif command == "create-rdkit-ext":
-            success = create_rdkit_extension_in_database()
             sys.exit(0 if success else 1)
         else:
             print(f"❌ Unknown database command: {command}")
@@ -353,15 +229,7 @@ def main() -> NoReturn:
         route_ingest_command()
     elif command == "extract-schema":
         route_extract_schema()
-    elif command == "generate-search":
-        route_generate_search()
-    elif command == "generate-ctgov-search":
-        route_generate_ctgov_search()
-    elif command == "create-dm-target":
-        route_create_dm_target()
-    elif command == "create-dm-molecule":
-        route_create_dm_molecule()
-    elif command in ["info", "reset", "vacuum", "tables", "create-schema", "fix-permissions", "verify-deps", "install-pgvector", "create-vector-ext", "install-rdkit", "create-rdkit-ext"]:
+    elif command in ["info", "reset", "vacuum", "tables", "verify-deps"]:
         route_db_command(command, args)
     elif command in ["help", "--help", "-h"]:
         show_help()
