@@ -959,8 +959,10 @@ class ClinicalTrialsSearchInput(BaseModel):
                 result = TrialStatus.from_display(val)
                 if result:
                     return result
-                raise ValueError(f"Invalid status '{val}'")
-            raise ValueError(f"Cannot convert {type(val)} to TrialStatus")
+                allowed = ", ".join(s.display_name for s in TrialStatus)
+                raise ValueError(f"Invalid status '{val}'. Allowed: {allowed}")
+            allowed = ", ".join(s.display_name for s in TrialStatus)
+            raise ValueError(f"Cannot convert {type(val)} to TrialStatus. Allowed: {allowed}")
         if isinstance(v, (list, tuple)):
             return [to_enum(x) for x in v]
         return [to_enum(v)]
@@ -982,8 +984,10 @@ class ClinicalTrialsSearchInput(BaseModel):
                 result = TrialPhase.from_display(val)
                 if result:
                     return result
-                raise ValueError(f"Invalid phase '{val}'")
-            raise ValueError(f"Cannot convert {type(val)} to TrialPhase")
+                allowed = ", ".join(p.display_name for p in TrialPhase)
+                raise ValueError(f"Invalid phase '{val}'. Allowed: {allowed}")
+            allowed = ", ".join(p.display_name for p in TrialPhase)
+            raise ValueError(f"Cannot convert {type(val)} to TrialPhase. Allowed: {allowed}")
         if isinstance(v, (list, tuple)):
             return [to_enum(x) for x in v]
         return [to_enum(v)]
@@ -1002,8 +1006,10 @@ class ClinicalTrialsSearchInput(BaseModel):
                 result = StudyType.from_display(v)
                 if result:
                     return result
-                raise ValueError(f"Invalid study_type '{v}'")
-        raise ValueError(f"Cannot convert {type(v)} to StudyType")
+                allowed = ", ".join(s.display_name for s in StudyType)
+                raise ValueError(f"Invalid study_type '{v}'. Allowed: {allowed}")
+        allowed = ", ".join(s.display_name for s in StudyType)
+        raise ValueError(f"Cannot convert {type(v)} to StudyType. Allowed: {allowed}")
 
     @field_validator('intervention_type', mode='before')
     @classmethod
@@ -1020,8 +1026,10 @@ class ClinicalTrialsSearchInput(BaseModel):
                     result = InterventionType.from_display(val)
                     if result:
                         return result
-                    raise ValueError(f"Invalid intervention_type '{val}'")
-            raise ValueError(f"Cannot convert {type(val)} to InterventionType")
+                    allowed = ", ".join(i.display_name for i in InterventionType)
+                    raise ValueError(f"Invalid intervention_type '{val}'. Allowed: {allowed}")
+            allowed = ", ".join(i.display_name for i in InterventionType)
+            raise ValueError(f"Cannot convert {type(val)} to InterventionType. Allowed: {allowed}")
         if isinstance(v, (list, tuple)):
             return [to_enum(x) for x in v]
         return [to_enum(v)]

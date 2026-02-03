@@ -73,92 +73,6 @@ def get_connection(config: DatabaseConfig) -> psycopg2.extensions.connection:
     return psycopg2.connect(**config.get_psycopg2_params())
 
 
-def ensure_public_schema(config: DatabaseConfig) -> bool:
-    """
-    Ensure the public schema exists in the database.
-
-    Args:
-        config: Database configuration
-
-    Returns:
-        True if schema exists or was created successfully, False if failed
-    """
-    try:
-        with get_connection(config) as con:
-            with con.cursor() as cur:
-                # Check if public schema exists
-                cur.execute(
-                    """
-                    SELECT schema_name
-                    FROM information_schema.schemata
-                    WHERE schema_name = 'public'
-                    """
-                )
-
-                if cur.fetchone():
-                    print("✅ Public schema already exists")
-                    return True
-
-                # Create public schema
-                print("🔧 Creating public schema...")
-                cur.execute("CREATE SCHEMA public")
-                con.commit()
-
-                print("✅ Public schema created successfully")
-                return True
-
-    except Exception as e:
-        print(f"❌ Failed to create public schema: {e}")
-        return False
-
-
-def fix_user_permissions(config: DatabaseConfig) -> bool:
-    """
-    Fix user permissions for the public schema.
-    This function can be used to fix permission issues on existing databases.
-
-    Args:
-        config: Database configuration
-
-    Returns:
-        True if permissions were fixed successfully, False if failed
-    """
-    try:
-        print(f"🔧 Fixing permissions for user '{config.user}' on database '{config.database}'...")
-        
-        with get_connection(config) as con:
-            with con.cursor() as cur:
-                # Grant all privileges on public schema
-                cur.execute(f"GRANT ALL ON SCHEMA public TO {config.user}")
-                print("✅ Granted schema permissions")
-
-                # Grant privileges on all existing tables in public schema
-                cur.execute(f"GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {config.user}")
-                print("✅ Granted table permissions")
-
-                # Grant privileges on all existing sequences in public schema
-                cur.execute(f"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {config.user}")
-                print("✅ Granted sequence permissions")
-
-                # Grant default privileges for future tables and sequences
-                cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {config.user}")
-                cur.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO {config.user}")
-                print("✅ Set default privileges for future objects")
-
-                # Ensure user can create tables in public schema
-                cur.execute(f"GRANT CREATE ON SCHEMA public TO {config.user}")
-                print("✅ Granted CREATE permission on schema")
-
-                con.commit()
-
-        print("✅ All permissions fixed successfully!")
-        return True
-
-    except Exception as e:
-        print(f"❌ Failed to fix user permissions: {e}")
-        return False
-
-
 def get_all_tables(config: DatabaseConfig) -> list[str]:
     """Get list of all tables in the database (excluding system tables)."""
     with get_connection(config) as con:
@@ -365,7 +279,6 @@ if __name__ == "__main__":
         print("  python config.py reset --force - Reset database (no confirmation)")
         print("  python config.py vacuum        - Vacuum database")
         print("  python config.py tables        - List all tables")
-        print("  python config.py create-schema - Create public schema if missing")
         sys.exit(1)
 
     command = sys.argv[1].lower()
@@ -382,8 +295,6 @@ if __name__ == "__main__":
         print(f"📋 Tables in {DEFAULT_CONFIG.database}:")
         for table in tables:
             print(f"   - {table}")
-    elif command == "create-schema":
-        ensure_public_schema(DEFAULT_CONFIG)
     else:
         print(f"❌ Unknown command: {command}")
         sys.exit(1)

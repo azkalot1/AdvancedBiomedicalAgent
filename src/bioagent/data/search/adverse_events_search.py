@@ -94,10 +94,11 @@ class AdverseEventsSearchOutput(BaseModel):
     query_summary: str = ""
 
 
-def _severity_clause(severity: str) -> tuple[str, list[Any]]:
+def _severity_clause(severity: str, param_index: int = 1) -> tuple[str, list[Any]]:
+    """Return (SQL fragment, params). param_index is the placeholder number for the severity value."""
     if severity == "all":
         return "", []
-    return "AND LOWER(re.event_type) = $1", [severity.lower()]
+    return f"AND LOWER(re.event_type) = ${param_index}", [severity.lower()]
 
 
 async def _fetch_events_for_drug(
@@ -111,7 +112,8 @@ async def _fetch_events_for_drug(
     drug_norm = drug_name.lower()
     tsquery = _sanitize_tsquery(drug_name)
     params: list[Any] = [drug_norm, f"%{drug_name}%", tsquery]
-    severity_clause, severity_params = _severity_clause(severity)
+    idx = len(params) + 1
+    severity_clause, severity_params = _severity_clause(severity, idx)
     params.extend(severity_params)
 
     having_clause = ""
@@ -120,6 +122,8 @@ async def _fetch_events_for_drug(
         having_clause = f"HAVING SUM(re.subjects_affected) >= ${len(params)}"
 
     params.extend([limit, offset])
+    limit_idx = len(params) - 1
+    offset_idx = len(params)
     sql = f"""
         WITH matched_trials AS (
             SELECT nct_id
@@ -140,7 +144,7 @@ async def _fetch_events_for_drug(
         GROUP BY re.adverse_event_term, re.event_type
         {having_clause}
         ORDER BY subjects_affected DESC NULLS LAST, n_trials DESC
-        LIMIT ${len(params) - 1} OFFSET ${len(params)}
+        LIMIT ${limit_idx} OFFSET ${offset_idx}
     """
     return await async_config.execute_query(sql, *params)
 
@@ -153,9 +157,11 @@ async def _fetch_trials_with_event(
     offset: int,
 ) -> list[dict[str, Any]]:
     params: list[Any] = [f"%{event_term}%"]
-    severity_clause, severity_params = _severity_clause(severity)
+    severity_clause, severity_params = _severity_clause(severity, param_index=2)
     params.extend(severity_params)
     params.extend([limit, offset])
+    limit_idx = len(params) - 1
+    offset_idx = len(params)
     sql = f"""
         SELECT rs.nct_id, rs.brief_title, rs.phase, rs.overall_status, rs.interventions,
                re.adverse_event_term, re.event_type, re.subjects_affected, re.subjects_at_risk
@@ -164,7 +170,7 @@ async def _fetch_trials_with_event(
         WHERE re.adverse_event_term ILIKE $1
         {severity_clause}
         ORDER BY re.subjects_affected DESC NULLS LAST, rs.nct_id
-        LIMIT ${len(params) - 1} OFFSET ${len(params)}
+        LIMIT ${limit_idx} OFFSET ${offset_idx}
     """
     return await async_config.execute_query(sql, *params)
 
@@ -277,7 +283,7 @@ async def adverse_events_search_async(
         return AdverseEventsSearchOutput(
             status="invalid_input",
             mode=search_input.mode,
-            error="Unsupported mode",
+            error="Unsupported mode. Supported: events_for_drug, drugs_with_event, compare_safety",
             query_summary="invalid mode",
         )
     except Exception as exc:

@@ -7,6 +7,34 @@ This document provides a comprehensive overview of the tool architecture in the 
 
 ---
 
+## Table of Contents
+
+- [Architecture Overview](#architecture-overview)
+- [Part 1: Retrieval-Based Tools](#part-1-retrieval-based-tools-search)
+  - [1. Clinical Trials Search](#1-clinical-trials-search)
+  - [2. Drug Labels Search](#2-drug-labels-search)
+  - [3. Molecule-Trial Connectivity](#3-molecule-trial-connectivity)
+  - [4. Adverse Events Search](#4-adverse-events-search)
+  - [5. Outcomes Search](#5-outcomes-search)
+  - [6. Orange Book Search](#6-orange-book-search)
+  - [7. Cross-Database Lookup](#7-cross-database-lookup)
+  - [8. Biotherapeutic Sequence Search](#8-biotherapeutic-sequence-search)
+  - [9. Target/Drug Pharmacology Search](#9-targetdrug-pharmacology-search)
+- [Part 2: Agent-Based Tools](#part-2-agent-based-tools-tools)
+  - [Database Search Tools](#1-database-search-tools)
+  - [Target/Drug Pharmacology Tools](#2-targetdrug-pharmacology-tools)
+  - [Web Search Tools](#3-web-search-tools)
+  - [Thinking Tool](#4-thinking-tool)
+- [Tool Registration](#tool-registration)
+- [Input Normalization](#input-normalization)
+- [Output Summarization](#output-summarization)
+- [Error Handling](#error-handling)
+- [Best Practices](#best-practices)
+- [Tool Collections](#tool-collections)
+- [Quick reference (agent tools)](#quick-reference-agent-tools)
+
+---
+
 ## Architecture Overview
 
 ```
@@ -47,17 +75,25 @@ These are the **base search functions** that directly query the PostgreSQL datab
 - **No summarization**: Return complete results without truncation
 - **Input validation**: Use Pydantic for parameter validation
 
+### Error handling (retrieval tools)
+
+- **Invalid Literal/Enum values**: Passing an unsupported value for a Literal or Enum field (e.g. `mode`, `identifier_type`, `severity`, `outcome_type`, `biotherapeutic_type`) causes **ValidationError** at **input construction** when building the Pydantic model. Pydantic v2 error details typically include allowed values (e.g. "Input should be 'a' or 'b' or 'c'").
+- **Invalid clinical trial enums**: For `ClinicalTrialsSearchInput`, custom validators for `status`, `phase`, `study_type`, and `intervention_type` raise **ValueError** (wrapped in **ValidationError**). The message includes **"Allowed: ..."** with the list of allowed values (e.g. "Invalid status 'x'. Allowed: Completed, Recruiting, ...").
+- **Invalid search combination (DailyMed)**: `DailyMedAndOpenFDAInput` uses a model validator that raises **ValueError**; the message includes **"Valid patterns: ..."** with the four valid combinations (drug_names only; drug_names + fetch_all_sections=True; keyword_query only; drug_names and/or keyword_query with section_queries).
+- **Unsupported mode**: If a mode-based tool returns `status="invalid_input"` for an unsupported mode, the `error` message includes **"Supported: ..."** with the list of modes (e.g. outcomes: outcomes_for_trial, trials_with_outcome, efficacy_comparison).
+- **Missing required params for mode**: For tools with a `mode` and `validate_for_mode()` (molecule-trial, adverse events, outcomes, Orange Book, biotherapeutic, target search), if required parameters for the chosen mode are missing, the **async function does not raise**. It returns an output with `status="invalid_input"` and `error` describing what is missing (e.g. "'nct_id' is required for outcomes_for_trial").
+
 ### Available Retrieval Tools
 
 #### 1. Clinical Trials Search
 **File:** `clinical_trial_search.py`
 
-**Function:** `clinical_trials_search_async(config, input: ClinicalTrialsSearchInput) -> ClinicalTrialsSearchOutput`
+**Function:** `clinical_trials_search_async(db_config: DatabaseConfig, search_input: ClinicalTrialsSearchInput) -> ClinicalTrialsSearchOutput`
 
 **Purpose:** Search ClinicalTrials.gov data with flexible querying options.
 
 **Key Features:**
-- Multiple search strategies: combined, trigram, fulltext, exact
+- Multiple search strategies: combined, trigram, fulltext, exact (enum `SearchStrategy`: COMBINED, TRIGRAM, FULLTEXT, EXACT)
 - Rich filtering: phase, status, dates, enrollment, eligibility, geography
 - Supports pagination and sorting
 - Returns trial metadata, eligibility criteria, outcomes, adverse events
@@ -89,7 +125,7 @@ These are the **base search functions** that directly query the PostgreSQL datab
 #### 2. Drug Labels Search
 **File:** `openfda_and_dailymed_search.py`
 
-**Function:** `dailymed_and_openfda_search_async(config, input: DailyMedAndOpenFDAInput) -> DailyMedAndOpenFDASearchOutput`
+**Function:** `dailymed_and_openfda_search_async(db_config: DatabaseConfig, search_input: DailyMedAndOpenFDAInput) -> DailyMedAndOpenFDASearchOutput`
 
 **Purpose:** Search FDA drug labels from OpenFDA and DailyMed databases.
 
@@ -101,29 +137,32 @@ These are the **base search functions** that directly query the PostgreSQL datab
 
 **Input Model:** `DailyMedAndOpenFDAInput`
 - `drug_names`: List of drug names to search
-- `section_queries`: Semantic section names (e.g., "warnings", "adverse reactions")
-- `keyword_query`: Keywords to search within labels
+- `section_queries`: Section names to match (list of strings)
+- `keyword_query`: Keywords to search within labels (list of strings)
 - `fetch_all_sections`: Boolean to retrieve all sections
-- `result_limit`: Maximum number of results
+- `result_limit`: Maximum number of results (default: 10, max: 50)
+- Optional/tuning: `top_n_drugs`, `sections_per_query`, `aggressive_deduplication`
+- Valid combinations (model validator): drug_names only; drug_names + fetch_all_sections=True; keyword_query only; drug_names and/or keyword_query with section_queries
 
 **Output Model:** `DailyMedAndOpenFDASearchOutput`
 - `status`: "success", "error", "not_found"
-- `results`: List of `DrugLabelResult` objects
+- `results`: List of `DailyMedAndOpenFDASearchResult` objects
 - Each result contains:
   - `product_name`: Drug product name
-  - `properties`: Chemical properties (name, formula, SMILES)
-  - `sections`: List of matching label sections with text content
+  - `properties`: `DrugProperties` (smiles, formula, inchi_key, name)
+  - `sections`: List of `SearchResultItem` (section_name, text, source)
 
 **Data Sources:**
-- `dm_drug_labels` - DailyMed structured product labels
-- `openfda_drug_labels` - OpenFDA drug label data
+- `drugcentral_drugs` / `labels_meta` / section tables - DrugCentral labels
+- `dailymed_products` / `dailymed_sections` / `dailymed_section_names` - DailyMed structured product labels
+- DailyMed public SPL API for set IDs
 
 ---
 
 #### 3. Molecule-Trial Connectivity
 **File:** `molecule_trial_search.py`
 
-**Function:** `molecule_trial_search_async(config, input: MoleculeTrialSearchInput) -> MoleculeTrialSearchOutput`
+**Function:** `molecule_trial_search_async(db_config: DatabaseConfig, search_input: MoleculeTrialSearchInput) -> MoleculeTrialSearchOutput`
 
 **Purpose:** Search connections between molecules and clinical trials.
 
@@ -131,22 +170,26 @@ These are the **base search functions** that directly query the PostgreSQL datab
 - Find trials linked to a molecule (by name or InChIKey)
 - Find molecules associated with a condition
 - Find trials linked to a target gene
+- Structure-based: trials by SMILES/similarity or SMARTS/substructure
 
 **Input Model:** `MoleculeTrialSearchInput`
-- `mode`: "trials_by_molecule", "molecules_by_condition", "trials_by_target"
+- `mode`: "trials_by_molecule", "molecules_by_condition", "trials_by_target", "trials_by_structure", "trials_by_substructure"
 - `molecule_name`: Molecule name for lookup
 - `inchi_key`: InChIKey for precise molecule identification
 - `condition`: Condition name for molecule discovery
 - `target_gene`: Target gene symbol
-- `min_pchembl`: Potency threshold for target-linked mode
-- `phase`: Optional list of trial phases
-- `limit`, `offset`: Pagination
+- `smiles`, `smarts`: Structure input for trials_by_structure / trials_by_substructure
+- `similarity_threshold`: For trials_by_structure (default: 0.7, 0.0–1.0)
+- `min_pchembl`: Potency threshold (default: 6.0)
+- `phase`, `status`: Optional trial filters
+- `limit`, `offset`: Pagination (limit default: 50, max: 500)
 
 **Output Model:** `MoleculeTrialSearchOutput`
-- `status`: "success", "error", "invalid_input", "not_found"
+- `status`: "success", "error", "invalid_input", "not_found", "invalid_structure"
 - `mode`: The search mode used
 - `total_hits`: Total number of results
 - `hits`: List of matching results (trials or molecules)
+- `matched_molecules`, `structure_info`: For structure modes
 - `query_summary`: Human-readable query description
 
 **Data Sources:**
@@ -159,7 +202,7 @@ These are the **base search functions** that directly query the PostgreSQL datab
 #### 4. Adverse Events Search
 **File:** `adverse_events_search.py`
 
-**Function:** `adverse_events_search_async(config, input: AdverseEventsSearchInput) -> AdverseEventsSearchOutput`
+**Function:** `adverse_events_search_async(db_config: DatabaseConfig, search_input: AdverseEventsSearchInput) -> AdverseEventsSearchOutput`
 
 **Purpose:** Search adverse event data from ClinicalTrials.gov.
 
@@ -172,28 +215,28 @@ These are the **base search functions** that directly query the PostgreSQL datab
 - `mode`: "events_for_drug", "drugs_with_event", "compare_safety"
 - `drug_name`: Single drug name
 - `event_term`: Adverse event term to search
-- `drug_names`: List of drugs for comparison
-- `severity`: Filter by severity ("all", "serious", "non-serious")
+- `drug_names`: List of drugs for comparison (required for compare_safety, at least 2)
+- `severity`: Filter by severity. Allowed values: `"all"`, `"serious"`, `"other"` (non-serious)
 - `min_subjects_affected`: Minimum number of affected subjects
-- `limit`, `offset`: Pagination
+- `limit`, `offset`: Pagination (limit default: 50, max: 500)
 
 **Output Model:** `AdverseEventsSearchOutput`
 - `status`: "success", "error", "invalid_input", "not_found"
 - `mode`: The search mode used
 - `total_hits`: Total number of results
-- `hits`: List of adverse event results
+- `hits`: List of adverse event results (AdverseEventSummaryHit, AdverseEventTrialHit, or AdverseEventDrugComparison by mode)
 - `query_summary`: Human-readable query description
 
 **Data Sources:**
-- `ctgov_adverse_events` - Adverse event data from ClinicalTrials.gov
-- `map_ctgov_molecules` - Drug-trial mappings
+- `ctgov_reported_events` - Reported adverse event summaries
+- `rag_study_search` - Trial metadata and intervention matching
 
 ---
 
 #### 5. Outcomes Search
 **File:** `outcomes_search.py`
 
-**Function:** `outcomes_search_async(config, input: OutcomesSearchInput) -> OutcomesSearchOutput`
+**Function:** `outcomes_search_async(db_config: DatabaseConfig, search_input: OutcomesSearchInput) -> OutcomesSearchOutput`
 
 **Purpose:** Search clinical trial outcomes, measurements, and statistical analyses.
 
@@ -209,7 +252,7 @@ These are the **base search functions** that directly query the PostgreSQL datab
 - `drug_name`: Drug name for efficacy comparison
 - `outcome_type`: Filter by type ("primary", "secondary", "all")
 - `min_p_value`, `max_p_value`: Statistical significance filters
-- `limit`, `offset`: Pagination
+- `limit`, `offset`: Pagination (limit default: 50, max: 500)
 
 **Output Model:** `OutcomesSearchOutput`
 - `status`: "success", "error", "invalid_input", "not_found"
@@ -219,15 +262,17 @@ These are the **base search functions** that directly query the PostgreSQL datab
 - `query_summary`: Human-readable query description
 
 **Data Sources:**
-- `rag_study_search` - Trial metadata with embedded outcome JSON
-- `ctgov_outcomes` - Structured outcome data
+- `ctgov_outcomes` - Outcome definitions
+- `ctgov_outcome_measurements` - Measurement data
+- `ctgov_outcome_analyses` - Analysis and p-values
+- `rag_study_search` - Trial metadata
 
 ---
 
 #### 6. Orange Book Search
 **File:** `orange_book_search.py`
 
-**Function:** `orange_book_search_async(config, input: OrangeBookSearchInput) -> OrangeBookSearchOutput`
+**Function:** `orange_book_search_async(db_config: DatabaseConfig, search_input: OrangeBookSearchInput) -> OrangeBookSearchOutput`
 
 **Purpose:** Search FDA Orange Book for products, TE codes, patents, and exclusivity.
 
@@ -238,19 +283,19 @@ These are the **base search functions** that directly query the PostgreSQL datab
 - Lookup by NDA number
 
 **Input Model:** `OrangeBookSearchInput`
-- `mode`: "te_codes", "patents", "exclusivity", "generics"
+- `mode`: "te_codes", "patents", "generics", "exclusivity" (at least one of drug_name, ingredient, or nda_number required)
 - `drug_name`: Drug name to search
 - `ingredient`: Active ingredient name
 - `nda_number`: NDA application number
-- `include_patents`: Include patent information
-- `include_exclusivity`: Include exclusivity data
-- `limit`, `offset`: Pagination
+- `include_patents`: Include patent information (default: True)
+- `include_exclusivity`: Include exclusivity data (default: True)
+- `limit`, `offset`: Pagination (limit default: 50, max: 500)
 
 **Output Model:** `OrangeBookSearchOutput`
 - `status`: "success", "error", "invalid_input", "not_found"
 - `mode`: The search mode used
 - `total_hits`: Total number of results
-- `hits`: List of Orange Book entries with product, patent, and exclusivity data
+- `hits`: List of Orange Book entries (OrangeBookProductHit with patents/exclusivity)
 - `query_summary`: Human-readable query description
 
 **Data Sources:**
@@ -263,36 +308,36 @@ These are the **base search functions** that directly query the PostgreSQL datab
 #### 7. Cross-Database Lookup
 **File:** `cross_db_lookup.py`
 
-**Function:** `cross_database_lookup_async(config, input: CrossDatabaseLookupInput) -> CrossDatabaseLookupOutput`
+**Function:** `cross_database_lookup_async(db_config: DatabaseConfig, search_input: CrossDatabaseLookupInput) -> CrossDatabaseLookupOutput`
 
 **Purpose:** Resolve drug identifiers across multiple databases.
 
 **Key Features:**
 - Lookup by any identifier type (ChEMBL ID, InChIKey, drug name, etc.)
-- Auto-detect identifier type
+- Auto-detect identifier type when `identifier_type="auto"`
 - Return unified results from all databases
 
 **Input Model:** `CrossDatabaseLookupInput`
-- `identifier`: The identifier to resolve
-- `identifier_type`: "auto" (default) or specific type ("chembl_id", "inchi_key", "drug_name", etc.)
-- `include_labels`: Include drug label matches
-- `include_trials`: Include clinical trial matches
-- `include_targets`: Include target activity matches
-- `limit`: Maximum results per category
+- `identifier`: The identifier to resolve (required)
+- `identifier_type`: "auto" (default) or specific type. Allowed values: `name`, `chembl`, `inchikey`, `ndc`, `rxcui`, `unii`, `auto`
+- `include_labels`: Include drug label matches (default: True)
+- `include_trials`: Include clinical trial matches (default: True)
+- `include_targets`: Include target activity matches (default: True)
+- `limit`: Maximum results per category (default: 20, max: 200)
 
 **Output Model:** `CrossDatabaseLookupOutput`
 - `status`: "success", "error", "invalid_input", "not_found"
 - `identifier`: The identifier that was searched
 - `identifier_type`: Detected or specified type
-- `molecules`: List of matching molecules
-- `labels`: List of matching drug labels
-- `trials`: List of matching clinical trials
-- `targets`: List of matching target activities
+- `molecules`: List of `MoleculeIdentifierHit`
+- `labels`: List of `LabelHit` (set_id, source, title)
+- `trials`: List of `TrialHit`
+- `targets`: List of `TargetHit`
 
 **Data Sources:**
-- `dm_molecule_concept` - Molecule concepts
-- `dm_drug_labels` - Drug labels
-- `rag_study_search` - Clinical trials
+- `dm_molecule` / `dm_molecule_concept` / `dm_molecule_synonyms` - Molecule concepts
+- `map_product_molecules` / `labels_meta` / `dailymed_products` - Drug labels
+- `map_ctgov_molecules` / `rag_study_search` - Clinical trials
 - `dm_compound_target_activity` - Target activities
 
 ---
@@ -300,7 +345,7 @@ These are the **base search functions** that directly query the PostgreSQL datab
 #### 8. Biotherapeutic Sequence Search
 **File:** `biotherapeutic_sequence_search.py`
 
-**Function:** `biotherapeutic_sequence_search_async(config, input: BiotherapeuticSearchInput) -> BiotherapeuticSearchOutput`
+**Function:** `biotherapeutic_sequence_search_async(db_config: DatabaseConfig, search_input: BiotherapeuticSearchInput) -> BiotherapeuticSearchOutput`
 
 **Purpose:** Search biotherapeutics by sequence motif or target gene.
 
@@ -310,30 +355,31 @@ These are the **base search functions** that directly query the PostgreSQL datab
 - Find biotherapeutics linked to a target gene
 
 **Input Model:** `BiotherapeuticSearchInput`
-- `mode`: "by_sequence", "similar_biologics", "by_target"
-- `sequence`: Amino acid sequence or motif
-- `target_gene`: Target gene symbol
-- `biotherapeutic_type`: Filter by type ("all", "antibody", "peptide", etc.)
-- `limit`, `offset`: Pagination
+- `mode`: "by_sequence", "by_target", "similar_biologics"
+- `sequence`: Amino acid sequence or motif (required for by_sequence and similar_biologics)
+- `target_gene`: Target gene symbol (required for by_target)
+- `biotherapeutic_type`: Filter by type. Allowed values: `"all"`, `"antibody"`, `"enzyme"`. Compared with `LOWER(biotherapeutic_type)` in the DB; stored values include mAb, Antibody, ADC, bispecific, Peptide, Oligonucleotide, Protein. So `"antibody"` matches only rows where the DB value lowercased is "antibody" (e.g. Antibody, not mAb/ADC/bispecific). `"enzyme"` may have few or no matches.
+- `limit`, `offset`: Pagination (limit default: 50, max: 500)
 
 **Output Model:** `BiotherapeuticSearchOutput`
 - `status`: "success", "error", "invalid_input", "not_found"
 - `mode`: The search mode used
 - `total_hits`: Total number of results
-- `hits`: List of biotherapeutic results with sequence and component information
+- `hits`: List of `BiotherapeuticHit` (with components)
 - `query_summary`: Human-readable query description
 
 **Data Sources:**
 - `dm_biotherapeutic` - Biotherapeutic sequences
-- `dm_biotherapeutic_components` - Component sequences (heavy/light chains, etc.)
-- `dm_target` - Target gene mappings
+- `dm_biotherapeutic_component` - Component sequences (heavy/light chains, etc.)
+- `dm_target` / `dm_target_uniprot_mappings` - Target gene mappings
 
 ---
 
 #### 9. Target/Drug Pharmacology Search
 **File:** `target_search.py`
 
-**Function:** `PharmacologySearch.search(input: TargetSearchInput) -> TargetSearchOutput`
+**Function:** `target_search_async(db_config: DatabaseConfig, input: TargetSearchInput) -> TargetSearchOutput`  
+(Internally uses `PharmacologySearch(db_config).search(input)`; `search` is **async**.)
 
 **Purpose:** Unified pharmacology search for drug-target interactions, mechanisms, and molecular similarity.
 
@@ -363,7 +409,8 @@ These are the **base search functions** that directly query the PostgreSQL datab
 - `limit`: Maximum results
 
 **Output Model:** `TargetSearchOutput`
-- `status`: "success", "error", "invalid_input", "not_found"
+- `status`: "success", "error", "invalid_input", "not_found", "invalid_structure"
+- `mode`: SearchMode used
 - `query_summary`: Human-readable query description
 - `total_hits`: Total number of results
 - `hits`: List of result objects (varies by mode):
@@ -375,24 +422,16 @@ These are the **base search functions** that directly query the PostgreSQL datab
 - `warnings`: List of warning messages
 - `diagnostics`: Search diagnostics with suggestions
 - `execution_time_ms`: Query execution time
+- `structure_info`, `aggregated_summary`: For structure modes
 
-**Search Modes:**
-- `TARGETS_FOR_DRUG` - Find all protein targets for a drug
-- `DRUGS_FOR_TARGET` - Find all drugs that hit a target
-- `DRUG_PROFILE` - Get comprehensive drug profile
-- `DRUG_FORMS` - Get all salt/stereo forms
-- `TRIALS_FOR_DRUG` - Find clinical trials for a drug
-- `SIMILAR_MOLECULES` - Find structurally similar molecules
-- `EXACT_STRUCTURE` - Identify a molecule from SMILES
-- `SUBSTRUCTURE` - Find molecules containing a substructure
-- `COMPARE_DRUGS` - Compare drugs on a target
-- `SELECTIVE_DRUGS` - Find selective drugs
-- `ACTIVITIES_FOR_DRUG` - Get activity measurements for a drug
-- `ACTIVITIES_FOR_TARGET` - Get activity measurements for a target
-- `INDICATIONS_FOR_DRUG` - Find indications for a drug
-- `DRUGS_FOR_INDICATION` - Find drugs for an indication
-- `TARGET_PATHWAYS` - Find pathway annotations for a target
-- `DRUG_INTERACTIONS` - Find drug-drug interactions
+**Search Modes (SearchMode enum):**
+- `TARGETS_FOR_DRUG`, `TRIALS_FOR_DRUG`, `DRUG_PROFILE`, `DRUG_FORMS`
+- `DRUGS_FOR_TARGET`, `SELECTIVE_DRUGS`
+- `SIMILAR_MOLECULES`, `EXACT_STRUCTURE`, `SUBSTRUCTURE`
+- `COMPARE_DRUGS`
+- `ACTIVITIES_FOR_DRUG`, `ACTIVITIES_FOR_TARGET`
+- `INDICATIONS_FOR_DRUG`, `DRUGS_FOR_INDICATION`
+- `TARGET_PATHWAYS`, `DRUG_INTERACTIONS`
 
 **Data Sources:**
 - `dm_molecule` / `dm_molecule_concept` - Molecule data
@@ -440,13 +479,44 @@ These are **LLM-friendly wrappers** around the retrieval tools. They add formatt
    - Return output as-is
 
 **Storage Format:**
-- Files stored in: `research_outputs/{session_id}/{tool_name}_{ref_id}.md`
+- Files stored in: `research_outputs/{session_id}/{ref_id}.md` where `ref_id` has format `{tool_name}_{8-char-hex}` (e.g. `search_clinical_trials_a1b2c3d4`)
 - Frontmatter includes: tool name, ref_id, timestamp, query params, size, one-line summary
 - Body contains the full raw output
 
 **Retrieval Tools:**
-- `retrieve_full_output(reference_id, max_chars=None)` - Retrieve stored output
+- `retrieve_full_output(reference_id, max_chars=None)` - Retrieve stored output. `reference_id` is the full string shown in the summary (e.g. after "ref: "), format `{tool_name}_{8-char-hex}` (e.g. `search_clinical_trials_a1b2c3d4`). `max_chars` is optional; when set, the returned string is truncated to that length.
 - `list_research_outputs(tool_filter=None)` - List all stored outputs
+
+---
+
+### Defaults and value ranges
+
+| Context | Parameter | Default | Range / max |
+|---------|-----------|---------|------------|
+| Clinical trials (agent) | `limit`, `offset` | 10, 0 | retrieval allows limit up to 500 |
+| Clinical trials | `similarity_threshold` | 0.3 | 0.0–1.0 |
+| Drug labels | `result_limit` | 10 | max 50 (agent caps at 50) |
+| Molecule-trial | `min_pchembl` | 6.0 | — |
+| Molecule-trial, adverse events, outcomes | `limit` | 20 | max 500 |
+| Pharmacology (most tools) | `min_pchembl` | 5.0 | — |
+| Pharmacology | `similarity_threshold` | 0.7 | 0.0–1.0 |
+| Pharmacology | `limit` | 50 | max 500 |
+| Cross-database lookup | `limit` | 20 | 1–200 |
+
+---
+
+### Agent vs retrieval parameter names
+
+Some agent parameters use different names than the retrieval (Pydantic) input models; the wrapper maps them before calling the retrieval layer.
+
+| Agent param | Retrieval field |
+|-------------|-----------------|
+| `query` | Mapped to `condition` / `intervention` / `keyword` depending on auto-detection (e.g. NCT ID → `nct_ids`) |
+| `include_eligibility`, `include_results`, `include_adverse_events`, etc. | `output_eligibility`, `output_results`, `output_adverse_effects`, etc. |
+| `molecule` | `molecule_name` |
+| `outcome_term` | `outcome_keyword` |
+
+Use agent parameter names when calling agent tools; use retrieval field names when calling retrieval functions directly.
 
 ---
 
@@ -459,6 +529,12 @@ These tools wrap the retrieval-based search functions with LLM-friendly formatti
 
 ##### `search_clinical_trials`
 Wraps: `clinical_trials_search_async`
+
+**Parameters (agent names; map to retrieval `output_*` / options):**
+- Search: `query`, `condition`, `intervention`, `keyword`, `nct_ids`, `sponsor`
+- Filters: `phase`, `status`, `study_type`, `intervention_type`, `country`, etc.
+- Output sections (agent names): `include_eligibility`, `include_results`, `include_adverse_events`, `include_groups`, `include_baseline`, `include_sponsors`, `include_countries` — map to retrieval `output_eligibility`, `output_results`, `output_adverse_effects`, etc.
+- Defaults: `limit=10`, `offset=0`; retrieval allows `limit` up to 500. `similarity_threshold` 0.0–1.0, default 0.3.
 
 **Features:**
 - Comprehensive parameter documentation in docstring
@@ -476,6 +552,12 @@ Wraps: `clinical_trials_search_async`
 ##### `search_drug_labels`
 Wraps: `dailymed_and_openfda_search_async`
 
+**Parameters:**
+- `drug_names`, `section_queries`, `keyword_query`, `fetch_all_sections`, `result_limit` (default: 10, max: 50)
+- `boxed_warnings_only`: If true, fetch only boxed warning sections
+- `drug_interactions_only`: If true, fetch only drug interaction sections
+- `adverse_reactions_only`: If true, fetch only adverse reaction sections
+
 **Features:**
 - Normalizes drug names to lists
 - Handles section queries and keyword searches
@@ -490,6 +572,13 @@ Wraps: `dailymed_and_openfda_search_async`
 ##### `search_molecule_trials`
 Wraps: `molecule_trial_search_async`
 
+**Parameters:** Agent uses `molecule` (maps to retrieval `molecule_name`), plus `mode`, `inchi_key`, `condition`, `target_gene`, `min_pchembl` (default: 6.0), `phase`, `limit` (default: 20, max: 500), `offset`.
+
+**Required per mode:**
+- `trials_by_molecule`: `molecule` or `inchi_key`
+- `molecules_by_condition`: `condition`
+- `trials_by_target`: `target_gene`
+
 **Features:**
 - Supports three search modes
 - Parses phase lists from strings
@@ -502,6 +591,13 @@ Wraps: `molecule_trial_search_async`
 ##### `search_adverse_events`
 Wraps: `adverse_events_search_async`
 
+**Parameters:** `mode`, `drug_name`, `event_term`, `drug_names`, `severity` ("all" | "serious" | "other"), `min_subjects_affected`, `limit` (default: 20, max: 500), `offset`.
+
+**Required per mode:**
+- `events_for_drug`: `drug_name`
+- `drugs_with_event`: `event_term`
+- `compare_safety`: `drug_names` (at least 2)
+
 **Features:**
 - Three search modes with different output formats
 - Normalizes drug names to lists
@@ -512,6 +608,13 @@ Wraps: `adverse_events_search_async`
 ##### `search_trial_outcomes`
 Wraps: `outcomes_search_async`
 
+**Parameters:** Agent uses `outcome_term` (maps to retrieval `outcome_keyword`), plus `mode`, `nct_id`, `drug_name`, `outcome_type`, `min_p_value`, `max_p_value`, `limit`, `offset`.
+
+**Required per mode:**
+- `outcomes_for_trial`: `nct_id`
+- `trials_with_outcome`: `outcome_term`
+- `efficacy_comparison`: `drug_name`
+
 **Features:**
 - Three search modes
 - Formats outcomes, measurements, and analyses
@@ -521,6 +624,10 @@ Wraps: `outcomes_search_async`
 
 ##### `search_orange_book`
 Wraps: `orange_book_search_async`
+
+**Parameters:** `mode` ("te_codes" | "patents" | "generics" | "exclusivity"), `drug_name`, `ingredient`, `nda_number`, `include_patents`, `include_exclusivity`, `limit`, `offset`.
+
+**Required:** At least one of `drug_name`, `ingredient`, or `nda_number`.
 
 **Features:**
 - Multiple search modes
@@ -541,6 +648,12 @@ Wraps: `cross_database_lookup_async`
 
 ##### `search_biotherapeutics`
 Wraps: `biotherapeutic_sequence_search_async`
+
+**Parameters:** `mode` ("by_sequence" | "by_target" | "similar_biologics"), `sequence`, `target_gene`, `biotherapeutic_type` ("all" | "antibody" | "enzyme"), `limit`, `offset`.
+
+**Required per mode:**
+- `by_sequence` or `similar_biologics`: `sequence`
+- `by_target`: `target_gene`
 
 **Features:**
 - Sequence and target-based searches
@@ -671,25 +784,28 @@ These tools wrap the `PharmacologySearch` class with enhanced formatting and val
 **Output Format:**
 - Selective compounds with selectivity ratios
 
-##### Additional Pharmacology Tools:
+##### `pharmacology_search`
+**Purpose:** Unified pharmacology search tool.
+
+The unified `pharmacology_search` tool supports **only** the following `search_type` values: `drug_targets`, `target_drugs`, `drug_profile`, `drug_forms`, `drug_trials`, `similar_molecules`, `exact_structure`, `substructure`, `compare_drugs`, `selective_drugs`. Use the standalone tools below for the other capabilities.
+
+**Parameters:**
+- `search_type`: One of the values above (e.g. "drug_targets", "target_drugs")
+- Additional parameters depend on search_type (e.g. `drug_name`, `gene_symbol`, `smiles`, `drug_names`, `off_targets`)
+- `min_pchembl` (default: 5.0), `similarity_threshold` (default: 0.7), `data_source`, `limit` (default: 50, max: 500)
+
+**Features:**
+- Single entry point for the supported pharmacology searches
+- Validates required parameters per search type
+- Provides helpful error messages
+
+##### Additional Pharmacology Tools (standalone only; not available as `search_type` in `pharmacology_search`)
 - `search_drug_activities` - Get activity measurements for a drug
 - `search_target_activities` - Get activity measurements for a target
 - `search_drug_indications` - Find indications for a drug
 - `search_indication_drugs` - Find drugs for an indication
-- `search_target_pathways` - Find pathway annotations
+- `search_target_pathways` - Find pathway annotations for a target
 - `search_drug_interactions` - Find drug-drug interactions
-
-##### `pharmacology_search`
-**Purpose:** Unified pharmacology search tool.
-
-**Parameters:**
-- `search_type`: One of the search modes (e.g., "drug_targets", "target_drugs")
-- Additional parameters depend on search_type
-
-**Features:**
-- Single entry point for all pharmacology searches
-- Validates required parameters per search type
-- Provides helpful error messages
 
 ---
 
@@ -699,7 +815,7 @@ These tools wrap the `PharmacologySearch` class with enhanced formatting and val
 These tools provide web search capabilities for general information.
 
 ##### `web_search`
-**Purpose:** General web search using DuckDuckGo.
+**Purpose:** General web search using DuckDuckGo. No API key required.
 
 **Parameters:**
 - `query`: Search query
@@ -708,13 +824,13 @@ These tools provide web search capabilities for general information.
 - Formatted list of results with title, link, and snippet
 
 ##### `tavily_search`
-**Purpose:** Web search using Tavily API.
+**Purpose:** Web search using Tavily API. Requires `TAVILY_API_KEY` environment variable.
 
 **Parameters:**
 - `query`: Search query
-- `search_depth`: "basic" or "advanced"
-- `include_answer`: Include direct answer
-- `max_results`: Maximum results
+- `search_depth`: "basic" (fast) or "advanced" (more thorough). Default: "basic"
+- `include_answer`: Include direct answer (default: true)
+- `max_results`: Maximum results (default: 3)
 - `include_raw_content`: Include raw scraped content
 - `include_images`: Include image URLs
 
@@ -725,7 +841,7 @@ These tools provide web search capabilities for general information.
 **Purpose:** Scrape content from URLs.
 
 **Parameters:**
-- `urls`: URL or list of URLs
+- `urls`: A single URL or a list of URLs (normalized to list internally)
 
 **Output Format:**
 - Scraped text content from pages
@@ -886,6 +1002,27 @@ All web search tools:
 - `web_search`
 - `tavily_search`
 - `scrape_url_content`
+
+---
+
+## Quick reference (agent tools)
+
+| Tool | Main parameters | Required per mode |
+|------|-----------------|-------------------|
+| `search_clinical_trials` | query, condition, intervention, keyword, nct_ids, phase, status, limit, include_* | See [search_clinical_trials](#search_clinical_trials) |
+| `search_drug_labels` | drug_names, section_queries, keyword_query, fetch_all_sections, boxed_warnings_only, drug_interactions_only, adverse_reactions_only, result_limit | — |
+| `search_molecule_trials` | mode, molecule, inchi_key, condition, target_gene | trials_by_molecule: molecule or inchi_key; molecules_by_condition: condition; trials_by_target: target_gene |
+| `search_adverse_events` | mode, drug_name, event_term, drug_names | events_for_drug: drug_name; drugs_with_event: event_term; compare_safety: drug_names (≥2) |
+| `search_trial_outcomes` | mode, nct_id, outcome_term, drug_name | outcomes_for_trial: nct_id; trials_with_outcome: outcome_term; efficacy_comparison: drug_name |
+| `search_orange_book` | mode, drug_name, ingredient, nda_number | At least one of drug_name, ingredient, nda_number |
+| `lookup_drug_identifiers` | identifier, identifier_type (name/chembl/inchikey/ndc/rxcui/unii/auto) | identifier |
+| `search_biotherapeutics` | mode, sequence, target_gene | by_sequence/similar_biologics: sequence; by_target: target_gene |
+| `pharmacology_search` | search_type, drug_name, gene_symbol, smiles, drug_names, off_targets | See [pharmacology_search](#pharmacology_search) |
+| `retrieve_full_output` | reference_id (e.g. search_clinical_trials_a1b2c3d4), max_chars | reference_id |
+| `list_research_outputs` | tool_filter | — |
+| `web_search` | query | query |
+| `tavily_search` | query, search_depth, max_results (default 3) | query; TAVILY_API_KEY env |
+| `scrape_url_content` | urls (single or list) | urls |
 
 ---
 

@@ -18,6 +18,7 @@ Data Sources:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal
 
@@ -298,12 +299,22 @@ class TargetSearchInput(BaseModel):
     offset: int = Field(default=0, ge=0)
     organism: str = "Homo sapiens"
     include_all_organisms: bool = False
+    
+    # Existing flags
     include_trials: bool = True
     include_forms: bool = True
     include_pathways: bool = False
     include_indications: bool = False
+    
+    # NEW: Enrichment flags for SIMILAR_MOLECULES mode
+    include_activities: bool = True          # Target binding data (default ON)
+    include_mechanisms: bool = False         # Curated MOA data
+    include_trial_summary: bool = False      # Trial counts/phases per molecule
+    include_indication_summary: bool = False # Indications per molecule
+    include_aggregated_summary: bool = False # Cross-molecule summaries
+    
     approval_status: Literal["approved", "investigational", "all"] = "all"
-    max_off_targets: int | None = None  # Selectivity filter
+    max_off_targets: int | None = None
 
     def validate_for_mode(self) -> list[str]:
         """Validate required fields for the search mode."""
@@ -358,6 +369,36 @@ class TargetSearchInput(BaseModel):
 # OUTPUT MODEL WITH ENHANCED DIAGNOSTICS
 # =============================================================================
 
+class AggregatedStructureSummary(BaseModel):
+    """Cross-molecule aggregated summaries for structure search."""
+    
+    # Target distribution: gene → count of molecules hitting it
+    target_distribution: dict[str, int] = Field(default_factory=dict)
+    top_targets: list[str] = Field(default_factory=list)  # Top 10
+    
+    # Mechanism distribution: action_type → count
+    mechanism_distribution: dict[str, int] = Field(default_factory=dict)
+    
+    # Indication distribution: indication → count
+    indication_distribution: dict[str, int] = Field(default_factory=dict)
+    top_indications: list[str] = Field(default_factory=list)  # Top 10
+    
+    # Clinical development summary
+    phase_distribution: dict[str, int] = Field(default_factory=dict)
+    n_molecules_in_trials: int = 0
+    n_molecules_approved: int = 0
+    
+    # Activity summary
+    n_molecules_with_activity: int = 0
+    n_molecules_with_mechanisms: int = 0
+    n_unique_targets: int = 0
+    n_unique_indications: int = 0
+    
+    # Most potent similar molecule
+    most_potent_molecule: str | None = None
+    most_potent_pchembl: float | None = None
+
+
 class SearchDiagnostics(BaseModel):
     """Diagnostic information about the search process."""
     search_steps: list[dict] = []
@@ -368,7 +409,7 @@ class SearchDiagnostics(BaseModel):
 
 class TargetSearchOutput(BaseModel):
     """Universal search results container with enhanced diagnostics."""
-    status: Literal["success", "not_found", "error", "invalid_input"] = "success"
+    status: Literal["success", "not_found", "error", "invalid_input", "invalid_structure"] = "success"
     mode: SearchMode
     query_summary: str = ""
     total_hits: int = 0
@@ -380,6 +421,9 @@ class TargetSearchOutput(BaseModel):
     diagnostics: SearchDiagnostics | None = None
     data_source_breakdown: dict[str, int] = {}
     confidence_explanation: str | None = None
+    # Structure-search modes (SIMILAR_MOLECULES, EXACT_STRUCTURE): validation and cross-molecule summary
+    structure_info: dict | None = None
+    aggregated_summary: AggregatedStructureSummary | None = None
 
     def pretty_print(self, console: Console | None = None, max_hits: int = 20):
         """Pretty print results with improved formatting."""
@@ -389,7 +433,8 @@ class TargetSearchOutput(BaseModel):
             "success": "green",
             "not_found": "yellow",
             "error": "red",
-            "invalid_input": "red"
+            "invalid_input": "red",
+            "invalid_structure": "red",
         }[self.status]
         
         console.print(Panel(
@@ -557,6 +602,21 @@ class TargetSearchOutput(BaseModel):
             console.print(f"      [dim]Enzyme: {hit.enzyme_name}[/dim]")
         if hit.pathway_key:
             console.print(f"      [dim]Pathway: {hit.pathway_key}[/dim]")
+
+
+@dataclass
+class SmilesValidationResult:
+    """Result of SMILES validation and preprocessing."""
+    is_valid: bool
+    canonical_smiles: str | None = None
+    original_smiles: str | None = None
+    error_message: str | None = None
+    error_type: str | None = None
+    warnings: list[str] = None
+    
+    def __post_init__(self):
+        if self.warnings is None:
+            self.warnings = []
 
 
 # =============================================================================
@@ -834,6 +894,186 @@ class PharmacologySearch:
             }
         }
         return help_info.get(mode, {"description": mode.value, "tips": []})
+
+    async def _validate_and_canonicalize_smiles(
+        self,
+        conn: AsyncDatabaseConfig,
+        smiles: str
+    ) -> SmilesValidationResult:
+        """
+        Validate and canonicalize SMILES with detailed error reporting.
+        """
+        warnings = []
+        original = smiles
+        
+        # === Preprocessing ===
+        smiles = smiles.strip()
+        
+        # Remove common prefixes
+        for prefix in ["SMILES:", "smiles:", "SMILES=", "smiles=", "SMILES ", "smiles "]:
+            if smiles.startswith(prefix):
+                smiles = smiles[len(prefix):].strip()
+                warnings.append(f"Removed prefix '{prefix.strip()}'")
+                break
+        
+        # Remove surrounding quotes
+        if (smiles.startswith('"') and smiles.endswith('"')) or \
+           (smiles.startswith("'") and smiles.endswith("'")):
+            smiles = smiles[1:-1]
+            warnings.append("Removed surrounding quotes")
+        
+        # Remove newlines/tabs
+        import re
+        if re.search(r'[\n\t\r]', smiles):
+            smiles = re.sub(r'[\n\t\r]+', '', smiles)
+            warnings.append("Removed newline/tab characters")
+        
+        # Handle multiple space-separated tokens (take first)
+        if ' ' in smiles and '.' not in smiles:
+            parts = smiles.split()
+            if len(parts) > 1:
+                smiles = parts[0]
+                warnings.append(f"Multiple tokens detected; using first: '{smiles[:30]}...'")
+        
+        # === Basic validation ===
+        if not smiles:
+            return SmilesValidationResult(
+                is_valid=False,
+                original_smiles=original,
+                error_message="Empty SMILES string after preprocessing",
+                error_type="empty",
+                warnings=warnings
+            )
+        
+        if len(smiles) > 5000:
+            return SmilesValidationResult(
+                is_valid=False,
+                original_smiles=original,
+                error_message=f"SMILES too long ({len(smiles)} chars, max 5000)",
+                error_type="too_long",
+                warnings=warnings
+            )
+        
+        # Bracket balance
+        if smiles.count('[') != smiles.count(']'):
+            return SmilesValidationResult(
+                is_valid=False,
+                original_smiles=original,
+                error_message=f"Unbalanced square brackets: {smiles.count('[')} '[' vs {smiles.count(']')} ']'",
+                error_type="syntax",
+                warnings=warnings
+            )
+        
+        if smiles.count('(') != smiles.count(')'):
+            return SmilesValidationResult(
+                is_valid=False,
+                original_smiles=original,
+                error_message=f"Unbalanced parentheses: {smiles.count('(')} '(' vs {smiles.count(')')} ')'",
+                error_type="syntax",
+                warnings=warnings
+            )
+        
+        # Check common typos before sending to RDKit
+        typo_warnings = []
+        if 'CL' in smiles.upper() and '[Cl]' not in smiles and 'Cl' not in smiles:
+            typo_warnings.append("'CL' should likely be 'Cl' (chlorine)")
+        if 'BR' in smiles.upper() and '[Br]' not in smiles and 'Br' not in smiles:
+            typo_warnings.append("'BR' should likely be 'Br' (bromine)")
+        
+        # === RDKit validation ===
+        try:
+            sql = """
+                SELECT 
+                    mol_from_smiles($1::cstring) IS NOT NULL AS is_valid,
+                    mol_to_smiles(mol_from_smiles($1::cstring)) AS canonical,
+                    mol_formula(mol_from_smiles($1::cstring)) AS formula,
+                    mol_amw(mol_from_smiles($1::cstring))::float AS mol_weight,
+                    mol_numheavyatoms(mol_from_smiles($1::cstring))::int AS heavy_atoms
+            """
+            rows = await conn.execute_query(sql, smiles)
+            
+            if not rows or not rows[0]["is_valid"]:
+                # Build detailed error message
+                error_msg = self._build_smiles_error_message(smiles, typo_warnings)
+                return SmilesValidationResult(
+                    is_valid=False,
+                    original_smiles=original,
+                    error_message=error_msg,
+                    error_type="parse_error",
+                    warnings=warnings + typo_warnings
+                )
+            
+            row = rows[0]
+            canonical = row["canonical"]
+            
+            # Add info about the molecule
+            if row.get("mol_weight") and row["mol_weight"] > 1500:
+                warnings.append(f"Large molecule (MW: {row['mol_weight']:.0f})")
+            if row.get("heavy_atoms") and row["heavy_atoms"] < 4:
+                warnings.append(f"Very small molecule ({row['heavy_atoms']} heavy atoms)")
+            if canonical and canonical != smiles:
+                warnings.append("SMILES was canonicalized")
+            
+            return SmilesValidationResult(
+                is_valid=True,
+                canonical_smiles=canonical,
+                original_smiles=original,
+                warnings=warnings
+            )
+            
+        except Exception as e:
+            error_str = str(e).lower()
+            if "smiles" in error_str or "mol_from" in error_str or "cstring" in error_str:
+                error_msg = self._build_smiles_error_message(smiles, typo_warnings)
+                return SmilesValidationResult(
+                    is_valid=False,
+                    original_smiles=original,
+                    error_message=error_msg,
+                    error_type="rdkit_error",
+                    warnings=warnings + typo_warnings
+                )
+            else:
+                return SmilesValidationResult(
+                    is_valid=False,
+                    original_smiles=original,
+                    error_message=f"Database error: {e}",
+                    error_type="database_error",
+                    warnings=warnings
+                )
+    
+    def _build_smiles_error_message(self, smiles: str, typo_warnings: list[str]) -> str:
+        """Build detailed, actionable error message for invalid SMILES."""
+        import re
+        issues = typo_warnings.copy()
+        
+        # Check ring closure balance
+        ring_digits = re.findall(r'(?<![%\d])(\d)', smiles)
+        digit_counts: dict[str, int] = {}
+        for d in ring_digits:
+            digit_counts[d] = digit_counts.get(d, 0) + 1
+        odd_rings = [d for d, c in digit_counts.items() if c % 2 != 0]
+        if odd_rings:
+            issues.append(f"Unmatched ring closures: {odd_rings}")
+        
+        # Check for invalid patterns
+        if '==' in smiles:
+            issues.append("Invalid '==' (double bond is single '=')")
+        if '##' in smiles:
+            issues.append("Invalid '##' (triple bond is single '#')")
+        if '[]' in smiles:
+            issues.append("Empty brackets '[]' are invalid")
+        
+        if issues:
+            return f"Invalid SMILES. Issues found: {'; '.join(issues)}"
+        else:
+            return (
+                "Invalid SMILES structure. Please check: "
+                "1) Element symbols (Cl not CL, Br not BR), "
+                "2) Ring closures are paired, "
+                "3) Brackets/parentheses are balanced, "
+                "4) Aromatic atoms are lowercase (c,n,o,s) in aromatic rings"
+            )
+
 
     def _build_not_found_diagnostics(
         self,
@@ -1852,21 +2092,61 @@ class PharmacologySearch:
     # =========================================================================
     
     async def _search_similar_molecules(self, input: TargetSearchInput) -> TargetSearchOutput:
-        """Find molecules similar to a query structure with enhanced diagnostics."""
+        """
+        Find molecules similar to a query structure with flexible enrichment.
+        
+        Enrichment controlled by flags:
+        - include_activities: Target binding data (default: True)
+        - include_mechanisms: Curated MOA data (default: False)
+        - include_trial_summary: Trial counts per molecule (default: False)
+        - include_indication_summary: Indications per molecule (default: False)
+        - include_aggregated_summary: Cross-molecule summaries (default: False)
+        """
+        import time
+        start_time = time.time()
+        
         conn = await self._get_conn()
         
-        sql = """
+        # === Step 1: Validate SMILES ===
+        validation = await self._validate_and_canonicalize_smiles(conn, input.smiles)
+        
+        if not validation.is_valid:
+            smiles_preview = input.smiles[:50] + "..." if len(input.smiles) > 50 else input.smiles
+            return TargetSearchOutput(
+                status="invalid_structure",
+                mode=input.mode,
+                query_summary=f"Invalid SMILES: '{smiles_preview}'",
+                error=validation.error_message,
+                warnings=validation.warnings,
+                structure_info={
+                    "original_smiles": input.smiles,
+                    "error_type": validation.error_type,
+                },
+                diagnostics=SearchDiagnostics(
+                    suggestions=[
+                        "Verify SMILES syntax is correct",
+                        "Check element symbols: Cl (not CL), Br (not BR)",
+                        "Ensure ring closures are paired (e.g., C1CC1)",
+                        "Use a molecule editor to generate valid SMILES",
+                    ]
+                )
+            )
+        
+        canonical_smiles = validation.canonical_smiles
+        
+        # === Step 2: Find similar molecules ===
+        similar_sql = """
             WITH query_fp AS (
-                SELECT morganbv_fp(mol_from_smiles($1::cstring)) as fp
+                SELECT morganbv_fp(mol_from_smiles($1::cstring)) AS fp
             ),
             similar_mols AS (
                 SELECT 
                     dm.mol_id,
                     dm.concept_id,
-                    dm.pref_name as molecule_name,
+                    dm.pref_name AS molecule_name,
                     dm.canonical_smiles,
                     dm.chembl_id,
-                    tanimoto_sml(q.fp, dm.mfp2)::float as similarity
+                    tanimoto_sml(q.fp, dm.mfp2)::float AS similarity
                 FROM dm_molecule dm
                 CROSS JOIN query_fp q
                 WHERE dm.mfp2 % q.fp
@@ -1876,94 +2156,350 @@ class PharmacologySearch:
             )
             SELECT DISTINCT ON (sm.concept_id)
                 sm.concept_id,
-                COALESCE(mc.preferred_name, sm.molecule_name) as concept_name,
+                COALESCE(mc.preferred_name, sm.molecule_name) AS concept_name,
                 sm.chembl_id,
                 sm.canonical_smiles,
-                sm.similarity as tanimoto_similarity
+                sm.similarity AS tanimoto_similarity,
+                mc.is_biotherapeutic
             FROM similar_mols sm
             LEFT JOIN dm_molecule_concept mc ON sm.concept_id = mc.concept_id
             ORDER BY sm.concept_id, sm.similarity DESC
         """
         
-        rows = await conn.execute_query(sql, input.smiles, input.similarity_threshold, input.limit * 3)
+        mol_rows = await conn.execute_query(
+            similar_sql,
+            canonical_smiles,
+            input.similarity_threshold,
+            input.limit * 3  # Fetch extra to dedupe by concept
+        )
         
         smiles_display = input.smiles[:40] + "..." if len(input.smiles) > 40 else input.smiles
         
-        if not rows:
-            warnings, diagnostics = self._build_not_found_diagnostics(input.mode, input)
+        if not mol_rows:
             return TargetSearchOutput(
                 status="not_found",
                 mode=input.mode,
-                query_summary=f"similar to '{smiles_display}'",
-                total_hits=0,
-                hits=[],
-                warnings=warnings,
-                diagnostics=diagnostics
+                query_summary=f"No similar molecules for '{smiles_display}'",
+                warnings=validation.warnings + [
+                    f"No molecules found at similarity >= {input.similarity_threshold}"
+                ],
+                structure_info={
+                    "original_smiles": input.smiles,
+                    "canonical_smiles": canonical_smiles,
+                    "preprocessing_notes": validation.warnings,
+                },
+                diagnostics=SearchDiagnostics(
+                    suggestions=[
+                        f"Try lowering similarity_threshold (current: {input.similarity_threshold})",
+                        "Try 0.5 or 0.6 for broader matches",
+                        "The structure may be novel with no similar compounds in database",
+                    ]
+                )
             )
         
-        # Batch activity lookup
-        concept_ids = [r['concept_id'] for r in rows[:input.limit] if r['concept_id']]
+        # Limit to requested count
+        mol_rows = mol_rows[:input.limit]
+        concept_ids = [r['concept_id'] for r in mol_rows if r.get('concept_id')]
+        similarity_lookup = {r['concept_id']: r['tanimoto_similarity'] for r in mol_rows}
+        
+        # === Step 3: Fetch enrichment data based on flags ===
         
         activities_by_concept: dict[int, list[TargetActivity]] = {}
-        if concept_ids:
+        mechanisms_by_concept: dict[int, list[TargetMechanism]] = {}
+        trials_by_concept: dict[int, dict] = {}
+        indications_by_concept: dict[int, list[dict]] = {}
+        
+        # 3a: Activities (default ON)
+        if input.include_activities and concept_ids:
             activity_sql = """
                 SELECT 
                     concept_id,
-                    gene_symbol, target_name, target_organism,
-                    COALESCE(best_ic50_nm, best_ki_nm) as activity_value_nm,
-                    CASE WHEN best_ic50_nm IS NOT NULL THEN 'IC50' ELSE 'Ki' END as activity_type,
-                    best_pchembl as pchembl, n_total_measurements, data_confidence, sources
+                    gene_symbol, 
+                    target_name, 
+                    target_organism,
+                    COALESCE(best_ic50_nm, best_ki_nm, best_kd_nm, best_ec50_nm) AS activity_value_nm,
+                    CASE 
+                        WHEN best_ic50_nm IS NOT NULL THEN 'IC50'
+                        WHEN best_ki_nm IS NOT NULL THEN 'Ki'
+                        WHEN best_kd_nm IS NOT NULL THEN 'Kd'
+                        ELSE 'EC50'
+                    END AS activity_type,
+                    best_pchembl AS pchembl,
+                    n_total_measurements,
+                    data_confidence,
+                    sources
                 FROM dm_molecule_target_summary
-                WHERE concept_id = ANY($1::bigint[]) AND best_pchembl >= $2
+                WHERE concept_id = ANY($1::bigint[]) 
+                  AND best_pchembl >= $2
                 ORDER BY concept_id, best_pchembl DESC NULLS LAST
             """
             activity_rows = await conn.execute_query(activity_sql, concept_ids, input.min_pchembl)
             
-            for ar in activity_rows:
-                cid = ar['concept_id']
+            for r in activity_rows:
+                cid = r['concept_id']
                 if cid not in activities_by_concept:
                     activities_by_concept[cid] = []
-                if len(activities_by_concept[cid]) < 10:
-                    activities_by_concept[cid].append(
-                        TargetActivity(
-                            gene_symbol=ar['gene_symbol'],
-                            target_name=ar['target_name'],
-                            target_organism=ar['target_organism'] or "Homo sapiens",
-                            activity_type=ar['activity_type'] or "Unknown",
-                            activity_value_nm=float(ar['activity_value_nm']) if ar['activity_value_nm'] else 0,
-                            pchembl=float(ar['pchembl']) if ar['pchembl'] else None,
-                            n_measurements=ar['n_total_measurements'] or 1,
-                            data_confidence=ar['data_confidence'],
-                            sources=ar['sources'] or []
-                        )
-                    )
+                if len(activities_by_concept[cid]) < 15:  # Limit per molecule
+                    activities_by_concept[cid].append(TargetActivity(
+                        gene_symbol=r['gene_symbol'],
+                        target_name=r['target_name'],
+                        target_organism=r['target_organism'] or "Homo sapiens",
+                        activity_type=r['activity_type'] or "Unknown",
+                        activity_value_nm=float(r['activity_value_nm']) if r['activity_value_nm'] else 0,
+                        pchembl=float(r['pchembl']) if r['pchembl'] else None,
+                        n_measurements=r['n_total_measurements'] or 1,
+                        data_confidence=r['data_confidence'],
+                        sources=r['sources'] or []
+                    ))
         
-        profiles = []
-        for r in rows[:input.limit]:
-            concept_id = r['concept_id']
+        # 3b: Mechanisms
+        if input.include_mechanisms and concept_ids:
+            mechanism_sql = """
+                SELECT 
+                    concept_id,
+                    mechanism_of_action, 
+                    action_type, 
+                    target_name, 
+                    target_type,
+                    target_organism, 
+                    gene_symbols, 
+                    uniprot_accessions,
+                    direct_interaction, 
+                    molecular_mechanism, 
+                    disease_efficacy,
+                    ref_type, 
+                    ref_id, 
+                    ref_url
+                FROM dm_drug_mechanism
+                WHERE concept_id = ANY($1::bigint[])
+                ORDER BY concept_id, action_type
+            """
+            mechanism_rows = await conn.execute_query(mechanism_sql, concept_ids)
+            
+            for r in mechanism_rows:
+                cid = r['concept_id']
+                if cid not in mechanisms_by_concept:
+                    mechanisms_by_concept[cid] = []
+                if len(mechanisms_by_concept[cid]) < 5:
+                    mechanisms_by_concept[cid].append(TargetMechanism(
+                        mechanism_of_action=r['mechanism_of_action'] or "Unknown",
+                        action_type=r['action_type'] or "Unknown",
+                        target_name=r['target_name'],
+                        target_type=r['target_type'],
+                        target_organism=r['target_organism'] or "Homo sapiens",
+                        gene_symbols=r['gene_symbols'] or [],
+                        uniprot_accessions=r['uniprot_accessions'] or [],
+                        direct_interaction=r['direct_interaction'] or False,
+                        molecular_mechanism=r['molecular_mechanism'] or False,
+                        disease_efficacy=r['disease_efficacy'] or False,
+                        ref_type=r['ref_type'],
+                        ref_id=r['ref_id'],
+                        ref_url=r['ref_url']
+                    ))
+        
+        # 3c: Trial summary
+        if input.include_trial_summary and concept_ids:
+            trial_sql = """
+                SELECT 
+                    map.concept_id,
+                    COUNT(DISTINCT map.nct_id)::int AS n_trials,
+                    array_agg(DISTINCT rs.phase) FILTER (WHERE rs.phase IS NOT NULL) AS phases,
+                    array_agg(DISTINCT rs.overall_status) FILTER (WHERE rs.overall_status IS NOT NULL) AS statuses
+                FROM map_ctgov_molecules map
+                JOIN rag_study_search rs ON map.nct_id = rs.nct_id
+                WHERE map.concept_id = ANY($1::bigint[])
+                GROUP BY map.concept_id
+            """
+            trial_rows = await conn.execute_query(trial_sql, concept_ids)
+            trials_by_concept = {r['concept_id']: r for r in trial_rows}
+        
+        # 3d: Indication summary
+        if input.include_indication_summary and concept_ids:
+            indication_sql = """
+                SELECT 
+                    d.concept_id,
+                    i.preferred_name AS indication,
+                    i.therapeutic_area,
+                    d.max_phase,
+                    d.is_approved
+                FROM dm_drug_indication d
+                JOIN dm_indication i ON d.indication_id = i.indication_id
+                WHERE d.concept_id = ANY($1::bigint[])
+                ORDER BY d.concept_id, d.max_phase DESC NULLS LAST
+            """
+            indication_rows = await conn.execute_query(indication_sql, concept_ids)
+            
+            for r in indication_rows:
+                cid = r['concept_id']
+                if cid not in indications_by_concept:
+                    indications_by_concept[cid] = []
+                indications_by_concept[cid].append({
+                    'indication': r['indication'],
+                    'therapeutic_area': r['therapeutic_area'],
+                    'max_phase': r['max_phase'],
+                    'is_approved': r['is_approved'],
+                })
+        
+        # === Step 4: Build profiles ===
+        profiles: list[CompoundTargetProfile] = []
+        
+        # For aggregated summary
+        target_counts: dict[str, int] = {}
+        mechanism_counts: dict[str, int] = {}
+        indication_counts: dict[str, int] = {}
+        phase_counts: dict[str, int] = {}
+        n_in_trials = 0
+        n_approved = 0
+        most_potent_name: str | None = None
+        most_potent_pchembl: float | None = None
+        
+        for mol_row in mol_rows:
+            concept_id = mol_row['concept_id']
             activities = activities_by_concept.get(concept_id, [])
+            mechanisms = mechanisms_by_concept.get(concept_id, [])
+            trial_info = trials_by_concept.get(concept_id, {})
+            indications = indications_by_concept.get(concept_id, [])
+            
+            # Aggregate counts (for summary)
+            if input.include_aggregated_summary:
+                for act in activities:
+                    target_counts[act.gene_symbol] = target_counts.get(act.gene_symbol, 0) + 1
+                
+                for mech in mechanisms:
+                    mechanism_counts[mech.action_type] = mechanism_counts.get(mech.action_type, 0) + 1
+                
+                for ind in indications:
+                    indication_counts[ind['indication']] = indication_counts.get(ind['indication'], 0) + 1
+                    if ind.get('is_approved'):
+                        n_approved += 1
+                
+                if trial_info.get('phases'):
+                    for phase in trial_info['phases']:
+                        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+                    n_in_trials += 1
+            
             best_pchembl = max((a.pchembl for a in activities if a.pchembl), default=None)
+            
+            # Track most potent
+            if best_pchembl and (most_potent_pchembl is None or best_pchembl > most_potent_pchembl):
+                most_potent_pchembl = best_pchembl
+                most_potent_name = mol_row['concept_name']
             
             profiles.append(CompoundTargetProfile(
                 concept_id=concept_id,
-                concept_name=r['concept_name'],
-                chembl_id=r['chembl_id'],
-                canonical_smiles=r['canonical_smiles'],
-                tanimoto_similarity=r['tanimoto_similarity'],
+                concept_name=mol_row['concept_name'],
+                chembl_id=mol_row['chembl_id'],
+                canonical_smiles=mol_row['canonical_smiles'],
+                is_biotherapeutic=mol_row.get('is_biotherapeutic') or False,
+                tanimoto_similarity=mol_row['tanimoto_similarity'],
                 activities=activities,
-                mechanisms=[],
+                mechanisms=mechanisms,
                 n_activity_targets=len(activities),
+                n_mechanism_targets=len(mechanisms),
                 best_pchembl=best_pchembl
             ))
         
+        # Sort by similarity
         profiles.sort(key=lambda p: -(p.tanimoto_similarity or 0))
+        
+        # === Step 5: Build aggregated summary if requested ===
+        aggregated_summary: AggregatedStructureSummary | None = None
+        
+        if input.include_aggregated_summary:
+            sorted_targets = sorted(target_counts.items(), key=lambda x: -x[1])
+            sorted_indications = sorted(indication_counts.items(), key=lambda x: -x[1])
+            
+            aggregated_summary = AggregatedStructureSummary(
+                target_distribution=dict(sorted_targets[:20]),
+                top_targets=[t[0] for t in sorted_targets[:10]],
+                mechanism_distribution=dict(sorted(mechanism_counts.items(), key=lambda x: -x[1])[:10]),
+                indication_distribution=dict(sorted_indications[:20]),
+                top_indications=[i[0] for i in sorted_indications[:10]],
+                phase_distribution=dict(sorted(phase_counts.items())),
+                n_molecules_in_trials=n_in_trials,
+                n_molecules_approved=n_approved,
+                n_molecules_with_activity=sum(1 for p in profiles if p.activities),
+                n_molecules_with_mechanisms=sum(1 for p in profiles if p.mechanisms),
+                n_unique_targets=len(target_counts),
+                n_unique_indications=len(indication_counts),
+                most_potent_molecule=most_potent_name,
+                most_potent_pchembl=most_potent_pchembl,
+            )
+        
+        # === Step 6: Build warnings and response ===
+        warnings = validation.warnings.copy() if validation.warnings else []
+        
+        if input.include_activities and not any(p.activities for p in profiles):
+            warnings.append("No quantitative activity data found for similar molecules")
+        
+        if input.include_mechanisms and not any(p.mechanisms for p in profiles):
+            warnings.append("No curated mechanism data found for similar molecules")
+        
+        if input.include_trial_summary and not trials_by_concept:
+            warnings.append("No clinical trial associations found for similar molecules")
+        
+        # Build data source breakdown
+        data_breakdown = {
+            "molecules_found": len(profiles),
+        }
+        if input.include_activities:
+            data_breakdown["molecules_with_activity"] = sum(1 for p in profiles if p.activities)
+        if input.include_mechanisms:
+            data_breakdown["molecules_with_mechanisms"] = sum(1 for p in profiles if p.mechanisms)
+        if input.include_trial_summary:
+            data_breakdown["molecules_in_trials"] = len(trials_by_concept)
+        if input.include_indication_summary:
+            data_breakdown["molecules_with_indications"] = len(indications_by_concept)
+        
+        # Build suggestions
+        suggestions = []
+        if aggregated_summary:
+            if aggregated_summary.top_targets:
+                suggestions.append(f"Most common target: {aggregated_summary.top_targets[0]}")
+            if aggregated_summary.top_indications:
+                suggestions.append(f"Most common indication: {aggregated_summary.top_indications[0]}")
+            if aggregated_summary.most_potent_molecule:
+                suggestions.append(
+                    f"Most potent: {aggregated_summary.most_potent_molecule} "
+                    f"(pChEMBL={aggregated_summary.most_potent_pchembl:.1f})"
+                )
+        
+        execution_time = (time.time() - start_time) * 1000
         
         return TargetSearchOutput(
             status="success",
             mode=input.mode,
-            query_summary=f"similar to '{smiles_display}'",
+            query_summary=f"similar to '{smiles_display}' ({len(profiles)} molecules)",
             total_hits=len(profiles),
-            hits=profiles
+            hits=profiles,
+            warnings=warnings,
+            execution_time_ms=execution_time,
+            structure_info={
+                "original_smiles": input.smiles,
+                "canonical_smiles": canonical_smiles,
+                "preprocessing_notes": validation.warnings,
+            },
+            aggregated_summary=aggregated_summary,
+            data_source_breakdown=data_breakdown,
+            confidence_explanation=(
+                f"Similarity >= {input.similarity_threshold}, "
+                f"pChEMBL >= {input.min_pchembl}"
+            ),
+            diagnostics=SearchDiagnostics(
+                query_info={
+                    "canonical_smiles": canonical_smiles,
+                    "similarity_threshold": input.similarity_threshold,
+                    "min_pchembl": input.min_pchembl,
+                    "enrichment_flags": {
+                        "activities": input.include_activities,
+                        "mechanisms": input.include_mechanisms,
+                        "trials": input.include_trial_summary,
+                        "indications": input.include_indication_summary,
+                        "aggregated": input.include_aggregated_summary,
+                    }
+                },
+                suggestions=suggestions
+            )
         )
 
     # =========================================================================
