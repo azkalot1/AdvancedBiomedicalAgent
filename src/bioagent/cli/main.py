@@ -225,8 +225,6 @@ def main() -> NoReturn:
     # Route commands to their handlers
     if command == "setup_postgres":
         route_setup_postgres()
-    elif command == "chat":
-        route_chat()
     elif command == "ingest":
         route_ingest_command()
     elif command == "extract-schema":
