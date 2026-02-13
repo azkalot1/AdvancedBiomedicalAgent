@@ -87,9 +87,9 @@ def build_handoff_signals(source_tool: str, result_context: dict) -> str:
         if nct_id:
             add(f'To see outcomes for a top trial: search_trial_outcomes(mode="outcomes_for_trial", nct_id="{nct_id}")')
     if tool == "get_clinical_trial_details":
-        if drug_name:
+        if nct_id:
             add(
-                f'To check adverse events: search_adverse_events(mode="events_for_drug", drug_name="{drug_name}")'
+                f'To inspect reported outcomes: search_trial_outcomes(mode="outcomes_for_trial", nct_id="{nct_id}")'
             )
     if tool == "search_drug_labels":
         if drug_name:
