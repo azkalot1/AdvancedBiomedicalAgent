@@ -110,3 +110,202 @@ test_cases:
         - "serotonin-related compounds may appear"
     source: "ChEMBL"
     confidence: "medium"
+
+  # ========================================
+  # STRUCTURE → TARGET SEARCHES
+  # (Find targets for molecules with specific structures)
+  # ========================================
+  - id: "imatinib_structure_targets_009"
+    tool: "pharmacology_search"
+    input:
+      search_type: "similar_molecules"
+      smiles: "CC1=C(C=C(C=C1)NC(=O)C2=CC=C(C=C2)CN3CCN(CC3)C)NC4=NC=CC(=N4)C5=CN=CC=C5"
+      similarity_threshold: 0.8
+    expected_facts:
+      required:
+        - "Molecules similar to imatinib are returned with target information"
+      optional:
+        - "ABL1 is identified as a target"
+        - "KIT is identified as a target"
+        - "Related kinase inhibitors returned"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "erlotinib_structure_targets_010"
+    tool: "pharmacology_search"
+    input:
+      search_type: "similar_molecules"
+      smiles: "COCCOC1=C(C=C2C(=C1)C(=NC=N2)NC3=CC=CC(=C3)C#C)OCCOC"
+      similarity_threshold: 0.7
+    expected_facts:
+      required:
+        - "Molecules similar to erlotinib are returned with target information"
+      optional:
+        - "EGFR is identified as a target"
+        - "Similar quinazoline-based inhibitors returned"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "vemurafenib_structure_targets_011"
+    tool: "pharmacology_search"
+    input:
+      search_type: "similar_molecules"
+      smiles: "CCCS(=O)(=O)NC1=C(C(=C(C=C1)F)C(=O)C2=CNC3=C2C=C(C=N3)C4=CC=C(C=C4)Cl)F"
+      similarity_threshold: 0.7
+    expected_facts:
+      required:
+        - "Molecules similar to vemurafenib are returned with target information"
+      optional:
+        - "BRAF is identified as a target"
+        - "Related RAF inhibitors returned"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "sunitinib_structure_targets_012"
+    tool: "pharmacology_search"
+    input:
+      search_type: "similar_molecules"
+      smiles: 'CCN(CC)CCNC(=O)c1c(C)[nH]c(/C=C2\C(=O)Nc3ccc(F)cc32)c1C'
+      similarity_threshold: 0.7
+    expected_facts:
+      required:
+        - "Molecules similar to sunitinib are returned with target information"
+      optional:
+        - "KDR/VEGFR2 is identified as a target"
+        - "PDGFRA or KIT as targets"
+        - "Multi-kinase inhibitor activity"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "ruxolitinib_structure_targets_013"
+    tool: "pharmacology_search"
+    input:
+      search_type: "similar_molecules"
+      smiles: "C1CCC(C1)[C@@H](CC#N)N2C=C(C=N2)C3=C4C=CNC4=NC=N3"
+      similarity_threshold: 0.7
+    expected_facts:
+      required:
+        - "Molecules similar to ruxolitinib are returned with target information"
+      optional:
+        - "JAK1 is identified as a target"
+        - "JAK2 is identified as a target"
+    source: "ChEMBL"
+    confidence: "high"
+
+  # ========================================
+  # SUBSTRUCTURE → TARGET SEARCHES
+  # (Find compounds with specific scaffolds and their targets)
+  # ========================================
+  - id: "quinazoline_targets_014"
+    tool: "pharmacology_search"
+    input:
+      search_type: "substructure"
+      smiles: "c1ccc2ncnc(N)c2c1"
+    expected_facts:
+      required:
+        - "Compounds containing aminoquinazoline scaffold are returned with targets"
+      optional:
+        - "EGFR inhibitors are included"
+        - "gefitinib or erlotinib-like compounds"
+    source: "ChEMBL"
+    confidence: "medium"
+
+  - id: "pyrazolopyrimidine_targets_015"
+    tool: "pharmacology_search"
+    input:
+      search_type: "substructure"
+      smiles: "c1nc2[nH]ncc2cn1"
+    expected_facts:
+      required:
+        - "Compounds with pyrazolopyrimidine scaffold are returned"
+      optional:
+        - "Kinase inhibitors with this scaffold"
+        - "JAK inhibitor compounds may appear"
+    source: "ChEMBL"
+    confidence: "medium"
+
+  - id: "benzimidazole_targets_016"
+    tool: "pharmacology_search"
+    input:
+      search_type: "substructure"
+      smiles: "c1ccc2[nH]cnc2c1"
+    expected_facts:
+      required:
+        - "Compounds containing benzimidazole are returned with targets"
+      optional:
+        - "PPI inhibitors may be included"
+        - "omeprazole-related compounds"
+    source: "ChEMBL"
+    confidence: "medium"
+
+  # ========================================
+  # EXACT STRUCTURE → TARGET (Known Drugs)
+  # ========================================
+  - id: "osimertinib_exact_targets_017"
+    tool: "search_exact_structure"
+    input:
+      smiles: "CN1C=C(C2=CC=CC=C21)C3=NC(=NC=C3)NC4=C(C=C(C(=C4)NC(=O)C=C)N(C)CCN(C)C)OC"
+    expected_facts:
+      required:
+        - "Structure matches osimertinib (Tagrisso)"
+      optional:
+        - "EGFR is identified as target"
+        - "T790M mutant EGFR selectivity noted"
+        - "AstraZeneca compound"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "crizotinib_exact_targets_018"
+    tool: "search_exact_structure"
+    input:
+      smiles: "C[C@H](C1=C(C=CC(=C1Cl)F)Cl)OC2=C(N=CC(=C2)C3=CN(N=C3)C4CCNCC4)N"
+    expected_facts:
+      required:
+        - "Structure matches crizotinib (Xalkori)"
+      optional:
+        - "ALK is identified as target"
+        - "MET is identified as target"
+        - "Pfizer compound"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "palbociclib_exact_targets_019"
+    tool: "search_exact_structure"
+    input:
+      smiles: "CC1=C(C(=O)N(C2=NC(=NC=C12)NC3=NC=C(C=C3)N4CCNCC4)C5CCCC5)C(=O)C"
+    expected_facts:
+      required:
+        - "Structure matches palbociclib (Ibrance)"
+      optional:
+        - "CDK4 is identified as target"
+        - "CDK6 is identified as target"
+        - "Pfizer compound"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "dabrafenib_exact_targets_020"
+    tool: "search_exact_structure"
+    input:
+      smiles: "CC(C)(C)C1=NC(=C(S1)C2=NC(=NC=C2)N)C3=C(C(=CC=C3)NS(=O)(=O)C4=C(C=CC=C4F)F)F"
+    expected_facts:
+      required:
+        - "Structure matches dabrafenib (Tafinlar)"
+      optional:
+        - "BRAF is identified as target"
+        - "V600E mutant selectivity"
+        - "GlaxoSmithKline/Novartis compound"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "alectinib_exact_targets_021"
+    tool: "search_exact_structure"
+    input:
+      smiles: "CCC1=CC2=C(C=C1N3CCC(CC3)N4CCOCC4)C(C5=C(C2=O)C6=C(N5)C=C(C=C6)C#N)(C)C"
+    expected_facts:
+      required:
+        - "Structure matches alectinib (Alecensa)"
+      optional:
+        - "ALK is identified as target"
+        - "Roche/Genentech compound"
+    source: "ChEMBL"
+    confidence: "high"

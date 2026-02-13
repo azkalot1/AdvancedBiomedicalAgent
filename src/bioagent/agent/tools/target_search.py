@@ -7,7 +7,7 @@ Agent-facing pharmacology search tools with proper formatting.
 from langchain_core.tools import tool
 
 from bioagent.data.ingest.config import DEFAULT_CONFIG
-from .tool_utils import robust_unwrap_llm_inputs
+from .tool_utils import robust_unwrap_llm_inputs, build_handoff_signals
 
 from bioagent.data.search.target_search import (
     PharmacologySearch,
@@ -20,6 +20,8 @@ from bioagent.data.search.target_search import (
     CompoundTargetProfile,
     DrugForTargetHit,
     DrugProfileResult,
+    DrugIndicationHit,
+    TargetPathwayHit,
     ClinicalTrialHit,
     MoleculeForm,
     SearchDiagnostics,
@@ -165,7 +167,11 @@ def _format_drug_for_target(rank: int, hit: DrugForTargetHit) -> list[str]:
     return lines
 
 
-def _format_drug_profile_result(rank: int, hit: DrugProfileResult) -> list[str]:
+def _format_drug_profile_result(
+    rank: int,
+    hit: DrugProfileResult,
+    detail_level: str = "standard",
+) -> list[str]:
     """Format a drug profile result."""
     lines = []
     
@@ -191,21 +197,23 @@ def _format_drug_profile_result(rank: int, hit: DrugProfileResult) -> list[str]:
     if hit.recent_trials:
         lines.append("")
         lines.append(f"    --- CLINICAL TRIALS ({len(hit.recent_trials)}) ---")
-        for t in hit.recent_trials[:5]:
+        max_trials = len(hit.recent_trials) if detail_level == "comprehensive" else 5
+        for t in hit.recent_trials[:max_trials]:
             lines.append(f"      • {t.nct_id} | Phase: {t.phase or 'N/A'} | Status: {t.trial_status or 'Unknown'}")
             lines.append(f"        {_truncate(t.trial_title, 70)}")
-        if len(hit.recent_trials) > 5:
+        if detail_level != "comprehensive" and len(hit.recent_trials) > 5:
             lines.append(f"      ... and {len(hit.recent_trials) - 5} more trials")
     
     if hit.forms:
         lines.append("")
         lines.append(f"    --- MOLECULAR FORMS ({len(hit.forms)}) ---")
-        for f in hit.forms[:5]:
+        max_forms = len(hit.forms) if detail_level == "comprehensive" else 5
+        for f in hit.forms[:max_forms]:
             name = f.form_name or f.chembl_id or f"MOL_{f.mol_id}"
             salt = f" ({f.salt_form})" if f.salt_form else ""
             stereo = f" [{f.stereo_type}]" if f.stereo_type else ""
             lines.append(f"      • {name}{salt}{stereo}")
-        if len(hit.forms) > 5:
+        if detail_level != "comprehensive" and len(hit.forms) > 5:
             lines.append(f"      ... and {len(hit.forms) - 5} more forms")
     
     return lines
@@ -252,7 +260,47 @@ def _format_molecule_form(rank: int, hit: MoleculeForm) -> list[str]:
     return lines
 
 
-def _format_pharmacology_output(result: TargetSearchOutput) -> str:
+def _format_drug_indication(rank: int, hit: DrugIndicationHit) -> list[str]:
+    """Format a drug-indication hit."""
+    lines = []
+
+    phase = f"phase {hit.max_phase}" if hit.max_phase is not None else "phase N/A"
+    status = "APPROVED" if hit.is_approved else "investigational"
+    drug_type = ""
+    if hit.is_biotherapeutic:
+        drug_type = f" [{hit.molecule_type or 'Biotherapeutic'}]"
+    else:
+        drug_type = " [small molecule]"
+
+    lines.append(f"[{rank}] {hit.concept_name}{drug_type} | {status}, {phase}")
+
+    if hit.matched_indication:
+        lines.append(f"    Indication: {hit.matched_indication}")
+    if hit.match_reason:
+        lines.append(f"    Matched via: {hit.match_reason}")
+    if hit.sources:
+        lines.append(f"    Sources: {', '.join(hit.sources)}")
+
+    return lines
+
+
+def _format_target_pathway(rank: int, hit: TargetPathwayHit) -> list[str]:
+    """Format a target-pathway hit."""
+    lines = []
+    pathway_desc = hit.protein_class_desc or "unknown pathway class"
+    lines.append(f"[{rank}] {hit.gene_symbol} is associated with a signaling pathway")
+    lines.append(f"    Pathway class: {pathway_desc}")
+    if hit.synonyms:
+        lines.append(f"    Synonyms: {', '.join(hit.synonyms[:5])}")
+    return lines
+
+
+def _format_pharmacology_output(
+    result: TargetSearchOutput,
+    detail_level: str = "standard",
+    source_tool: str | None = None,
+    result_context: dict | None = None,
+) -> str:
     """Format pharmacology search results for LLM consumption."""
     lines = []
     
@@ -300,34 +348,74 @@ def _format_pharmacology_output(result: TargetSearchOutput) -> str:
                 lines.append("  → Try alternative names or synonyms")
                 lines.append("  → Try lowering min_pchembl threshold")
         
-        return "\n".join(lines)
+        results_text = "\n".join(lines)
+        signals = build_handoff_signals(source_tool or "", result_context or {})
+        if not signals:
+            signals = "[AGENT_SIGNALS]\n---\nRelated searches:\n  -> None"
+        return f"[RESULTS]\n{results_text}\n\n{signals}"
     
     # === RESULTS ===
     if not result.hits:
-        return "\n".join(lines)
+        results_text = "\n".join(lines)
+        signals = build_handoff_signals(source_tool or "", result_context or {})
+        if not signals:
+            signals = "[AGENT_SIGNALS]\n---\nRelated searches:\n  -> None"
+        return f"[RESULTS]\n{results_text}\n\n{signals}"
     
     lines.append("")
     lines.append("=" * 60)
     
-    for i, hit in enumerate(result.hits[:30], 1):
+    max_hits = 100 if detail_level == "comprehensive" else 30
+    for i, hit in enumerate(result.hits[:max_hits], 1):
         lines.append("")
-        
-        if isinstance(hit, CompoundTargetProfile):
-            lines.extend(_format_compound_profile(i, hit))
-        elif isinstance(hit, DrugForTargetHit):
-            lines.extend(_format_drug_for_target(i, hit))
-        elif isinstance(hit, DrugProfileResult):
-            lines.extend(_format_drug_profile_result(i, hit))
-        elif isinstance(hit, ClinicalTrialHit):
-            lines.extend(_format_clinical_trial(i, hit))
-        elif isinstance(hit, MoleculeForm):
-            lines.extend(_format_molecule_form(i, hit))
+        if detail_level == "brief":
+            if isinstance(hit, CompoundTargetProfile):
+                best = f"{hit.best_pchembl:.1f}" if hit.best_pchembl else "N/A"
+                chembl = hit.chembl_id or "N/A"
+                lines.append(f"[{i}] {hit.concept_name} | ChEMBL: {chembl} | best pChEMBL: {best}")
+            elif isinstance(hit, DrugForTargetHit):
+                activity = f"{hit.activity_type}={hit.activity_value_nm:.1f} nM" if hit.activity_value_nm else "activity N/A"
+                lines.append(f"[{i}] {hit.concept_name} | {activity}")
+            elif isinstance(hit, DrugProfileResult):
+                lines.append(
+                    f"[{i}] {hit.concept_name} | forms: {hit.n_forms} | targets: {hit.n_activity_targets} | trials: {hit.n_clinical_trials}"
+                )
+            elif isinstance(hit, ClinicalTrialHit):
+                lines.append(f"[{i}] {hit.nct_id} | Phase: {hit.phase or 'N/A'} | Status: {hit.trial_status or 'Unknown'}")
+            elif isinstance(hit, MoleculeForm):
+                name = hit.form_name or hit.chembl_id or f"MOL_{hit.mol_id}"
+                lines.append(f"[{i}] {name} | ChEMBL: {hit.chembl_id or 'N/A'}")
+            elif isinstance(hit, DrugIndicationHit):
+                status = "APPROVED" if hit.is_approved else "investigational"
+                phase = f"phase {hit.max_phase}" if hit.max_phase is not None else "phase N/A"
+                drug_type = hit.molecule_type or ("biotherapeutic" if hit.is_biotherapeutic else "small molecule")
+                lines.append(f"[{i}] {hit.concept_name} | {status}, {phase} | {drug_type}")
+            elif isinstance(hit, TargetPathwayHit):
+                pathway_desc = hit.protein_class_desc or "unknown pathway class"
+                lines.append(f"[{i}] {hit.gene_symbol} | pathway: {pathway_desc}")
+            else:
+                lines.append(f"[{i}] {type(hit).__name__}: {hit}")
         else:
-            lines.append(f"[{i}] {type(hit).__name__}: {hit}")
+            if isinstance(hit, CompoundTargetProfile):
+                lines.extend(_format_compound_profile(i, hit))
+            elif isinstance(hit, DrugForTargetHit):
+                lines.extend(_format_drug_for_target(i, hit))
+            elif isinstance(hit, DrugProfileResult):
+                lines.extend(_format_drug_profile_result(i, hit, detail_level=detail_level))
+            elif isinstance(hit, ClinicalTrialHit):
+                lines.extend(_format_clinical_trial(i, hit))
+            elif isinstance(hit, MoleculeForm):
+                lines.extend(_format_molecule_form(i, hit))
+            elif isinstance(hit, DrugIndicationHit):
+                lines.extend(_format_drug_indication(i, hit))
+            elif isinstance(hit, TargetPathwayHit):
+                lines.extend(_format_target_pathway(i, hit))
+            else:
+                lines.append(f"[{i}] {type(hit).__name__}: {hit}")
     
-    if result.total_hits > 30:
+    if result.total_hits > max_hits:
         lines.append("")
-        lines.append(f"... showing 30 of {result.total_hits} results. Use 'limit' parameter for more.")
+        lines.append(f"... showing {max_hits} of {result.total_hits} results. Use 'limit' parameter for more.")
     
     # === DIAGNOSTICS FOR SUCCESS (if there are suggestions) ===
     if result.diagnostics and result.diagnostics.suggestions:
@@ -335,8 +423,15 @@ def _format_pharmacology_output(result: TargetSearchOutput) -> str:
         lines.append("Notes:")
         for suggestion in result.diagnostics.suggestions[:3]:
             lines.append(f"  ℹ {suggestion}")
+
+    if detail_level == "comprehensive" and result.diagnostics:
+        lines.extend(_format_diagnostics(result.diagnostics, verbose=True))
     
-    return "\n".join(lines)
+    results_text = "\n".join(lines)
+    signals = build_handoff_signals(source_tool or "", result_context or {})
+    if not signals:
+        signals = "[AGENT_SIGNALS]\n---\nRelated searches:\n  -> None"
+    return f"[RESULTS]\n{results_text}\n\n{signals}"
 
 
 # =============================================================================
@@ -397,13 +492,31 @@ def _validate_smiles(smiles: str | None) -> tuple[str | None, str | None]:
     
     if len(smiles) > 5000:
         return None, f"smiles is too long ({len(smiles)} chars). Maximum is 5000 characters."
-    
-    valid_chars = set("CNOPSFIBrcnopsfib[]()=#@+-\\/%.0123456789")
-    invalid = set(smiles) - valid_chars
-    if invalid:
-        return None, f"smiles contains invalid characters: {invalid}. Check SMILES syntax."
-    
-    return smiles, None
+
+    # Prefer RDKit validation at the tool boundary so malformed SMILES are
+    # rejected consistently before dispatching to deeper search handlers.
+    try:
+        from rdkit import Chem  # pyright: ignore[reportMissingImports]
+
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None, "invalid SMILES syntax. Check parentheses/ring closures/aromatic tokens."
+        canonical = Chem.MolToSmiles(mol, canonical=True)
+        return canonical or smiles, None
+    except ImportError:
+        # Fallback only if RDKit is unavailable in the current runtime.
+        valid_chars = set(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "abcdefghijklmnopqrstuvwxyz"
+            "0123456789"
+            "[]()=#@+-\\/%.:*"
+        )
+        invalid = set(smiles) - valid_chars
+        if invalid:
+            return None, f"smiles contains invalid characters: {invalid}. Check SMILES syntax."
+        return smiles, None
+    except Exception as e:
+        return None, f"invalid SMILES syntax: {type(e).__name__}: {e}"
 
 
 def _validate_activity_type(activity_type: str) -> tuple[ActivityType | None, str | None]:
@@ -518,6 +631,17 @@ def _validate_limit(limit: int) -> tuple[int | None, str | None]:
     return limit, None
 
 
+def _validate_detail_level(detail_level: str | None) -> tuple[str | None, str | None]:
+    """Validate detail_level parameter. Returns (value, error_message)."""
+    if not detail_level or not isinstance(detail_level, str):
+        return "standard", None
+    value = detail_level.strip().lower()
+    allowed = {"brief", "standard", "comprehensive"}
+    if value not in allowed:
+        return None, "detail_level must be one of: brief, standard, comprehensive"
+    return value, None
+
+
 # =============================================================================
 # PHARMACOLOGY TOOLS
 # =============================================================================
@@ -530,6 +654,7 @@ async def search_drug_targets(
     data_source: str = "both",
     include_all_organisms: bool = False,
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """
     Find all known protein targets for a drug.
@@ -574,6 +699,10 @@ async def search_drug_targets(
     limit, error = _validate_limit(limit)
     if error:
         return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
+    if error:
+        return f"✗ Input error: {error}"
     
     try:
         search_input = TargetSearchInput(
@@ -587,7 +716,12 @@ async def search_drug_targets(
         
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_drug_targets",
+            result_context={"drug_name": drug_name},
+        )
     
     except Exception as e:
         return (
@@ -606,7 +740,10 @@ async def search_target_drugs(
     gene_symbol: str,
     min_pchembl: float = 5.0,
     data_source: str = "both",
+    molecule_type: str = "all",
+    biotherapeutic_subtype: str = "all",
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """
     Find all drugs/compounds that modulate a specific protein target.
@@ -626,6 +763,15 @@ async def search_target_drugs(
             - "both" (default): Activity + mechanism data
             - "activity": Only quantitative assay data
             - "mechanism": Only curated mechanisms
+        molecule_type: Filter by molecule type.
+            - "all" (default): Small molecules + biotherapeutics
+            - "small_molecule": Only small molecules
+            - "biotherapeutic": Only biologics
+        biotherapeutic_subtype: Filter biologics by subtype (only when molecule_type="biotherapeutic").
+            - "all" (default): All biologic subtypes
+            - "antibody": Antibodies
+            - "enzyme": Enzymes
+            - "protein": Proteins
         limit: Maximum results (default: 50, max: 500).
     
     Returns:
@@ -642,8 +788,22 @@ async def search_target_drugs(
     ds, error = _validate_data_source(data_source)
     if error:
         return f"✗ Input error: {error}"
+
+    allowed_types = {"all", "small_molecule", "biotherapeutic"}
+    if molecule_type not in allowed_types:
+        return f"✗ Input error: molecule_type must be one of {sorted(allowed_types)}"
+
+    allowed_subtypes = {"all", "antibody", "enzyme", "protein"}
+    if biotherapeutic_subtype not in allowed_subtypes:
+        return f"✗ Input error: biotherapeutic_subtype must be one of {sorted(allowed_subtypes)}"
+    if molecule_type != "biotherapeutic" and biotherapeutic_subtype != "all":
+        return "✗ Input error: biotherapeutic_subtype requires molecule_type='biotherapeutic'"
     
     limit, error = _validate_limit(limit)
+    if error:
+        return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
     if error:
         return f"✗ Input error: {error}"
     
@@ -653,12 +813,19 @@ async def search_target_drugs(
             query=gene_symbol,
             min_pchembl=min_pchembl,
             data_source=ds,
+            molecule_type_filter=molecule_type,
+            biotherapeutic_subtype=biotherapeutic_subtype,
             limit=limit,
         )
         
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_target_drugs",
+            result_context={"gene_symbol": gene_symbol},
+        )
     
     except Exception as e:
         return (
@@ -678,6 +845,7 @@ async def search_similar_molecules(
     similarity_threshold: float = 0.7,
     min_pchembl: float = 5.0,
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """
     Find molecules structurally similar to a query compound.
@@ -713,6 +881,10 @@ async def search_similar_molecules(
     limit, error = _validate_limit(limit)
     if error:
         return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
+    if error:
+        return f"✗ Input error: {error}"
     
     try:
         search_input = TargetSearchInput(
@@ -725,7 +897,11 @@ async def search_similar_molecules(
         
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_similar_molecules",
+        )
     
     except Exception as e:
         smiles_preview = _truncate(smiles, 50)
@@ -744,6 +920,7 @@ async def search_similar_molecules(
 async def search_exact_structure(
     smiles: str,
     min_pchembl: float = 5.0,
+    detail_level: str = "standard",
 ) -> str:
     """
     Find an exact structure match for a molecule and retrieve its data.
@@ -765,6 +942,10 @@ async def search_exact_structure(
     min_pchembl, error = _validate_pchembl(min_pchembl)
     if error:
         return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
+    if error:
+        return f"✗ Input error: {error}"
     
     try:
         search_input = TargetSearchInput(
@@ -775,7 +956,11 @@ async def search_exact_structure(
         
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_exact_structure",
+        )
     
     except Exception as e:
         smiles_preview = _truncate(smiles, 50)
@@ -793,6 +978,7 @@ async def search_exact_structure(
 async def search_substructure(
     pattern: str,
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """
     Find molecules containing a specific substructure.
@@ -817,6 +1003,10 @@ async def search_substructure(
     limit, error = _validate_limit(limit)
     if error:
         return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
+    if error:
+        return f"✗ Input error: {error}"
     
     try:
         search_input = TargetSearchInput(
@@ -827,7 +1017,11 @@ async def search_substructure(
         
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_substructure",
+        )
     
     except Exception as e:
         return (
@@ -847,6 +1041,7 @@ async def get_drug_profile(
     include_trials: bool = True,
     include_forms: bool = True,
     min_pchembl: float = 5.0,
+    detail_level: str = "standard",
 ) -> str:
     """
     Get a comprehensive profile for a drug.
@@ -874,6 +1069,10 @@ async def get_drug_profile(
     min_pchembl, error = _validate_pchembl(min_pchembl)
     if error:
         return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
+    if error:
+        return f"✗ Input error: {error}"
     
     try:
         search_input = TargetSearchInput(
@@ -886,7 +1085,12 @@ async def get_drug_profile(
         
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="get_drug_profile",
+            result_context={"drug_name": drug_name, "search_type": "drug_profile"},
+        )
     
     except Exception as e:
         return (
@@ -903,6 +1107,7 @@ async def get_drug_profile(
 async def get_drug_forms(
     drug_name: str,
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """
     Get all molecular forms of a drug (salts, stereoisomers, etc.).
@@ -921,6 +1126,10 @@ async def get_drug_forms(
     limit, error = _validate_limit(limit)
     if error:
         return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
+    if error:
+        return f"✗ Input error: {error}"
     
     try:
         search_input = TargetSearchInput(
@@ -931,7 +1140,12 @@ async def get_drug_forms(
         
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="get_drug_forms",
+            result_context={"drug_name": drug_name},
+        )
     
     except Exception as e:
         return f"✗ Error getting drug forms: {type(e).__name__}: {e}"
@@ -942,6 +1156,7 @@ async def get_drug_forms(
 async def search_drug_trials(
     drug_name: str,
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """
     Find clinical trials for a drug.
@@ -963,6 +1178,10 @@ async def search_drug_trials(
     limit, error = _validate_limit(limit)
     if error:
         return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
+    if error:
+        return f"✗ Input error: {error}"
     
     try:
         search_input = TargetSearchInput(
@@ -973,7 +1192,12 @@ async def search_drug_trials(
         
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_drug_trials",
+            result_context={"drug_name": drug_name},
+        )
     
     except Exception as e:
         return (
@@ -990,6 +1214,7 @@ async def search_drug_trials(
 async def compare_drugs_on_target(
     target: str,
     drug_names: list[str] | str,
+    detail_level: str = "standard",
 ) -> str:
     """
     Compare multiple drugs' activity against a single target.
@@ -1023,6 +1248,10 @@ async def compare_drugs_on_target(
         if error:
             return f"✗ Input error (drug '{name}'): {error}"
         validated_names.append(clean_name)
+
+    detail_level, error = _validate_detail_level(detail_level)
+    if error:
+        return f"✗ Input error: {error}"
     
     try:
         search_input = TargetSearchInput(
@@ -1033,7 +1262,12 @@ async def compare_drugs_on_target(
         
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="compare_drugs_on_target",
+            result_context={"gene_symbol": target},
+        )
     
     except Exception as e:
         return (
@@ -1050,6 +1284,7 @@ async def search_selective_drugs(
     min_selectivity_fold: float = 10.0,
     min_pchembl: float = 6.0,
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """
     Find drugs that are selective for one target over others.
@@ -1098,6 +1333,10 @@ async def search_selective_drugs(
     limit, error = _validate_limit(limit)
     if error:
         return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
+    if error:
+        return f"✗ Input error: {error}"
     
     try:
         search_input = TargetSearchInput(
@@ -1111,7 +1350,12 @@ async def search_selective_drugs(
         
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_selective_drugs",
+            result_context={"gene_symbol": target},
+        )
     
     except Exception as e:
         return (
@@ -1134,6 +1378,7 @@ async def search_drug_activities(
     data_source: str = "activity",
     include_all_organisms: bool = False,
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """
     Retrieve quantitative activity measurements for a drug.
@@ -1164,6 +1409,10 @@ async def search_drug_activities(
     if error:
         return f"✗ Input error: {error}"
 
+    detail_level, error = _validate_detail_level(detail_level)
+    if error:
+        return f"✗ Input error: {error}"
+
     try:
         search_input = TargetSearchInput(
             mode=SearchMode.ACTIVITIES_FOR_DRUG,
@@ -1178,7 +1427,12 @@ async def search_drug_activities(
 
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_drug_activities",
+            result_context={"drug_name": drug_name},
+        )
 
     except Exception as e:
         return f"✗ Error searching drug activities: {type(e).__name__}: {e}"
@@ -1193,6 +1447,7 @@ async def search_target_activities(
     min_confidence: str = "any",
     data_source: str = "activity",
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """Retrieve quantitative activity measurements for a target gene."""
     gene_symbol, error = _validate_gene_symbol(gene_symbol)
@@ -1219,6 +1474,10 @@ async def search_target_activities(
     if error:
         return f"✗ Input error: {error}"
 
+    detail_level, error = _validate_detail_level(detail_level)
+    if error:
+        return f"✗ Input error: {error}"
+
     try:
         search_input = TargetSearchInput(
             mode=SearchMode.ACTIVITIES_FOR_TARGET,
@@ -1232,7 +1491,12 @@ async def search_target_activities(
 
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_target_activities",
+            result_context={"gene_symbol": gene_symbol},
+        )
 
     except Exception as e:
         return f"✗ Error searching target activities: {type(e).__name__}: {e}"
@@ -1243,6 +1507,7 @@ async def search_target_activities(
 async def search_drug_indications(
     drug_name: str,
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """Find indications (approved or reported) for a drug."""
     drug_name, error = _validate_drug_name(drug_name)
@@ -1250,6 +1515,10 @@ async def search_drug_indications(
         return f"✗ Input error: {error}"
 
     limit, error = _validate_limit(limit)
+    if error:
+        return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
     if error:
         return f"✗ Input error: {error}"
 
@@ -1262,7 +1531,12 @@ async def search_drug_indications(
 
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_drug_indications",
+            result_context={"drug_name": drug_name},
+        )
 
     except Exception as e:
         return f"✗ Error searching drug indications: {type(e).__name__}: {e}"
@@ -1273,6 +1547,7 @@ async def search_drug_indications(
 async def search_indication_drugs(
     indication: str,
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """Find drugs associated with an indication or disease term."""
     indication, error = _validate_text_query(indication, "indication")
@@ -1280,6 +1555,10 @@ async def search_indication_drugs(
         return f"✗ Input error: {error}"
 
     limit, error = _validate_limit(limit)
+    if error:
+        return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
     if error:
         return f"✗ Input error: {error}"
 
@@ -1292,7 +1571,11 @@ async def search_indication_drugs(
 
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_indication_drugs",
+        )
 
     except Exception as e:
         return f"✗ Error searching drugs for indication: {type(e).__name__}: {e}"
@@ -1303,6 +1586,7 @@ async def search_indication_drugs(
 async def search_target_pathways(
     gene_symbol: str,
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """Find pathway annotations for a target gene."""
     gene_symbol, error = _validate_gene_symbol(gene_symbol)
@@ -1310,6 +1594,10 @@ async def search_target_pathways(
         return f"✗ Input error: {error}"
 
     limit, error = _validate_limit(limit)
+    if error:
+        return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
     if error:
         return f"✗ Input error: {error}"
 
@@ -1322,7 +1610,12 @@ async def search_target_pathways(
 
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_target_pathways",
+            result_context={"gene_symbol": gene_symbol},
+        )
 
     except Exception as e:
         return f"✗ Error searching target pathways: {type(e).__name__}: {e}"
@@ -1333,6 +1626,7 @@ async def search_target_pathways(
 async def search_drug_interactions(
     drug_name: str,
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """Find known drug-drug interactions for a drug."""
     drug_name, error = _validate_drug_name(drug_name)
@@ -1340,6 +1634,10 @@ async def search_drug_interactions(
         return f"✗ Input error: {error}"
 
     limit, error = _validate_limit(limit)
+    if error:
+        return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
     if error:
         return f"✗ Input error: {error}"
 
@@ -1352,7 +1650,12 @@ async def search_drug_interactions(
 
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_drug_interactions",
+            result_context={"drug_name": drug_name},
+        )
 
     except Exception as e:
         return f"✗ Error searching drug interactions: {type(e).__name__}: {e}"
@@ -1371,11 +1674,16 @@ async def pharmacology_search(
     smiles: str | None = None,
     drug_names: list[str] | None = None,
     off_targets: list[str] | None = None,
+    indication: str | None = None,
     min_pchembl: float = 5.0,
     similarity_threshold: float = 0.7,
     min_selectivity_fold: float = 10.0,
     data_source: str = "both",
+    activity_type: str = "all",
+    min_confidence: str = "any",
+    include_all_organisms: bool = False,
     limit: int = 50,
+    detail_level: str = "standard",
 ) -> str:
     """
     Unified pharmacology search tool for drug-target interactions, mechanisms, 
@@ -1393,6 +1701,12 @@ async def pharmacology_search(
             - "substructure": Find molecules containing a substructure (requires smiles)
             - "compare_drugs": Compare drugs on a target (requires gene_symbol + drug_names)
             - "selective_drugs": Find selective drugs (requires gene_symbol + off_targets)
+            - "drug_activities": Activity measurements for a drug (requires drug_name)
+            - "target_activities": Activity measurements for a target (requires gene_symbol)
+            - "drug_indications": Indications for a drug (requires drug_name)
+            - "indication_drugs": Drugs for an indication (requires indication)
+            - "target_pathways": Pathways for a target (requires gene_symbol)
+            - "drug_interactions": Drug-drug interactions (requires drug_name)
         
         drug_name: Name of the drug (brand, generic, or synonym).
             Required for: drug_targets, drug_profile, drug_forms, drug_trials
@@ -1413,6 +1727,10 @@ async def pharmacology_search(
         off_targets: List of gene symbols to avoid (for selectivity search).
             Required for: selective_drugs
             Example: ["JAK1", "JAK3"] (to find JAK2-selective compounds)
+
+        indication: Indication or disease term for indication_drugs mode.
+            Required for: indication_drugs
+            Example: "chronic myeloid leukemia"
         
         min_pchembl: Minimum potency threshold (pChEMBL value). Default: 5.0
             - 5.0 = 10 μM (weak, more results)
@@ -1432,6 +1750,10 @@ async def pharmacology_search(
             - "both": Activity data + curated mechanisms
             - "activity": Only quantitative assay data (IC50, Ki, etc.)
             - "mechanism": Only curated mechanism of action data
+
+        activity_type: Activity type filter for *_activities modes. Default: "all"
+        min_confidence: Minimum confidence for activity data (high/medium/low/any).
+        include_all_organisms: Include non-human targets (default: False)
         
         limit: Maximum number of results. Default: 50, max: 500
     
@@ -1466,6 +1788,30 @@ async def pharmacology_search(
             off_targets=["JAK1", "JAK3"],
             min_selectivity_fold=10.0
         )
+
+        # Find drug indications
+        pharmacology_search(
+            search_type="drug_indications",
+            drug_name="imatinib"
+        )
+
+        # Find drugs for an indication
+        pharmacology_search(
+            search_type="indication_drugs",
+            indication="chronic myeloid leukemia"
+        )
+
+        # Find target pathways
+        pharmacology_search(
+            search_type="target_pathways",
+            gene_symbol="EGFR"
+        )
+
+        # Find drug interactions
+        pharmacology_search(
+            search_type="drug_interactions",
+            drug_name="warfarin"
+        )
     """
     
     # === VALIDATE SEARCH TYPE ===
@@ -1480,6 +1826,12 @@ async def pharmacology_search(
         "substructure": SearchMode.SUBSTRUCTURE,
         "compare_drugs": SearchMode.COMPARE_DRUGS,
         "selective_drugs": SearchMode.SELECTIVE_DRUGS,
+        "drug_activities": SearchMode.ACTIVITIES_FOR_DRUG,
+        "target_activities": SearchMode.ACTIVITIES_FOR_TARGET,
+        "drug_indications": SearchMode.INDICATIONS_FOR_DRUG,
+        "indication_drugs": SearchMode.DRUGS_FOR_INDICATION,
+        "target_pathways": SearchMode.TARGET_PATHWAYS,
+        "drug_interactions": SearchMode.DRUG_INTERACTIONS,
     }
     
     if not search_type:
@@ -1495,7 +1847,13 @@ async def pharmacology_search(
             "  • exact_structure - Identify a molecule from SMILES\n"
             "  • substructure - Find molecules containing a substructure\n"
             "  • compare_drugs - Compare drugs on a target\n"
-            "  • selective_drugs - Find selective drugs"
+            "  • selective_drugs - Find selective drugs\n"
+            "  • drug_activities - Activity measurements for a drug\n"
+            "  • target_activities - Activity measurements for a target\n"
+            "  • drug_indications - Indications for a drug\n"
+            "  • indication_drugs - Drugs for an indication\n"
+            "  • target_pathways - Pathways for a target\n"
+            "  • drug_interactions - Drug-drug interactions"
         )
     
     search_type_lower = search_type.lower().strip().replace("-", "_").replace(" ", "_")
@@ -1513,7 +1871,13 @@ async def pharmacology_search(
             "  • exact_structure - Identify a molecule from SMILES (requires smiles)\n"
             "  • substructure - Find molecules with substructure (requires smiles)\n"
             "  • compare_drugs - Compare drugs on a target (requires gene_symbol + drug_names)\n"
-            "  • selective_drugs - Find selective drugs (requires gene_symbol + off_targets)"
+            "  • selective_drugs - Find selective drugs (requires gene_symbol + off_targets)\n"
+            "  • drug_activities - Activity measurements for a drug (requires drug_name)\n"
+            "  • target_activities - Activity measurements for a target (requires gene_symbol)\n"
+            "  • drug_indications - Indications for a drug (requires drug_name)\n"
+            "  • indication_drugs - Drugs for an indication (requires indication)\n"
+            "  • target_pathways - Pathways for a target (requires gene_symbol)\n"
+            "  • drug_interactions - Drug-drug interactions (requires drug_name)"
         )
     
     mode = valid_search_types[search_type_lower]
@@ -1522,7 +1886,9 @@ async def pharmacology_search(
     
     # Drug name required
     if mode in [SearchMode.TARGETS_FOR_DRUG, SearchMode.DRUG_PROFILE, 
-                SearchMode.DRUG_FORMS, SearchMode.TRIALS_FOR_DRUG]:
+                SearchMode.DRUG_FORMS, SearchMode.TRIALS_FOR_DRUG,
+                SearchMode.ACTIVITIES_FOR_DRUG, SearchMode.INDICATIONS_FOR_DRUG,
+                SearchMode.DRUG_INTERACTIONS]:
         if not drug_name or not drug_name.strip():
             return (
                 f"✗ Input error: drug_name is required for search_type='{search_type}'.\n\n"
@@ -1545,6 +1911,15 @@ async def pharmacology_search(
         gene_symbol = gene_symbol.strip().upper()
         if len(gene_symbol) < 2 or len(gene_symbol) > 20:
             return f"✗ Input error: gene_symbol '{gene_symbol}' is invalid. Use official HGNC symbols."
+
+    if mode in [SearchMode.ACTIVITIES_FOR_TARGET, SearchMode.TARGET_PATHWAYS]:
+        if not gene_symbol or not gene_symbol.strip():
+            return (
+                f"✗ Input error: gene_symbol is required for search_type='{search_type}'.\n\n"
+                "Example:\n"
+                f"  pharmacology_search(search_type='{search_type}', gene_symbol='EGFR')"
+            )
+        gene_symbol = gene_symbol.strip().upper()
     
     # SMILES required
     if mode in [SearchMode.SIMILAR_MOLECULES, SearchMode.EXACT_STRUCTURE, SearchMode.SUBSTRUCTURE]:
@@ -1595,6 +1970,14 @@ async def pharmacology_search(
             return "✗ Input error: Provide at least 1 valid off-target gene symbol."
         if len(off_targets) > 10:
             return "✗ Input error: Too many off-targets. Maximum is 10."
+
+    if mode == SearchMode.DRUGS_FOR_INDICATION:
+        if not indication or not isinstance(indication, str) or not indication.strip():
+            return (
+                "✗ Input error: indication is required for search_type='indication_drugs'.\n\n"
+                "Example:\n"
+                "  pharmacology_search(search_type='indication_drugs', indication='chronic myeloid leukemia')"
+            )
     
     # === VALIDATE OPTIONAL PARAMETERS ===
     
@@ -1630,6 +2013,14 @@ async def pharmacology_search(
             "Valid options: 'both', 'activity', 'mechanism'"
         )
     ds = data_source_map[ds_key]
+
+    activity_enum, error = _validate_activity_type(activity_type)
+    if error:
+        return f"✗ Input error: {error}"
+
+    confidence_enum, error = _validate_confidence(min_confidence)
+    if error:
+        return f"✗ Input error: {error}"
     
     # limit
     if not isinstance(limit, int):
@@ -1638,17 +2029,25 @@ async def pharmacology_search(
         except (ValueError, TypeError):
             return f"✗ Input error: limit must be an integer"
     limit = max(1, min(500, limit))
+
+    detail_level, error = _validate_detail_level(detail_level)
+    if error:
+        return f"✗ Input error: {error}"
     
     # === BUILD SEARCH INPUT ===
     try:
+        query_value = indication if mode == SearchMode.DRUGS_FOR_INDICATION else (drug_name or gene_symbol)
         search_input = TargetSearchInput(
             mode=mode,
-            query=drug_name or gene_symbol,
+            query=query_value,
             smiles=smiles,
             smarts=smiles if mode == SearchMode.SUBSTRUCTURE else None,
             similarity_threshold=float(similarity_threshold),
             min_pchembl=float(min_pchembl),
             data_source=ds,
+            activity_type=activity_enum,
+            min_confidence=confidence_enum,
+            include_all_organisms=include_all_organisms,
             target=gene_symbol,
             off_targets=off_targets or [],
             min_selectivity_fold=float(min_selectivity_fold),
@@ -1658,7 +2057,16 @@ async def pharmacology_search(
         
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
-        return _format_pharmacology_output(result)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="pharmacology_search",
+            result_context={
+                "search_type": search_type_lower,
+                "drug_name": drug_name,
+                "gene_symbol": gene_symbol,
+            },
+        )
     
     except Exception as e:
         # Build context-specific error message
@@ -1698,4 +2106,5 @@ TARGET_SEARCH_TOOLS = [
     search_indication_drugs,
     search_target_pathways,
     search_drug_interactions,
+    pharmacology_search,
 ]

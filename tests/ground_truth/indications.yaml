@@ -155,3 +155,17 @@ test_cases:
         - "letrozole is used for breast cancer"
     source: "DrugCentral"
     confidence: "high"
+
+  - id: "breast_neoplasms_drugs_012"
+    tool: "search_indication_drugs"
+    input:
+      indication: "breast neoplasms"
+    expected_facts:
+      required:
+        - "trastuzumab is used for breast cancer"
+      optional:
+        - "palbociclib is used for breast cancer"
+        - "tamoxifen is used for breast cancer"
+        - "letrozole is used for breast cancer"
+    source: "DrugCentral"
+    confidence: "high"

@@ -44,6 +44,21 @@ test_cases:
     source: "ClinicalTrials.gov"
     confidence: "high"
 
+  - id: "trastuzumab_trials_bio_026"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_molecule"
+      molecule: "trastuzumab"
+      molecule_type: "biotherapeutic"
+    expected_facts:
+      required:
+        - "Trials linked to trastuzumab are returned"
+      optional:
+        - "HER2 or ERBB2 trials included"
+        - "Breast cancer trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
   # ========================================
   # MOLECULES BY CONDITION
   # ========================================
@@ -91,6 +106,21 @@ test_cases:
     source: "ClinicalTrials.gov"
     confidence: "high"
 
+  - id: "melanoma_biotherapeutics_028"
+    tool: "search_molecule_trials"
+    input:
+      mode: "molecules_by_condition"
+      condition: "melanoma"
+      molecule_type: "biotherapeutic"
+    expected_facts:
+      required:
+        - "Biotherapeutic molecules associated with melanoma trials are returned"
+      optional:
+        - "pembrolizumab is included"
+        - "nivolumab is included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
   # ========================================
   # TRIALS BY TARGET
   # ========================================
@@ -109,6 +139,50 @@ test_cases:
     source: "ClinicalTrials.gov"
     confidence: "high"
 
+  - id: "egfr_small_molecule_trials_029"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_target"
+      target_gene: "EGFR"
+      molecule_type: "small_molecule"
+    expected_facts:
+      required:
+        - "Trials linked to EGFR-targeting molecules are returned"
+      optional:
+        - "erlotinib trials included"
+        - "gefitinib trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "pdcd1_biotherapeutic_trials_030"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_target"
+      target_gene: "PDCD1"
+      molecule_type: "biotherapeutic"
+    expected_facts:
+      required:
+        - "Trials linked to PDCD1-targeting biotherapeutics are returned"
+      optional:
+        - "pembrolizumab trials included"
+        - "nivolumab trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "erbb2_biotherapeutic_trials_031"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_target"
+      target_gene: "ERBB2"
+      molecule_type: "biotherapeutic"
+    expected_facts:
+      required:
+        - "Trials linked to ERBB2-targeting biotherapeutics are returned"
+      optional:
+        - "trastuzumab trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
   - id: "jak2_target_trials_008"
     tool: "search_molecule_trials"
     input:
@@ -122,6 +196,250 @@ test_cases:
         - "Myelofibrosis or MPN trials included"
     source: "ClinicalTrials.gov"
     confidence: "high"
+
+  # Additional Target → Trial test cases (well-established targets)
+  - id: "abl1_target_trials_011"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_target"
+      target_gene: "ABL1"
+    expected_facts:
+      required:
+        - "Trials linked to ABL1-targeting molecules are returned"
+      optional:
+        - "imatinib trials included"
+        - "dasatinib trials included"
+        - "CML or ALL trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "braf_target_trials_012"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_target"
+      target_gene: "BRAF"
+    expected_facts:
+      required:
+        - "Trials linked to BRAF-targeting molecules are returned"
+      optional:
+        - "vemurafenib trials included"
+        - "dabrafenib trials included"
+        - "Melanoma trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "alk_target_trials_013"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_target"
+      target_gene: "ALK"
+    expected_facts:
+      required:
+        - "Trials linked to ALK-targeting molecules are returned"
+      optional:
+        - "crizotinib trials included"
+        - "alectinib trials included"
+        - "Lung cancer or NSCLC trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "cdk4_target_trials_014"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_target"
+      target_gene: "CDK4"
+    expected_facts:
+      required:
+        - "Trials linked to CDK4-targeting molecules are returned"
+      optional:
+        - "palbociclib trials included"
+        - "ribociclib trials included"
+        - "Breast cancer trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "vegfr2_target_trials_015"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_target"
+      target_gene: "KDR"
+    expected_facts:
+      required:
+        - "Trials linked to KDR/VEGFR2-targeting molecules are returned"
+      optional:
+        - "sunitinib trials included"
+        - "sorafenib trials included"
+        - "Renal cell carcinoma trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "mtor_target_trials_016"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_target"
+      target_gene: "MTOR"
+    expected_facts:
+      required:
+        - "Trials linked to MTOR-targeting molecules are returned"
+      optional:
+        - "everolimus trials included"
+        - "temsirolimus trials included"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  - id: "met_target_trials_017"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_target"
+      target_gene: "MET"
+    expected_facts:
+      required:
+        - "Trials linked to MET-targeting molecules are returned"
+      optional:
+        - "capmatinib trials included"
+        - "tepotinib trials included"
+        - "NSCLC or hepatocellular carcinoma trials"
+    source: "ClinicalTrials.gov"
+    confidence: "high"
+
+  # ========================================
+  # TRIALS BY SEQUENCE
+  # ========================================
+  - id: "vh_motif_trials_032"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_sequence"
+      sequence: "EVQLVESGG"
+      molecule_type: "biotherapeutic"
+    expected_facts:
+      required:
+        - "Trials linked to biotherapeutics with EVQLVESGG motif are returned"
+      optional:
+        - "Antibody trials included"
+    source: "ClinicalTrials.gov + ChEMBL"
+    confidence: "medium"
+
+  - id: "vl_motif_trials_033"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_sequence"
+      sequence: "DIQMTQ"
+      molecule_type: "biotherapeutic"
+    expected_facts:
+      required:
+        - "Trials linked to biotherapeutics with DIQMTQ motif are returned"
+      optional:
+        - "Antibody trials included"
+    source: "ClinicalTrials.gov + ChEMBL"
+    confidence: "medium"
+
+  # ========================================
+  # TRIALS BY STRUCTURE (Similarity Search)
+  # ========================================
+  - id: "imatinib_structure_trials_018"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_structure"
+      smiles: "Cc1ccc(cc1Nc2nccc(n2)c3cccnc3)NC(=O)c4ccc(cc4)CN5CCN(CC5)C"
+      similarity_threshold: 0.7
+    expected_facts:
+      required:
+        - "Trials for imatinib or structurally similar molecules are returned"
+      optional:
+        - "imatinib trials included"
+        - "Related kinase inhibitor trials may appear"
+        - "CML or GIST trials included"
+    source: "ClinicalTrials.gov + ChEMBL"
+    confidence: "high"
+
+  - id: "erlotinib_structure_trials_019"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_structure"
+      smiles: "COCCOc1cc2c(cc1OCCOC)ncnc2Nc3cccc(c3)C#C"
+      similarity_threshold: 0.7
+    expected_facts:
+      required:
+        - "Trials for erlotinib or similar EGFR inhibitors are returned"
+      optional:
+        - "erlotinib trials included"
+        - "NSCLC trials included"
+    source: "ClinicalTrials.gov + ChEMBL"
+    confidence: "high"
+
+  - id: "aspirin_structure_trials_020"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_structure"
+      smiles: "CC(=O)Oc1ccccc1C(=O)O"
+      similarity_threshold: 0.6
+    expected_facts:
+      required:
+        - "Trials for aspirin or similar salicylates are returned"
+      optional:
+        - "aspirin or acetylsalicylic acid trials included"
+        - "Cardiovascular trials included"
+    source: "ClinicalTrials.gov + ChEMBL"
+    confidence: "high"
+
+  - id: "sunitinib_structure_trials_021"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_structure"
+      smiles: "CCN(CC)CCNC(=O)c1c(C)[nH]c(C=C2C(=O)Nc3ccc(F)cc23)c1C"
+      similarity_threshold: 0.7
+    expected_facts:
+      required:
+        - "Trials for sunitinib or similar kinase inhibitors are returned"
+      optional:
+        - "sunitinib trials included"
+        - "Renal cell carcinoma or GIST trials"
+    source: "ClinicalTrials.gov + ChEMBL"
+    confidence: "high"
+
+  # ========================================
+  # TRIALS BY SUBSTRUCTURE
+  # ========================================
+  - id: "quinazoline_substructure_trials_022"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_substructure"
+      smiles: "c1ccc2ncnc(N)c2c1"
+    expected_facts:
+      required:
+        - "Trials for molecules containing aminoquinazoline substructure are returned"
+      optional:
+        - "EGFR inhibitors may be included (gefitinib, erlotinib share this scaffold)"
+        - "Lung cancer trials may appear"
+    source: "ClinicalTrials.gov + ChEMBL"
+    confidence: "medium"
+
+  - id: "indole_substructure_trials_023"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_substructure"
+      smiles: "c1ccc2[nH]ccc2c1"
+    expected_facts:
+      required:
+        - "Trials for molecules containing indole substructure are returned"
+      optional:
+        - "Sunitinib or related indolinone compounds may appear"
+    source: "ClinicalTrials.gov + ChEMBL"
+    confidence: "medium"
+
+  - id: "pyrimidine_substructure_trials_024"
+    tool: "search_molecule_trials"
+    input:
+      mode: "trials_by_substructure"
+      smiles: "c1ncncn1"
+    expected_facts:
+      required:
+        - "Trials for molecules containing pyrimidine are returned"
+      optional:
+        - "Many kinase inhibitors contain pyrimidine"
+        - "Imatinib-type compounds may appear"
+    source: "ClinicalTrials.gov + ChEMBL"
+    confidence: "medium"
 
   # ========================================
   # DRUG TRIALS (via pharmacology search)

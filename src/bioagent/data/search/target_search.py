@@ -29,9 +29,11 @@ from rich.panel import Panel
 try:
     from bioagent.data.ingest.async_config import AsyncDatabaseConfig, get_async_connection
     from bioagent.data.ingest.config import DatabaseConfig, DEFAULT_CONFIG
+    from bioagent.data.semantic_utils import encode_query_vector
 except ImportError:
     from async_config import AsyncDatabaseConfig, get_async_connection
     from config import DatabaseConfig, DEFAULT_CONFIG
+    from bioagent.data.semantic_utils import encode_query_vector
 
 
 # =============================================================================
@@ -234,7 +236,11 @@ class DrugIndicationHit(BaseModel):
     concept_name: str
     max_phase: float | None = None
     is_approved: bool | None = None
+    is_biotherapeutic: bool = False
+    molecule_type: str | None = None  # e.g. 'Antibody', 'Protein', 'Enzyme', or None for small molecules
     sources: list[str] = []
+    match_reason: str | None = None  # How the indication was found: exact_name, substring_name, efo_term, mesh_heading, synonym, word_match, trigram
+    matched_indication: str | None = None  # The indication name that was matched
 
 
 class TargetPathwayHit(BaseModel):
@@ -299,6 +305,8 @@ class TargetSearchInput(BaseModel):
     offset: int = Field(default=0, ge=0)
     organism: str = "Homo sapiens"
     include_all_organisms: bool = False
+    molecule_type_filter: Literal["all", "small_molecule", "biotherapeutic"] = "all"
+    biotherapeutic_subtype: Literal["all", "antibody", "enzyme", "protein"] = "all"
     
     # Existing flags
     include_trials: bool = True
@@ -587,7 +595,20 @@ class TargetSearchOutput(BaseModel):
     def _print_drug_indication(self, console: Console, rank: int, hit: DrugIndicationHit):
         phase = f"phase {hit.max_phase}" if hit.max_phase is not None else "phase N/A"
         status = "approved" if hit.is_approved else "investigational"
-        console.print(f"  {rank}. [bold cyan]{hit.concept_name}[/bold cyan] [{status}, {phase}]")
+        type_badge = ""
+        if hit.is_biotherapeutic:
+            bio_type = hit.molecule_type or "Biotherapeutic"
+            type_badge = f" [magenta]({bio_type})[/magenta]"
+        else:
+            type_badge = " [blue](small molecule)[/blue]"
+        console.print(f"  {rank}. [bold cyan]{hit.concept_name}[/bold cyan]{type_badge} [{status}, {phase}]")
+        details = []
+        if hit.matched_indication:
+            details.append(f"Indication: {hit.matched_indication}")
+        if hit.match_reason:
+            details.append(f"matched via: {hit.match_reason}")
+        if details:
+            console.print(f"      [dim]{' | '.join(details)}[/dim]")
 
     def _print_target_pathway(self, console: Console, rank: int, hit: TargetPathwayHit):
         desc = hit.protein_class_desc or "Unknown class"
@@ -1541,9 +1562,14 @@ class PharmacologySearch:
         gene_symbol = input.query.upper()
         activity_rows: list[dict] = []
         mechanism_rows: list[dict] = []
+        warnings: list[str] = []
+        effective_data_source = input.data_source
+        if input.molecule_type_filter == "biotherapeutic" and input.data_source == DataSource.BOTH:
+            effective_data_source = DataSource.MECHANISM
+            warnings.append("Biotherapeutic filter uses mechanism data; activity data skipped")
         
         # Get activity data only if requested
-        if input.data_source in [DataSource.ACTIVITY, DataSource.BOTH]:
+        if effective_data_source in [DataSource.ACTIVITY, DataSource.BOTH]:
             activity_sql = """
                 SELECT 
                     concept_id, concept_name,
@@ -1567,16 +1593,18 @@ class PharmacologySearch:
             activity_rows = await conn.execute_query(activity_sql, gene_symbol, input.min_pchembl, input.limit)
         
         # Get mechanism data only if requested
-        if input.data_source in [DataSource.MECHANISM, DataSource.BOTH]:
+        if effective_data_source in [DataSource.MECHANISM, DataSource.BOTH]:
+            mechanism_fetch_limit = max(input.limit * 10, 200)
             mechanism_sql = """
                 SELECT DISTINCT
                     concept_id, concept_name, chembl_id,
                     mechanism_of_action, action_type
                 FROM dm_drug_mechanism
                 WHERE $1 = ANY(gene_symbols)
+                ORDER BY concept_name
                 LIMIT $2
             """
-            mechanism_rows = await conn.execute_query(mechanism_sql, gene_symbol, input.limit)
+            mechanism_rows = await conn.execute_query(mechanism_sql, gene_symbol, mechanism_fetch_limit)
         
         mechanism_lookup = {
             r['concept_id']: (r['mechanism_of_action'], r['action_type'])
@@ -1642,13 +1670,45 @@ class PharmacologySearch:
                     action_type=r['action_type']
                 )
         
+        if input.molecule_type_filter == "biotherapeutic":
+            hits_by_concept = {k: v for k, v in hits_by_concept.items() if v.is_biotherapeutic}
+        elif input.molecule_type_filter == "small_molecule":
+            hits_by_concept = {k: v for k, v in hits_by_concept.items() if not v.is_biotherapeutic}
+
+        if input.biotherapeutic_subtype != "all":
+            subtype = input.biotherapeutic_subtype.lower()
+            hits_by_concept = {
+                k: v for k, v in hits_by_concept.items()
+                if v.biotherapeutic_type and v.biotherapeutic_type.lower() == subtype
+            }
+
         # Sort based on data source:
         # - MECHANISM: Sort by name (curated approved drugs)
-        # - ACTIVITY/BOTH: Sort by pchembl (binding affinity)
-        if input.data_source == DataSource.MECHANISM:
+        # - ACTIVITY: Sort by pchembl (binding affinity)
+        # - BOTH: Prefer mechanism-supported hits; use activity-only as fallback.
+        if effective_data_source == DataSource.MECHANISM:
             hits = sorted(
                 hits_by_concept.values(),
                 key=lambda h: (h.concept_name or "").lower()
+            )
+        elif effective_data_source == DataSource.BOTH:
+            mechanism_concepts = {r['concept_id'] for r in mechanism_rows}
+
+            # If curated mechanism hits already fill the requested page, suppress
+            # activity-only candidates to avoid assay outlier-driven false positives.
+            if len(mechanism_concepts) >= input.limit:
+                hits_by_concept = {
+                    k: v for k, v in hits_by_concept.items() if k in mechanism_concepts
+                }
+
+            hits = sorted(
+                hits_by_concept.values(),
+                key=lambda h: (
+                    h.mechanism_of_action is None,  # mechanism-backed first
+                    h.pchembl is None,
+                    -(h.pchembl or 0),
+                    (h.concept_name or "").lower(),
+                )
             )
         else:
             hits = sorted(
@@ -1676,8 +1736,7 @@ class PharmacologySearch:
             )
         
         # Build warnings for partial results
-        warnings = []
-        if input.data_source == DataSource.BOTH:
+        if effective_data_source == DataSource.BOTH:
             if activity_rows and not mechanism_rows:
                 warnings.append(f"No curated mechanism data found for {gene_symbol}")
             if mechanism_rows and not activity_rows:
@@ -1687,7 +1746,7 @@ class PharmacologySearch:
         data_source_breakdown = self._summarize_sources(source_lists)
         confidence_explanation = (
             f"Activity data filtered at pChEMBL >= {input.min_pchembl}; "
-            f"data_source={input.data_source.value}"
+            f"data_source={effective_data_source.value}"
         )
 
         return TargetSearchOutput(
@@ -2153,17 +2212,28 @@ class PharmacologySearch:
                   AND tanimoto_sml(q.fp, dm.mfp2) >= $2
                 ORDER BY similarity DESC
                 LIMIT $3
+            ),
+            deduped AS (
+                SELECT DISTINCT ON (sm.concept_id)
+                    sm.concept_id,
+                    COALESCE(mc.preferred_name, sm.molecule_name) AS concept_name,
+                    sm.chembl_id,
+                    sm.canonical_smiles,
+                    sm.similarity AS tanimoto_similarity,
+                    mc.is_biotherapeutic
+                FROM similar_mols sm
+                LEFT JOIN dm_molecule_concept mc ON sm.concept_id = mc.concept_id
+                ORDER BY sm.concept_id, sm.similarity DESC
             )
-            SELECT DISTINCT ON (sm.concept_id)
-                sm.concept_id,
-                COALESCE(mc.preferred_name, sm.molecule_name) AS concept_name,
-                sm.chembl_id,
-                sm.canonical_smiles,
-                sm.similarity AS tanimoto_similarity,
-                mc.is_biotherapeutic
-            FROM similar_mols sm
-            LEFT JOIN dm_molecule_concept mc ON sm.concept_id = mc.concept_id
-            ORDER BY sm.concept_id, sm.similarity DESC
+            SELECT
+                concept_id,
+                concept_name,
+                chembl_id,
+                canonical_smiles,
+                tanimoto_similarity,
+                is_biotherapeutic
+            FROM deduped
+            ORDER BY tanimoto_similarity DESC, concept_id
         """
         
         mol_rows = await conn.execute_query(
@@ -2509,7 +2579,9 @@ class PharmacologySearch:
     async def _search_exact_structure(self, input: TargetSearchInput) -> TargetSearchOutput:
         """Find exact structure match using similarity search."""
         input_copy = input.model_copy()
-        input_copy.limit = 1
+        # Keep a wider candidate window so exact/near-exact hits are not accidentally
+        # pruned by concept-level dedupe before ranking.
+        input_copy.limit = max(25, input.limit)
         
         result = await self._search_similar_molecules(input_copy)
         
@@ -2546,28 +2618,150 @@ class PharmacologySearch:
         pattern = input.smarts or input.smiles
         
         sql = """
-            SELECT DISTINCT ON (dm.concept_id)
-                dm.concept_id,
-                COALESCE(mc.preferred_name, dm.pref_name) as concept_name,
-                dm.chembl_id,
-                dm.canonical_smiles
-            FROM dm_molecule dm
-            LEFT JOIN dm_molecule_concept mc ON dm.concept_id = mc.concept_id
-            WHERE dm.mol @> qmol_from_smarts($1::cstring)
-            ORDER BY dm.concept_id
+            WITH candidate_hits AS (
+                SELECT DISTINCT ON (dm.concept_id)
+                    dm.concept_id,
+                    COALESCE(mc.preferred_name, dm.pref_name) AS concept_name,
+                    dm.chembl_id,
+                    dm.canonical_smiles
+                FROM dm_molecule dm
+                LEFT JOIN dm_molecule_concept mc ON dm.concept_id = mc.concept_id
+                WHERE dm.mol @> qmol_from_smarts($1::cstring)
+                ORDER BY dm.concept_id
+                LIMIT ($2 * 4)
+            )
+            SELECT
+                c.concept_id,
+                c.concept_name,
+                c.chembl_id,
+                c.canonical_smiles,
+                COALESCE(a.best_pchembl, 0)::real AS best_pchembl,
+                (a.best_pchembl IS NOT NULL OR m.has_mechanism IS TRUE) AS has_target_data
+            FROM candidate_hits c
+            LEFT JOIN (
+                SELECT concept_id, MAX(best_pchembl) AS best_pchembl
+                FROM dm_molecule_target_summary
+                GROUP BY concept_id
+            ) a ON a.concept_id = c.concept_id
+            LEFT JOIN (
+                SELECT DISTINCT concept_id, TRUE AS has_mechanism
+                FROM dm_drug_mechanism
+                WHERE concept_id IS NOT NULL
+            ) m ON m.concept_id = c.concept_id
+            ORDER BY
+                has_target_data DESC,
+                best_pchembl DESC NULLS LAST,
+                c.concept_name
             LIMIT $2
         """
         
         rows = await conn.execute_query(sql, pattern, input.limit)
+        concept_ids = [r["concept_id"] for r in rows if r.get("concept_id")]
+
+        activities_by_concept: dict[int, list[TargetActivity]] = {}
+        mechanisms_by_concept: dict[int, list[TargetMechanism]] = {}
+
+        if input.include_activities and concept_ids:
+            activity_sql = """
+                SELECT
+                    concept_id,
+                    gene_symbol,
+                    target_name,
+                    target_organism,
+                    COALESCE(best_ic50_nm, best_ki_nm, best_kd_nm, best_ec50_nm) AS activity_value_nm,
+                    CASE
+                        WHEN best_ic50_nm IS NOT NULL THEN 'IC50'
+                        WHEN best_ki_nm IS NOT NULL THEN 'Ki'
+                        WHEN best_kd_nm IS NOT NULL THEN 'Kd'
+                        ELSE 'EC50'
+                    END AS activity_type,
+                    best_pchembl AS pchembl,
+                    n_total_measurements,
+                    data_confidence,
+                    sources
+                FROM dm_molecule_target_summary
+                WHERE concept_id = ANY($1::bigint[])
+                  AND best_pchembl >= $2
+                ORDER BY concept_id, best_pchembl DESC NULLS LAST
+            """
+            activity_rows = await conn.execute_query(activity_sql, concept_ids, input.min_pchembl)
+            for r in activity_rows:
+                cid = r["concept_id"]
+                if cid not in activities_by_concept:
+                    activities_by_concept[cid] = []
+                if len(activities_by_concept[cid]) >= 8:
+                    continue
+                activities_by_concept[cid].append(
+                    TargetActivity(
+                        gene_symbol=r["gene_symbol"],
+                        target_name=r["target_name"],
+                        target_organism=r["target_organism"] or "Homo sapiens",
+                        activity_type=r["activity_type"] or "Unknown",
+                        activity_value_nm=float(r["activity_value_nm"]) if r["activity_value_nm"] else 0.0,
+                        pchembl=float(r["pchembl"]) if r["pchembl"] else None,
+                        n_measurements=r["n_total_measurements"] or 1,
+                        data_confidence=r["data_confidence"],
+                        sources=r["sources"] or [],
+                    )
+                )
+
+        if input.include_mechanisms and concept_ids:
+            mechanism_sql = """
+                SELECT
+                    concept_id,
+                    mechanism_of_action,
+                    action_type,
+                    target_name,
+                    target_type,
+                    target_organism,
+                    gene_symbols,
+                    uniprot_accessions,
+                    direct_interaction,
+                    molecular_mechanism,
+                    disease_efficacy,
+                    ref_type,
+                    ref_id,
+                    ref_url
+                FROM dm_drug_mechanism
+                WHERE concept_id = ANY($1::bigint[])
+                ORDER BY concept_id, action_type
+            """
+            mechanism_rows = await conn.execute_query(mechanism_sql, concept_ids)
+            for r in mechanism_rows:
+                cid = r["concept_id"]
+                if cid not in mechanisms_by_concept:
+                    mechanisms_by_concept[cid] = []
+                if len(mechanisms_by_concept[cid]) >= 5:
+                    continue
+                mechanisms_by_concept[cid].append(
+                    TargetMechanism(
+                        mechanism_of_action=r["mechanism_of_action"] or "Unknown",
+                        action_type=r["action_type"] or "Unknown",
+                        target_name=r["target_name"],
+                        target_type=r["target_type"],
+                        target_organism=r["target_organism"] or "Homo sapiens",
+                        gene_symbols=r["gene_symbols"] or [],
+                        uniprot_accessions=r["uniprot_accessions"] or [],
+                        direct_interaction=r["direct_interaction"] or False,
+                        molecular_mechanism=r["molecular_mechanism"] or False,
+                        disease_efficacy=r["disease_efficacy"] or False,
+                        ref_type=r["ref_type"],
+                        ref_id=r["ref_id"],
+                        ref_url=r["ref_url"],
+                    )
+                )
         
         profiles = [
             CompoundTargetProfile(
-                concept_id=r['concept_id'],
-                concept_name=r['concept_name'],
-                chembl_id=r['chembl_id'],
-                canonical_smiles=r['canonical_smiles'],
-                activities=[],
-                mechanisms=[]
+                concept_id=r["concept_id"],
+                concept_name=r["concept_name"],
+                chembl_id=r["chembl_id"],
+                canonical_smiles=r["canonical_smiles"],
+                activities=activities_by_concept.get(r["concept_id"], []),
+                mechanisms=mechanisms_by_concept.get(r["concept_id"], []),
+                n_activity_targets=len(activities_by_concept.get(r["concept_id"], [])),
+                n_mechanism_targets=len(mechanisms_by_concept.get(r["concept_id"], [])),
+                best_pchembl=float(r["best_pchembl"]) if r.get("best_pchembl") else None,
             )
             for r in rows
         ]
@@ -2864,41 +3058,203 @@ class PharmacologySearch:
         elif input.approval_status == "investigational":
             approval_filter = "AND (d.is_approved IS NOT TRUE)"
 
-        sql = f"""
-            WITH matched_indications AS (
-                SELECT indication_id
-                FROM dm_indication
-                WHERE preferred_name_lower = LOWER($1)
-                   OR preferred_name ILIKE $2
-                   OR EXISTS (
-                       SELECT 1 FROM unnest(COALESCE(synonyms, ARRAY[]::text[])) AS s
-                       WHERE LOWER(s) = LOWER($1)
-                   )
+        query_vector: list[float] | None = None
+        try:
+            query_vector = encode_query_vector(query_exact)
+        except Exception:
+            query_vector = None
+
+        semantic_block = ""
+        semantic_union = ""
+        params: list[Any] = [query_exact, query_pattern, input.limit]
+        has_embedding_column = False
+        if query_vector is not None:
+            try:
+                col_check = await conn.execute_query(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'dm_indication'
+                          AND column_name = 'embedding'
+                    ) AS has_embedding
+                    """
+                )
+                has_embedding_column = bool(col_check and col_check[0].get("has_embedding"))
+            except Exception:
+                has_embedding_column = False
+
+        if query_vector is not None and has_embedding_column:
+            semantic_block = """
+            , semantic_indications AS (
+                SELECT
+                    i.indication_id,
+                    i.preferred_name AS matched_indication,
+                    'semantic_fallback'::text AS match_reason,
+                    50::int AS match_rank,
+                    (i.embedding <=> $4)::real AS semantic_distance
+                FROM dm_indication i
+                CROSS JOIN lexical_stats ls
+                WHERE i.embedding IS NOT NULL
+                  AND NOT ls.strong_found
+                ORDER BY i.embedding <=> $4
                 LIMIT 20
             )
-            SELECT
-                mc.concept_id,
-                mc.preferred_name AS concept_name,
-                d.max_phase,
-                d.is_approved,
-                d.sources
-            FROM dm_drug_indication d
-            JOIN matched_indications mi ON d.indication_id = mi.indication_id
-            JOIN dm_molecule_concept mc ON d.concept_id = mc.concept_id
-            WHERE mc.preferred_name IS NOT NULL
-            {approval_filter}
-            ORDER BY d.max_phase DESC NULLS LAST, mc.preferred_name
+            """
+            semantic_union = """
+                UNION ALL
+                SELECT indication_id, matched_indication, match_reason, match_rank, semantic_distance
+                FROM semantic_indications
+            """
+            params.append(query_vector)
+
+        sql = f"""
+            WITH lexical_indications AS (
+                SELECT DISTINCT ON (i.indication_id)
+                    i.indication_id,
+                    i.preferred_name AS matched_indication,
+                    CASE
+                        WHEN i.preferred_name_lower = LOWER($1) THEN 'exact_name'
+                        WHEN i.preferred_name ILIKE $2 THEN 'substring_name'
+                        WHEN i.efo_term ILIKE $2 THEN 'efo_term'
+                        WHEN i.mesh_heading ILIKE $2 THEN 'mesh_heading'
+                        WHEN EXISTS (
+                            SELECT 1 FROM unnest(COALESCE(i.synonyms, ARRAY[]::text[])) AS s
+                            WHERE LOWER(s) = LOWER($1) OR s ILIKE $2
+                        ) THEN 'synonym'
+                        WHEN (
+                            array_length(string_to_array($1, ' '), 1) >= 2
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM unnest(string_to_array(LOWER($1), ' ')) AS word
+                                WHERE length(word) >= 3
+                                  AND i.preferred_name_lower NOT ILIKE '%' || word || '%'
+                                  AND COALESCE(LOWER(i.efo_term), '') NOT ILIKE '%' || word || '%'
+                                  AND COALESCE(LOWER(i.mesh_heading), '') NOT ILIKE '%' || word || '%'
+                            )
+                        ) THEN 'word_match'
+                        WHEN i.preferred_name_lower % LOWER($1) THEN 'trigram_name'
+                        WHEN COALESCE(LOWER(i.efo_term), '') % LOWER($1) THEN 'trigram_efo'
+                        ELSE 'unknown'
+                    END AS match_reason,
+                    CASE
+                        WHEN i.preferred_name_lower = LOWER($1) THEN 1
+                        WHEN i.preferred_name ILIKE $2 THEN 2
+                        WHEN i.efo_term ILIKE $2 THEN 3
+                        WHEN i.mesh_heading ILIKE $2 THEN 4
+                        WHEN EXISTS (
+                            SELECT 1 FROM unnest(COALESCE(i.synonyms, ARRAY[]::text[])) AS s
+                            WHERE LOWER(s) = LOWER($1) OR s ILIKE $2
+                        ) THEN 5
+                        WHEN (
+                            array_length(string_to_array($1, ' '), 1) >= 2
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM unnest(string_to_array(LOWER($1), ' ')) AS word
+                                WHERE length(word) >= 3
+                                  AND i.preferred_name_lower NOT ILIKE '%' || word || '%'
+                                  AND COALESCE(LOWER(i.efo_term), '') NOT ILIKE '%' || word || '%'
+                                  AND COALESCE(LOWER(i.mesh_heading), '') NOT ILIKE '%' || word || '%'
+                            )
+                        ) THEN 6
+                        WHEN i.preferred_name_lower % LOWER($1) THEN 7
+                        WHEN COALESCE(LOWER(i.efo_term), '') % LOWER($1) THEN 8
+                        ELSE 99
+                    END AS match_rank,
+                    NULL::real AS semantic_distance
+                FROM dm_indication i
+                WHERE i.preferred_name_lower = LOWER($1)
+                   OR i.preferred_name ILIKE $2
+                   OR i.efo_term ILIKE $2
+                   OR i.mesh_heading ILIKE $2
+                   OR EXISTS (
+                        SELECT 1 FROM unnest(COALESCE(i.synonyms, ARRAY[]::text[])) AS s
+                        WHERE LOWER(s) = LOWER($1) OR s ILIKE $2
+                   )
+                   OR (
+                        array_length(string_to_array($1, ' '), 1) >= 2
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM unnest(string_to_array(LOWER($1), ' ')) AS word
+                            WHERE length(word) >= 3
+                              AND i.preferred_name_lower NOT ILIKE '%' || word || '%'
+                              AND COALESCE(LOWER(i.efo_term), '') NOT ILIKE '%' || word || '%'
+                              AND COALESCE(LOWER(i.mesh_heading), '') NOT ILIKE '%' || word || '%'
+                        )
+                   )
+                   OR i.preferred_name_lower % LOWER($1)
+                   OR COALESCE(LOWER(i.efo_term), '') % LOWER($1)
+                ORDER BY i.indication_id, match_rank
+                LIMIT 30
+            ),
+            lexical_stats AS (
+                SELECT EXISTS(
+                    SELECT 1 FROM lexical_indications WHERE match_rank <= 6
+                ) AS strong_found
+            )
+            {semantic_block}
+            , selected_indications AS (
+                SELECT indication_id, matched_indication, match_reason, match_rank, semantic_distance
+                FROM lexical_indications
+                {semantic_union}
+            ),
+            deduped_indications AS (
+                SELECT DISTINCT ON (indication_id)
+                    indication_id, matched_indication, match_reason, match_rank, semantic_distance
+                FROM selected_indications
+                ORDER BY indication_id, match_rank, semantic_distance NULLS LAST
+            )
+            SELECT concept_id, concept_name, max_phase, is_approved,
+                   is_biotherapeutic, molecule_type, sources,
+                   match_reason, matched_indication
+            FROM (
+                SELECT DISTINCT ON (mc.concept_id)
+                    mc.concept_id,
+                    mc.preferred_name AS concept_name,
+                    d.max_phase,
+                    d.is_approved,
+                    mc.is_biotherapeutic,
+                    COALESCE(dbt.biotherapeutic_type, mc.biotherapeutic_type) AS molecule_type,
+                    d.sources,
+                    di.match_reason,
+                    di.matched_indication,
+                    di.match_rank,
+                    di.semantic_distance
+                FROM dm_drug_indication d
+                JOIN deduped_indications di ON d.indication_id = di.indication_id
+                JOIN dm_molecule_concept mc ON d.concept_id = mc.concept_id
+                LEFT JOIN dm_biotherapeutic dbt ON mc.concept_id = dbt.concept_id
+                WHERE mc.preferred_name IS NOT NULL
+                {approval_filter}
+                ORDER BY
+                    mc.concept_id,
+                    di.match_rank,
+                    di.semantic_distance NULLS LAST,
+                    d.is_approved DESC NULLS LAST,
+                    d.max_phase DESC NULLS LAST
+            ) deduped
+            ORDER BY
+                match_rank,
+                semantic_distance NULLS LAST,
+                is_approved DESC NULLS LAST,
+                max_phase DESC NULLS LAST,
+                concept_name
             LIMIT $3
         """
 
-        rows = await conn.execute_query(sql, query_exact, query_pattern, input.limit)
+        rows = await conn.execute_query(sql, *params)
         hits = [
             DrugIndicationHit(
                 concept_id=r["concept_id"],
                 concept_name=r["concept_name"],
                 max_phase=float(r["max_phase"]) if r["max_phase"] is not None else None,
                 is_approved=r["is_approved"],
+                is_biotherapeutic=r["is_biotherapeutic"] or False,
+                molecule_type=r["molecule_type"],
                 sources=r["sources"] or [],
+                match_reason=r["match_reason"],
+                matched_indication=r["matched_indication"],
             )
             for r in rows
         ]
@@ -3013,7 +3369,6 @@ class PharmacologySearch:
                 hits=[],
                 warnings=warnings
             )
-
         sql = """
             SELECT
                 m.drug_record_id,

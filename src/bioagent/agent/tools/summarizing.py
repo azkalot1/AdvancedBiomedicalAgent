@@ -52,6 +52,17 @@ def _escape_frontmatter(value: str) -> str:
     return sanitized.replace('"', '\\"').strip()
 
 
+def _split_output_sections(raw_output: str) -> tuple[str, str]:
+    if "[AGENT_SIGNALS]" in raw_output:
+        results_part, signals_part = raw_output.split("[AGENT_SIGNALS]", 1)
+        results_part = results_part.rstrip()
+        signals_part = "[AGENT_SIGNALS]" + signals_part.lstrip()
+    else:
+        results_part = raw_output.rstrip()
+        signals_part = "[AGENT_SIGNALS]\n---\nRelated searches:\n  -> None"
+    return results_part, signals_part
+
+
 async def _generate_one_line_summary(
     summarizer_llm: Runnable,
     tool_name: str,
@@ -109,6 +120,8 @@ def make_summarizing_tool(
         if not isinstance(raw_output, str) or len(raw_output) <= max_output_length:
             return raw_output
 
+        results_part, signals_part = _split_output_sections(raw_output)
+
         ref_id = f"{original_tool.name}_{uuid4().hex[:8]}"
         one_line = ""
         try:
@@ -141,7 +154,7 @@ def make_summarizing_tool(
             summary = await _generate_summary(
                 summarizer_llm=summarizer_llm,
                 params=kwargs,
-                content=raw_output,
+                content=results_part,
             )
         except Exception as e:
             summary = (
@@ -152,6 +165,7 @@ def make_summarizing_tool(
         return (
             f"**[Summary | {len(raw_output):,} chars | ref: {ref_id}]**\n\n"
             f"{summary}\n\n"
+            f"{signals_part}\n\n"
             "---\n"
             f'*Full output stored. To retrieve:* `retrieve_full_output("{ref_id}")`\n'
         )

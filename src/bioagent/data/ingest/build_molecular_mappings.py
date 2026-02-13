@@ -50,12 +50,30 @@ import psycopg2.extras
 from tqdm import tqdm
 from typing import Optional, Dict, List, Tuple
 from dataclasses import dataclass
+from pgvector.psycopg2 import register_vector
 
 # Handle imports
 try:
     from .config import DatabaseConfig, get_connection, DEFAULT_CONFIG
+    from ..semantic_utils import EMBEDDING_DIMENSION, encode_texts, normalize_semantic_text
 except ImportError:
     from config import DatabaseConfig, get_connection, DEFAULT_CONFIG
+    try:
+        from bioagent.data.semantic_utils import EMBEDDING_DIMENSION, encode_texts, normalize_semantic_text
+    except ImportError:
+        from sentence_transformers import SentenceTransformer
+
+        EMBEDDING_DIMENSION = 384
+        _fallback_embedding_model: SentenceTransformer | None = None
+
+        def normalize_semantic_text(value: str | None) -> str:
+            return " ".join((value or "").lower().strip().split())
+
+        def encode_texts(values):
+            global _fallback_embedding_model
+            if _fallback_embedding_model is None:
+                _fallback_embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+            return [row.tolist() for row in _fallback_embedding_model.encode(list(values), show_progress_bar=False)]
 
 
 # ============================================================================
@@ -513,6 +531,9 @@ CREATE TABLE IF NOT EXISTS dm_indication (
     
     -- Synonyms for matching (denormalized for performance)
     synonyms TEXT[],
+
+    -- Semantic embedding (SentenceTransformer all-MiniLM-L6-v2)
+    embedding VECTOR(384),
     
     -- Metadata
     created_at TIMESTAMP DEFAULT NOW(),
@@ -525,6 +546,9 @@ CREATE INDEX IF NOT EXISTS idx_indication_name ON dm_indication(preferred_name);
 CREATE INDEX IF NOT EXISTS idx_indication_name_lower ON dm_indication(preferred_name_lower);
 CREATE INDEX IF NOT EXISTS idx_indication_name_trgm ON dm_indication USING gin(preferred_name gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_indication_area ON dm_indication(therapeutic_area);
+CREATE INDEX IF NOT EXISTS idx_indication_embedding
+ON dm_indication USING ivfflat (embedding vector_cosine_ops)
+WITH (lists = 128);
 
 
 -- ============================================================================
@@ -2025,6 +2049,35 @@ def create_materialized_analytics_view(config: DatabaseConfig, limit: Optional[i
                 
                 UNION ALL
                 
+                -- ChEMBL Activities (biotherapeutics: antibodies, etc.; same activities table, molregno in biotherapeutics)
+                SELECT 
+                    NULL::bigint as mol_id,
+                    dbt.concept_id,
+                    dbt.pref_name as molecule_name,
+                    mc.preferred_name as concept_name,
+                    t.target_id,
+                    t.gene_symbol,
+                    'CHEMBL' as source,
+                    ass.assay_id,
+                    ass.assay_type,
+                    act.standard_type as activity_type,
+                    act.standard_value as activity_value,
+                    act.standard_units as activity_units,
+                    act.pchembl_value
+                FROM   dbt
+                LEFT JOIN dm_molecule_concept mc ON dbt.concept_id = mc.concept_id
+                JOIN activities act ON dbt.molregno = act.molregno
+                JOIN assays ass ON act.assay_id = ass.assay_id
+                JOIN dm_target t ON ass.tid = t.chembl_tid
+                WHERE act.standard_type IN ('IC50', 'Ki', 'Kd', 'EC50', 'IC90', 'GI50')
+                  AND act.standard_value IS NOT NULL
+                  AND act.standard_value > 0
+                  AND act.standard_value < 1000000000
+                  AND t.gene_symbol IS NOT NULL
+                  AND dbt.concept_id IS NOT NULL
+                
+                UNION ALL
+                
                 -- BindingDB Ki
                 SELECT
                     m.mol_id, m.concept_id, m.pref_name, mc.preferred_name,
@@ -3041,6 +3094,89 @@ def populate_indications(config: DatabaseConfig, limit: Optional[int] = None):
             for area, count in area_counts[:10]:
                 print(f"       {area}: {count:,}")
             
+            # --- 9.2b Populate synonyms ---
+            # When both mesh_heading and efo_term exist, store alternate names
+            # as synonyms so searches can match either form.
+            # MeSH uses inverted word order ("Diabetes Mellitus, Type 2") while
+            # EFO uses more natural names ("type II diabetes mellitus").
+            print("  📥 Populating indication synonyms...")
+            cur.execute("""
+                UPDATE dm_indication
+                SET synonyms = (
+                    SELECT array_agg(DISTINCT syn) FILTER (WHERE syn IS NOT NULL)
+                    FROM (
+                        -- Add efo_term as synonym when preferred_name is mesh_heading
+                        SELECT efo_term AS syn
+                        WHERE efo_term IS NOT NULL
+                          AND LOWER(efo_term) != preferred_name_lower
+                        UNION
+                        -- Add mesh_heading as synonym when preferred_name is efo_term
+                        SELECT mesh_heading AS syn
+                        WHERE mesh_heading IS NOT NULL
+                          AND LOWER(mesh_heading) != preferred_name_lower
+                    ) alt_names
+                )
+                WHERE mesh_heading IS NOT NULL OR efo_term IS NOT NULL;
+            """)
+            synonym_count = cur.rowcount
+            con.commit()
+            print(f"     ✓ Indications with synonyms: {synonym_count:,}")
+
+            # --- 9.2c Populate semantic embeddings ---
+            # Keep lexical matching as primary path; embeddings are fallback candidates.
+            print("  🧠 Generating indication embeddings...")
+            try:
+                register_vector(con)
+                cur.execute("""
+                    SELECT indication_id, preferred_name, efo_term, mesh_heading, synonyms
+                    FROM dm_indication
+                    ORDER BY indication_id
+                """)
+                rows = cur.fetchall()
+                if rows:
+                    payloads: list[tuple[int, str]] = []
+                    for indication_id, preferred_name, efo_term, mesh_heading, synonyms in rows:
+                        syn_text = " ".join(synonyms or [])
+                        merged = " ".join(
+                            part for part in [
+                                preferred_name or "",
+                                efo_term or "",
+                                mesh_heading or "",
+                                syn_text,
+                            ] if part
+                        )
+                        payloads.append((indication_id, normalize_semantic_text(merged)))
+
+                    vectors = encode_texts([p[1] for p in payloads])
+                    update_rows = [(payloads[i][0], vectors[i]) for i in range(len(payloads))]
+
+                    cur.execute(f"""
+                        CREATE TEMP TABLE tmp_indication_embedding (
+                            indication_id BIGINT PRIMARY KEY,
+                            embedding VECTOR({EMBEDDING_DIMENSION})
+                        );
+                    """)
+                    psycopg2.extras.execute_values(
+                        cur,
+                        "INSERT INTO tmp_indication_embedding (indication_id, embedding) VALUES %s",
+                        update_rows,
+                        page_size=500,
+                    )
+                    cur.execute("""
+                        UPDATE dm_indication d
+                        SET embedding = t.embedding
+                        FROM tmp_indication_embedding t
+                        WHERE d.indication_id = t.indication_id
+                    """)
+                    cur.execute("ANALYZE dm_indication")
+                    con.commit()
+                    print(f"     ✓ Embeddings updated: {len(update_rows):,}")
+                else:
+                    print("     ⚠ No indications found for embedding generation")
+            except Exception as e:
+                con.rollback()
+                print(f"     ⚠ Embedding generation failed (continuing without vectors): {type(e).__name__}: {e}")
+            
             # --- 9.3 Load drug-indication mappings ---
             print("\n  📥 Loading drug-indication mappings...")
             cur.execute(f"""
@@ -3076,9 +3212,52 @@ def populate_indications(config: DatabaseConfig, limit: Optional[int] = None):
                         ELSE array_append(dm_drug_indication.sources, 'CHEMBL')
                     END;
             """)
-            mapping_count = cur.rowcount
+            sm_mapping_count = cur.rowcount
             con.commit()
-            print(f"     ✓ Drug-indication mappings: {mapping_count:,}")
+            print(f"     ✓ Small-molecule drug-indication mappings: {sm_mapping_count:,}")
+            
+            # --- 9.3b Load biotherapeutic drug-indication mappings ---
+            # Biotherapeutics (antibodies, proteins, peptides) are stored in
+            # dm_biotherapeutic, NOT dm_molecule. We need a separate pass to
+            # capture drugs like pembrolizumab, nivolumab, ipilimumab, etc.
+            print("  📥 Loading biotherapeutic drug-indication mappings...")
+            cur.execute(f"""
+                INSERT INTO dm_drug_indication (
+                    concept_id,
+                    indication_id,
+                    max_phase,
+                    sources,
+                    chembl_drugind_id
+                )
+                SELECT DISTINCT ON (dbt.concept_id, di2.indication_id)
+                    dbt.concept_id,
+                    di2.indication_id,
+                    MAX(di.max_phase_for_ind) as max_phase,
+                    ARRAY['CHEMBL'],
+                    MIN(di.drugind_id)
+                FROM drug_indication di
+                JOIN dm_biotherapeutic dbt ON di.molregno = dbt.molregno
+                JOIN dm_indication di2 ON (
+                    di2.mesh_id = di.mesh_id 
+                    OR (di2.mesh_id IS NULL AND di2.efo_id = di.efo_id)
+                )
+                WHERE dbt.concept_id IS NOT NULL
+                  AND di2.indication_id IS NOT NULL
+                GROUP BY dbt.concept_id, di2.indication_id
+                {limit_clause}
+                ON CONFLICT (concept_id, indication_id) DO UPDATE SET
+                    max_phase = GREATEST(dm_drug_indication.max_phase, EXCLUDED.max_phase),
+                    sources = CASE 
+                        WHEN 'CHEMBL' = ANY(dm_drug_indication.sources) 
+                        THEN dm_drug_indication.sources
+                        ELSE array_append(dm_drug_indication.sources, 'CHEMBL')
+                    END;
+            """)
+            bio_mapping_count = cur.rowcount
+            con.commit()
+            print(f"     ✓ Biotherapeutic drug-indication mappings: {bio_mapping_count:,}")
+            
+            mapping_count = sm_mapping_count + bio_mapping_count
             
             # --- 9.4 Summary statistics ---
             cur.execute("""
@@ -5850,8 +6029,8 @@ def ensure_schema_exists(config: DatabaseConfig):
 
 def main(full_rebuild: bool = True, skip_validation: bool = False, 
          enable_fuzzy: bool = True, fuzzy_threshold: float = 0.8,
-         from_phase: Optional[int] = None, limit: Optional[int] = None,
-         drop_indexes: bool = False):
+         from_phase: Optional[int] = None, to_phase: Optional[int] = None,
+         limit: Optional[int] = None, drop_indexes: bool = False):
     """
     Run the complete molecular integration pipeline.
     
@@ -5860,7 +6039,8 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
         skip_validation: If True, skip data quality checks.
         enable_fuzzy: If True, enable fuzzy matching for clinical trials.
         fuzzy_threshold: Minimum similarity for fuzzy matches (0-1).
-        from_phase: If set, start from this phase (1-6). Earlier phases are skipped.
+        from_phase: If set, start from this phase (1-14). Earlier phases are skipped.
+        to_phase: If set, stop after this phase (1-14). Later phases are skipped.
         limit: Maximum molecules/items to process per source (for fast/debug mode).
     """
     config = DEFAULT_CONFIG
@@ -5875,6 +6055,8 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
     
     if from_phase:
         print(f"\n⏩ Starting from Phase {from_phase} (skipping earlier phases)")
+    if to_phase:
+        print(f"\n⏏️  Will stop after Phase {to_phase} (skipping later phases)")
     
     total_start = time.time()
     
@@ -5899,8 +6081,9 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
     # Get source counts for progress tracking
     source_counts = get_source_counts(config)
     
-    # Determine starting phase
+    # Determine phase range
     start_phase = from_phase or 0
+    end_phase = to_phase or 99
     
     # 0. Create Extensions and Audit Table (always run)
     print("\n📋 Phase 0: Setting up extensions and audit table...")
@@ -5936,13 +6119,13 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
     print("  ✅ RDKit functions ready")
     
     # 1. Populate Molecules with Normalization
-    if start_phase <= 1:
+    if start_phase <= 1 <= end_phase:
         populate_molecules(config, source_counts, limit=limit)
     else:
         print("\n⏩ Skipping Phase 1: populate_molecules")
     
     # 2. Build Hierarchy (Concepts and Stereo Forms)
-    if start_phase <= 2:
+    if start_phase <= 2 <= end_phase:
         build_molecule_hierarchy(config)
         ingest_biotherapeutics(config, limit=limit)
     else:
@@ -5950,7 +6133,7 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
         print("⏩ Skipping Phase 2B: ingest_biotherapeutics")
     
     # 3. Populate Synonyms
-    if start_phase <= 3:
+    if start_phase <= 3 <= end_phase:
         # For synonyms, use a higher limit since they're smaller
         syn_limit = limit * 5 if limit else None
         populate_synonyms(config, limit=syn_limit)
@@ -5958,14 +6141,14 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
         print("⏩ Skipping Phase 3: populate_synonyms")
     
     # 4. Map Clinical Trials
-    if start_phase <= 4:
+    if start_phase <= 4 <= end_phase:
         map_clinical_trials(config, enable_fuzzy=enable_fuzzy, 
                           fuzzy_threshold=fuzzy_threshold, limit=limit)
     else:
         print("⏩ Skipping Phase 4: map_clinical_trials")
     
     # 5. Create Analytics View (raw activities)
-    if start_phase <= 5:
+    if start_phase <= 5 <= end_phase:
         create_materialized_analytics_view(config, limit=limit)
         # 5A. Create Drug Mechanism Table (needed for summary)
         # Must run before summary table since it references dm_drug_mechanism
@@ -5976,48 +6159,48 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
         print("⏩ Skipping Phase 5: create_materialized_analytics_view")
     
     # 6. Create Search Functions
-    if start_phase <= 6:
+    if start_phase <= 6 <= end_phase:
         create_search_functions(config)
     else:
         print("⏩ Skipping Phase 6: create_search_functions")
 
-    if start_phase <= 7:
+    if start_phase <= 7 <= end_phase:
         fix_null_concept_names(config)
     else:
         print("⏩ Skipping Phase 7: fix_null_concept_names")
 
-    if start_phase <= 8:
+    if start_phase <= 8 <= end_phase:
         fix_placeholder_values(config)
     else:
         print("⏩ Skipping Phase 8: fix_placeholder_values")
     
     # Phase 9: Populate Indications
-    if start_phase <= 9:
+    if start_phase <= 9 <= end_phase:
         populate_indications(config, limit=limit)
     else:
         print("⏩ Skipping Phase 9: populate_indications")
     
     # Phase 10: Link DailyMed Products
-    if start_phase <= 10:
+    if start_phase <= 10 <= end_phase:
         link_dailymed_products(config, limit=limit)
     else:
         print("⏩ Skipping Phase 10: link_dailymed_products")
     
     # Phase 11: Link OpenFDA Labels
-    if start_phase <= 11:
+    if start_phase <= 11 <= end_phase:
         link_openfda_labels(config, limit=limit)
     else:
         print("⏩ Skipping Phase 11: link_openfda_labels")
     
     # Phase 12: Create Indication Search Functions
-    if start_phase <= 12:
+    if start_phase <= 12 <= end_phase:
         create_indication_search_functions(config)
     else:
         print("⏩ Skipping Phase 12: create_indication_functions")
 
     # Phase 13: Drug Mechanism Table - now created in Phase 5A (needed for summary)
     # Keeping phase number for backward compatibility with --start-phase
-    if start_phase <= 13:
+    if start_phase <= 13 <= end_phase:
         # Already created in Phase 5A, only recreate if starting from phase 13+
         if start_phase == 13:
             create_drug_mechanism_table(config)
@@ -6026,7 +6209,7 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
     else:
         print("⏩ Skipping Phase 13: create_drug_mechanism_table")
 
-    if start_phase <= 14:
+    if start_phase <= 14 <= end_phase:
         index_drug_mechanism_table(config, drop_indexes=drop_indexes)
     else:
         print("⏩ Skipping Phase 14: index_drug_mechanism_table")
@@ -6081,6 +6264,8 @@ Examples:
   %(prog)s --from-phase 3         # Replay from Phase 3 (synonyms) onwards
   %(prog)s --from-phase 4         # Replay from Phase 4 (trial mapping) onwards
   %(prog)s --from-phase 5         # Rebuild only analytics views
+  %(prog)s --from-phase 9 --to-phase 9   # Re-run Phase 9 only (indications)
+  %(prog)s --from-phase 9 --to-phase 12  # Re-run Phases 9-12 only
   %(prog)s --refresh-only         # Refresh materialized views only
   %(prog)s --report               # Generate report without running pipeline
   %(prog)s --validate-only        # Run validation checks only
@@ -6119,6 +6304,8 @@ Fast Mode Defaults (--fast):
                         help='Run incremental update instead of full rebuild')
     parser.add_argument('--from-phase', type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
                         help='Start from this phase (1-14), skipping earlier phases')
+    parser.add_argument('--to-phase', type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+                        help='Stop after this phase (1-14), skipping later phases')
     parser.add_argument('--skip-validation', action='store_true',
                         help='Skip data quality validation')
     parser.add_argument('--refresh-only', action='store_true',
@@ -6180,8 +6367,8 @@ Fast Mode Defaults (--fast):
         refresh_materialized_views(DEFAULT_CONFIG)
         update_summary_table(DEFAULT_CONFIG)
     else:
-        # If --from-phase is set, don't do full rebuild
-        full_rebuild = not args.incremental and args.from_phase is None
+        # If --from-phase or --to-phase is set, don't do full rebuild
+        full_rebuild = not args.incremental and args.from_phase is None and args.to_phase is None
         
         main(
             full_rebuild=full_rebuild, 
@@ -6189,6 +6376,7 @@ Fast Mode Defaults (--fast):
             enable_fuzzy=not args.no_fuzzy,
             fuzzy_threshold=args.fuzzy_threshold,
             from_phase=args.from_phase,
+            to_phase=args.to_phase,
             limit=limit,
             drop_indexes=args.drop_indexes
         )

@@ -23,9 +23,12 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
+from rich.console import Console
+from rich.table import Table
 
 from bioagent.data.ingest.async_config import AsyncDatabaseConfig, get_async_connection
 from bioagent.data.ingest.config import DatabaseConfig
+from bioagent.data.semantic_utils import encode_query_vector, normalize_semantic_text
 
 
 class OrangeBookSearchInput(BaseModel):
@@ -50,6 +53,12 @@ class OrangeBookSearchInput(BaseModel):
         errors: list[str] = []
         if not (self.drug_name or self.nda_number or self.ingredient):
             errors.append("Provide at least one of: drug_name, ingredient, nda_number")
+            return errors
+
+        if self.mode in {"te_codes", "patents", "exclusivity"} and not (self.drug_name or self.ingredient):
+            errors.append(
+                "Mode requires drug_name or ingredient (NDA-only lookup is not supported for this mode)"
+            )
         return errors
 
 
@@ -95,6 +104,40 @@ class OrangeBookSearchOutput(BaseModel):
     error: str | None = None
     query_summary: str = ""
 
+    def pretty_print(self, console: Console | None = None) -> None:
+        """Pretty print Orange Book output for notebook/debug use."""
+        console = console or Console()
+        console.print(f"[bold]Mode:[/bold] {self.mode} | [bold]Status:[/bold] {self.status}")
+        if self.query_summary:
+            console.print(f"[bold]Query:[/bold] {self.query_summary}")
+        if self.error:
+            console.print(f"[red]Error:[/red] {self.error}")
+            return
+        if not self.hits:
+            console.print("[yellow]No hits.[/yellow]")
+            return
+
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("App")
+        table.add_column("Product")
+        table.add_column("Trade Name")
+        table.add_column("Ingredient")
+        table.add_column("TE")
+        table.add_column("Patents")
+        table.add_column("Exclusivity")
+        for hit in self.hits:
+            item = hit if isinstance(hit, OrangeBookProductHit) else OrangeBookProductHit(**hit)
+            table.add_row(
+                item.appl_no or "—",
+                item.product_no or "—",
+                item.trade_name or "—",
+                item.ingredient or "—",
+                item.te_code or "—",
+                str(len(item.patents)),
+                str(len(item.exclusivity)),
+            )
+        console.print(table)
+
 
 async def _fetch_products(
     async_config: AsyncDatabaseConfig,
@@ -103,6 +146,8 @@ async def _fetch_products(
     nda_number: str | None,
     limit: int,
     offset: int,
+    query_vector: list[float] | None = None,
+    enable_semantic_fallback: bool = True,
 ) -> list[dict[str, Any]]:
     params: list[Any] = []
     filters: list[str] = []
@@ -119,19 +164,41 @@ async def _fetch_products(
         params.append(nda_number)
         filters.append(f"appl_no = ${len(params)}")
 
-    if not filters:
+    if not filters and query_vector is None:
         return []
 
-    params.extend([limit, offset])
-    sql = f"""
-        SELECT appl_no, product_no, trade_name, ingredient, dosage_form, route, strength,
-               te_code, applicant, approval_date, drug_type, appl_type, rld, rs, applicant_full_name
-        FROM orange_book_products
-        WHERE {" OR ".join(filters)}
-        ORDER BY trade_name, appl_no, product_no
-        LIMIT ${len(params) - 1} OFFSET ${len(params)}
-    """
-    return await async_config.execute_query(sql, *params)
+    rows: list[dict[str, Any]] = []
+    if filters:
+        params.extend([limit, offset])
+        sql = f"""
+            SELECT appl_no, product_no, trade_name, ingredient, dosage_form, route, strength,
+                   te_code, applicant, approval_date, drug_type, appl_type, rld, rs, applicant_full_name
+            FROM orange_book_products
+            WHERE {" OR ".join(filters)}
+            ORDER BY trade_name, appl_no, product_no
+            LIMIT ${len(params) - 1} OFFSET ${len(params)}
+        """
+        rows = await async_config.execute_query(sql, *params)
+        if rows:
+            return rows
+
+    # Semantic fallback only when lexical search produced no hits.
+    if query_vector is not None and enable_semantic_fallback:
+        return await async_config.execute_query(
+            """
+            SELECT appl_no, product_no, trade_name, ingredient, dosage_form, route, strength,
+                   te_code, applicant, approval_date, drug_type, appl_type, rld, rs, applicant_full_name
+            FROM orange_book_products
+            WHERE embedding IS NOT NULL
+            ORDER BY embedding <=> $1
+            LIMIT $2 OFFSET $3
+            """,
+            query_vector,
+            limit,
+            offset,
+        )
+
+    return []
 
 
 async def _fetch_patents(
@@ -196,6 +263,14 @@ async def orange_book_search_async(
 
     try:
         async_config = await get_async_connection(db_config)
+        query_vector: list[float] | None = None
+        semantic_query = search_input.drug_name or search_input.ingredient
+        enable_semantic_fallback = search_input.mode in {"te_codes", "generics"}
+        if semantic_query:
+            try:
+                query_vector = encode_query_vector(normalize_semantic_text(semantic_query))
+            except Exception:
+                query_vector = None
         rows = await _fetch_products(
             async_config,
             search_input.drug_name,
@@ -203,6 +278,8 @@ async def orange_book_search_async(
             search_input.nda_number,
             search_input.limit,
             search_input.offset,
+            query_vector=query_vector,
+            enable_semantic_fallback=enable_semantic_fallback,
         )
         if not rows:
             return OrangeBookSearchOutput(
@@ -220,6 +297,12 @@ async def orange_book_search_async(
             if search_input.mode in ("exclusivity", "te_codes", "generics") and search_input.include_exclusivity:
                 if hit.appl_no and hit.product_no:
                     hit.exclusivity = await _fetch_exclusivity(async_config, hit.appl_no, hit.product_no)
+
+            # Precision guards for legal-data specific modes.
+            if search_input.mode == "patents" and search_input.include_patents and not hit.patents:
+                continue
+            if search_input.mode == "exclusivity" and search_input.include_exclusivity and not hit.exclusivity:
+                continue
             hits.append(hit)
 
         status = "success" if hits else "not_found"
