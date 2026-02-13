@@ -765,7 +765,7 @@ async def search_clinical_trials(
     intervention_type: str | None = None,
     outcome_type: str | None = None,
     eligibility_gender: str | None = None,
-    eligibility_age_range: list[int] | str | None = None,
+    eligibility_age_range: list[int] | tuple[int, int] | str | None = None,
     country: list[str] | str | None = None,
     
     # Date filters
@@ -883,7 +883,7 @@ async def search_clinical_trials(
                         • "male", "female", "all"
 
     eligibility_age_range: Age range filter for eligible participants.
-                           Format: [min_age, max_age] or "min,max" (years).
+                           Format: [min_age, max_age], (min_age, max_age), or "min,max" (years).
 
     country: Country filter (single or comma-separated list).
              Examples: "United States", "Germany, France"
@@ -1056,6 +1056,11 @@ async def search_clinical_trials(
         detail_level, error = _validate_detail_level(detail_level)
         if error:
             return f"❌ Invalid input: {error}"
+        # Backward compatibility: historically, brief_output=True implied brief output.
+        # Keep detail_level as the canonical formatter switch, but derive it from the
+        # legacy flag when detail_level is left at its default.
+        if brief_output and detail_level == "standard":
+            detail_level = "brief"
         # Handle legacy 'query' parameter for backwards compatibility
         if query and not any([condition, intervention, keyword, nct_ids]):
             query = query.strip()
@@ -1095,7 +1100,7 @@ async def search_clinical_trials(
         # Parse eligibility age range
         age_range = None
         if eligibility_age_range:
-            if isinstance(eligibility_age_range, list) and len(eligibility_age_range) == 2:
+            if isinstance(eligibility_age_range, (list, tuple)) and len(eligibility_age_range) == 2:
                 try:
                     age_range = (int(eligibility_age_range[0]), int(eligibility_age_range[1]))
                 except (TypeError, ValueError):
@@ -1156,7 +1161,6 @@ async def search_clinical_trials(
         strategy_enum = strategy_map.get(strategy.lower(), SearchStrategy.COMBINED)
         
         if detail_level == "brief":
-            brief_output = True
             include_results = False
             include_adverse_events = False
             include_eligibility = False
@@ -1165,7 +1169,6 @@ async def search_clinical_trials(
             include_sponsors = True
             include_countries = False
         elif detail_level == "comprehensive":
-            brief_output = False
             include_results = True
             include_adverse_events = True
             include_baseline = True
