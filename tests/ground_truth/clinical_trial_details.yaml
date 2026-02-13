@@ -1,0 +1,29 @@
+test_cases:
+  - id: "nct_detail_001"
+    tool: "get_clinical_trial_details"
+    input:
+      nct_ids: "NCT01295827"
+      detail_level: "comprehensive"
+    expected_facts:
+      required:
+        - "NCT01295827"
+        - "Phase"
+        - "Status"
+      optional:
+        - "Eligibility"
+        - "Outcomes"
+    source: "ClinicalTrials.gov"
+    confidence: "medium"
+
+  - id: "nct_detail_002"
+    tool: "get_clinical_trial_details"
+    input:
+      nct_ids: "NCT04280705, NCT03456789"
+      detail_level: "brief"
+    expected_facts:
+      required:
+        - "NCT04280705"
+      optional:
+        - "NCT03456789"
+    source: "ClinicalTrials.gov"
+    confidence: "low"

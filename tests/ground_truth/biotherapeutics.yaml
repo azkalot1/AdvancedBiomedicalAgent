@@ -3,28 +3,29 @@ test_cases:
   # BIOTHERAPEUTICS BY TARGET
   # ========================================
   - id: "pdcd1_biologics_001"
-    tool: "search_biotherapeutics"
+    tool: "search_target_drugs"
     input:
-      mode: "by_target"
-      target_gene: "PDCD1"
+      gene_symbol: "PDCD1"
+      data_source: "mechanism"
+      molecule_type: "biotherapeutic"
     expected_facts:
       required:
-        - "Results include biologics targeting PDCD1"
+        - "drugs for 'PDCD1'"
       optional:
         - "pembrolizumab targets PDCD1"
         - "nivolumab targets PDCD1"
-        - "Results include antibody components"
     source: "ChEMBL"
     confidence: "high"
 
   - id: "erbb2_biologics_002"
-    tool: "search_biotherapeutics"
+    tool: "search_target_drugs"
     input:
-      mode: "by_target"
-      target_gene: "ERBB2"
+      gene_symbol: "ERBB2"
+      data_source: "mechanism"
+      molecule_type: "biotherapeutic"
     expected_facts:
       required:
-        - "Results include biologics targeting ERBB2"
+        - "drugs for 'ERBB2'"
       optional:
         - "trastuzumab targets ERBB2"
         - "pertuzumab targets ERBB2"
@@ -32,13 +33,14 @@ test_cases:
     confidence: "high"
 
   - id: "tnf_biologics_003"
-    tool: "search_biotherapeutics"
+    tool: "search_target_drugs"
     input:
-      mode: "by_target"
-      target_gene: "TNF"
+      gene_symbol: "TNF"
+      data_source: "mechanism"
+      molecule_type: "biotherapeutic"
     expected_facts:
       required:
-        - "Results include biologics targeting TNF"
+        - "drugs for 'TNF'"
       optional:
         - "adalimumab targets TNF"
         - "infliximab targets TNF"
@@ -47,13 +49,14 @@ test_cases:
     confidence: "high"
 
   - id: "cd20_biologics_004"
-    tool: "search_biotherapeutics"
+    tool: "search_target_drugs"
     input:
-      mode: "by_target"
-      target_gene: "MS4A1"
+      gene_symbol: "MS4A1"
+      data_source: "mechanism"
+      molecule_type: "biotherapeutic"
     expected_facts:
       required:
-        - "Results include biologics targeting MS4A1 (CD20)"
+        - "drugs for 'MS4A1'"
       optional:
         - "rituximab targets CD20"
         - "obinutuzumab targets CD20"
@@ -61,13 +64,14 @@ test_cases:
     confidence: "high"
 
   - id: "vegfa_biologics_005"
-    tool: "search_biotherapeutics"
+    tool: "search_target_drugs"
     input:
-      mode: "by_target"
-      target_gene: "VEGFA"
+      gene_symbol: "VEGFA"
+      data_source: "mechanism"
+      molecule_type: "biotherapeutic"
     expected_facts:
       required:
-        - "Results include biologics targeting VEGFA"
+        - "drugs for 'VEGFA'"
       optional:
         - "bevacizumab targets VEGFA"
         - "ranibizumab targets VEGFA"

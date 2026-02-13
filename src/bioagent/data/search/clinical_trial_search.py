@@ -33,6 +33,7 @@ from rich import box
 # Import config and async connection
 from bioagent.data.ingest.async_config import AsyncDatabaseConfig, get_async_connection
 from bioagent.data.ingest.config import DatabaseConfig
+from bioagent.data.semantic_utils import encode_query_vector, normalize_semantic_text
 
 
 # =============================================================================
@@ -890,6 +891,7 @@ class ClinicalTrialsSearchInput(BaseModel):
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
     include_study_json: bool = Field(default=True)
+    condition_semantic_terms: list[str] | None = Field(default=None, exclude=True)
     
     # Output Sections
     output_eligibility: bool = True
@@ -1040,6 +1042,15 @@ class ClinicalTrialsSearchInput(BaseModel):
     def has_any_query(self) -> bool:
         return self.has_text_query() or bool(self.nct_ids)
 
+    def validate_inputs(self) -> list[str]:
+        errors: list[str] = []
+        if self.nct_ids and self.has_text_query():
+            errors.append(
+                "nct_ids cannot be combined with condition, intervention, keyword, or sponsor. "
+                "Use nct_ids alone for direct lookup."
+            )
+        return errors
+
     def pretty_print(self, console: Console | None = None) -> None:
         """Pretty print the search input parameters."""
         console = console or Console()
@@ -1178,31 +1189,67 @@ class ClinicalTrialQueryBuilder:
         return self._build_main_query(ctes), self.params
 
     def _build_condition_cte(self) -> str:
-        query_norm = self._add_param(self.input.condition.lower())
+        terms: list[str] = [self.input.condition or ""]
+        if self.input.condition_semantic_terms:
+            terms.extend(self.input.condition_semantic_terms)
+        normalized_terms: list[str] = []
+        seen: set[str] = set()
+        for term in terms:
+            normalized = normalize_semantic_text(term)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            normalized_terms.append(normalized)
+        if not normalized_terms:
+            normalized_terms = [normalize_semantic_text(self.input.condition or "")]
+
+        value_rows: list[str] = []
+        for term in normalized_terms[:5]:
+            term_ph = self._add_param(term)
+            ts_ph = self._add_param(" & ".join(term.split()))
+            value_rows.append(f"({term_ph}, {ts_ph})")
+        terms_cte = f"condition_terms(term, tsquery) AS (VALUES {', '.join(value_rows)})"
+
         if self.input.strategy == SearchStrategy.FULLTEXT:
-            tsquery = self._add_param(" & ".join(self.input.condition.split()))
             return f"""
+                {terms_cte},
                 condition_matches AS (
-                    SELECT nct_id, ts_rank(terms_tsv, to_tsquery('english', {tsquery}))::real AS score
-                    FROM public.rag_study_search WHERE terms_tsv @@ to_tsquery('english', {tsquery})
+                    SELECT rs.nct_id,
+                           MAX(ts_rank(rs.terms_tsv, to_tsquery('english', ct.tsquery)))::real AS score
+                    FROM public.rag_study_search rs
+                    JOIN condition_terms ct ON TRUE
+                    WHERE rs.terms_tsv @@ to_tsquery('english', ct.tsquery)
+                    GROUP BY rs.nct_id
                 )"""
         elif self.input.strategy == SearchStrategy.TRIGRAM:
             return f"""
+                {terms_cte},
                 condition_matches AS (
-                    SELECT nct_id, GREATEST(similarity(conditions_norm, {query_norm}), similarity(mesh_conditions_norm, {query_norm}))::real AS score
-                    FROM public.rag_study_search WHERE conditions_norm % {query_norm} OR mesh_conditions_norm % {query_norm}
+                    SELECT rs.nct_id,
+                           MAX(GREATEST(
+                               similarity(rs.conditions_norm, ct.term),
+                               similarity(rs.mesh_conditions_norm, ct.term)
+                           ))::real AS score
+                    FROM public.rag_study_search rs
+                    JOIN condition_terms ct ON TRUE
+                    WHERE rs.conditions_norm % ct.term OR rs.mesh_conditions_norm % ct.term
+                    GROUP BY rs.nct_id
                 )"""
         else:
-            tsquery = self._add_param(" & ".join(self.input.condition.split()))
             return f"""
+                {terms_cte},
                 condition_matches AS (
-                    SELECT nct_id, GREATEST(
-                        COALESCE(similarity(conditions_norm, {query_norm}), 0),
-                        COALESCE(similarity(mesh_conditions_norm, {query_norm}), 0),
-                        COALESCE(ts_rank(terms_tsv, to_tsquery('english', {tsquery})) * 0.5, 0)
-                    )::real AS score
-                    FROM public.rag_study_search
-                    WHERE conditions_norm % {query_norm} OR mesh_conditions_norm % {query_norm} OR terms_tsv @@ to_tsquery('english', {tsquery})
+                    SELECT rs.nct_id, MAX(GREATEST(
+                        COALESCE(similarity(rs.conditions_norm, ct.term), 0),
+                        COALESCE(similarity(rs.mesh_conditions_norm, ct.term), 0),
+                        COALESCE(ts_rank(rs.terms_tsv, to_tsquery('english', ct.tsquery)) * 0.5, 0)
+                    ))::real AS score
+                    FROM public.rag_study_search rs
+                    JOIN condition_terms ct ON TRUE
+                    WHERE rs.conditions_norm % ct.term
+                       OR rs.mesh_conditions_norm % ct.term
+                       OR rs.terms_tsv @@ to_tsquery('english', ct.tsquery)
+                    GROUP BY rs.nct_id
                 )"""
 
     def _build_intervention_cte(self) -> str:
@@ -1401,7 +1448,44 @@ class ClinicalTrialSearcher:
             self._async_config = await get_async_connection(self.db_config)
         return self._async_config
 
+    async def _get_semantic_condition_terms(self, condition: str, top_k: int = 3) -> list[str]:
+        """Return semantically-nearest indication terms for condition fallback."""
+        try:
+            query_vector = encode_query_vector(condition)
+            conn = await self._get_conn()
+            rows = await conn.execute_query(
+                """
+                SELECT preferred_name
+                FROM dm_indication
+                WHERE embedding IS NOT NULL
+                ORDER BY embedding <=> $1
+                LIMIT $2
+                """,
+                query_vector,
+                top_k + 1,
+            )
+            base = normalize_semantic_text(condition)
+            terms: list[str] = []
+            for row in rows:
+                candidate = (row.get("preferred_name") or "").strip()
+                if not candidate:
+                    continue
+                if normalize_semantic_text(candidate) == base:
+                    continue
+                terms.append(candidate)
+                if len(terms) >= top_k:
+                    break
+            return terms
+        except Exception:
+            return []
+
     async def search(self, search_input: ClinicalTrialsSearchInput) -> ClinicalTrialsSearchOutput:
+        errors = search_input.validate_inputs()
+        if errors:
+            return ClinicalTrialsSearchOutput(
+                status="error",
+                error="; ".join(errors),
+            )
         if not search_input.has_any_query() and not self._has_filters(search_input):
             return ClinicalTrialsSearchOutput(
                 status="error",
@@ -1409,7 +1493,14 @@ class ClinicalTrialSearcher:
             )
         
         try:
-            builder = ClinicalTrialQueryBuilder(search_input)
+            enriched_input = search_input
+            if search_input.condition:
+                semantic_terms = await self._get_semantic_condition_terms(search_input.condition)
+                if semantic_terms:
+                    enriched_input = search_input.model_copy(
+                        update={"condition_semantic_terms": semantic_terms}
+                    )
+            builder = ClinicalTrialQueryBuilder(enriched_input)
             sql, params = builder.build()
             
             conn = await self._get_conn()

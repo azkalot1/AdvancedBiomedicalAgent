@@ -11,16 +11,35 @@ import zipfile
 from pathlib import Path
 
 import psycopg2
+import psycopg2.extras
 import requests
 from tqdm import tqdm
+from pgvector.psycopg2 import register_vector
 
 # Handle imports for both direct execution and module import
 try:
     from .config import DatabaseConfig, get_connection
     from .constants import ORANGE_BOOK_URL, DEFAULT_HEADERS
+    from ..semantic_utils import EMBEDDING_DIMENSION, encode_texts, normalize_semantic_text
 except ImportError:
     from config import DatabaseConfig, get_connection
     from constants import ORANGE_BOOK_URL, DEFAULT_HEADERS
+    try:
+        from bioagent.data.semantic_utils import EMBEDDING_DIMENSION, encode_texts, normalize_semantic_text
+    except ImportError:
+        from sentence_transformers import SentenceTransformer
+
+        EMBEDDING_DIMENSION = 384
+        _fallback_embedding_model: SentenceTransformer | None = None
+
+        def normalize_semantic_text(value: str | None) -> str:
+            return " ".join((value or "").lower().strip().split())
+
+        def encode_texts(values):
+            global _fallback_embedding_model
+            if _fallback_embedding_model is None:
+                _fallback_embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+            return [row.tolist() for row in _fallback_embedding_model.encode(list(values), show_progress_bar=False)]
 
 OB_URL = ORANGE_BOOK_URL
 
@@ -72,10 +91,16 @@ def _init_schema(con: psycopg2.extensions.connection) -> None:
               rld TEXT,        -- Reference Listed Drug
               rs TEXT,         -- Reference Standard
               applicant_full_name TEXT,
+              embedding VECTOR(384),
               created_at TIMESTAMP DEFAULT NOW(),
               updated_at TIMESTAMP DEFAULT NOW(),
               UNIQUE(appl_no, product_no)
             );
+
+            -- Backward-compatible migration for existing deployments that
+            -- created orange_book_products before embedding support.
+            ALTER TABLE orange_book_products
+            ADD COLUMN IF NOT EXISTS embedding VECTOR(384);
 
             -- Indexes for common queries
             CREATE INDEX IF NOT EXISTS idx_orange_book_trade_name ON orange_book_products(trade_name);
@@ -91,6 +116,11 @@ def _init_schema(con: psycopg2.extensions.connection) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_orange_book_ingredient_gin
             ON orange_book_products USING GIN(to_tsvector('english', ingredient));
+            
+            CREATE INDEX IF NOT EXISTS idx_orange_book_embedding
+            ON orange_book_products
+            USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = 100);
 
             -- Trigger function for updated_at
             CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -146,6 +176,57 @@ def _init_schema(con: psycopg2.extensions.connection) -> None:
         """
         )
         con.commit()
+
+
+def _populate_product_embeddings(con: psycopg2.extensions.connection) -> None:
+    """Populate semantic embeddings for Orange Book products."""
+    register_vector(con)
+    with con.cursor() as cur:
+        cur.execute("""
+            SELECT id, trade_name, ingredient, applicant_full_name
+            FROM orange_book_products
+            ORDER BY id
+        """)
+        rows = cur.fetchall()
+        if not rows:
+            return
+
+        texts: list[str] = []
+        ids: list[int] = []
+        for row_id, trade_name, ingredient, applicant_full_name in rows:
+            merged = " ".join(
+                part for part in [
+                    trade_name or "",
+                    ingredient or "",
+                    applicant_full_name or "",
+                ] if part
+            )
+            ids.append(row_id)
+            texts.append(normalize_semantic_text(merged))
+
+        embeddings = encode_texts(texts)
+        payload = list(zip(ids, embeddings, strict=False))
+
+        cur.execute(f"""
+            CREATE TEMP TABLE tmp_orange_book_embedding (
+                id INTEGER PRIMARY KEY,
+                embedding VECTOR({EMBEDDING_DIMENSION})
+            );
+        """)
+        psycopg2.extras.execute_values(
+            cur,
+            "INSERT INTO tmp_orange_book_embedding (id, embedding) VALUES %s",
+            payload,
+            page_size=500,
+        )
+        cur.execute("""
+            UPDATE orange_book_products p
+            SET embedding = t.embedding
+            FROM tmp_orange_book_embedding t
+            WHERE p.id = t.id
+        """)
+        cur.execute("ANALYZE orange_book_products")
+    con.commit()
 
 
 def ingest_orange_book(config: DatabaseConfig, raw_dir: Path) -> None:
@@ -361,6 +442,14 @@ def ingest_orange_book(config: DatabaseConfig, raw_dir: Path) -> None:
                 )
                 con.commit()
             print(f"✅ [Orange Book] Loaded {len(exclusivity_records):,} exclusivity records.")
+
+        print("🧠 Generating Orange Book embeddings...")
+        try:
+            _populate_product_embeddings(con)
+            print("✅ [Orange Book] Product embeddings generated.")
+        except Exception as e:
+            con.rollback()
+            print(f"⚠ [Orange Book] Embedding generation failed (continuing): {type(e).__name__}: {e}")
         print("🔍 Data available in orange_book_products table")
 
     except Exception as e:

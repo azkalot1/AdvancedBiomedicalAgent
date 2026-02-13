@@ -201,3 +201,280 @@ test_cases:
         - "metformin is used for type 2 diabetes"
     source: "ChEMBL/DrugCentral"
     confidence: "medium"
+
+  # ========================================
+  # TARGET → DRUGS (Reverse Lookup)
+  # ========================================
+  - id: "egfr_target_drugs_015"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "EGFR"
+    expected_facts:
+      required:
+        - "Drugs targeting EGFR are returned"
+      optional:
+        - "erlotinib is an EGFR inhibitor"
+        - "gefitinib is an EGFR inhibitor"
+        - "osimertinib is an EGFR inhibitor"
+        - "afatinib is an EGFR inhibitor"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "abl1_target_drugs_016"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "ABL1"
+    expected_facts:
+      required:
+        - "Drugs targeting ABL1 are returned"
+      optional:
+        - "imatinib is an ABL1 inhibitor"
+        - "dasatinib is an ABL1 inhibitor"
+        - "nilotinib is an ABL1 inhibitor"
+        - "bosutinib is an ABL1 inhibitor"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "jak2_target_drugs_017"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "JAK2"
+    expected_facts:
+      required:
+        - "Drugs targeting JAK2 are returned"
+      optional:
+        - "ruxolitinib is a JAK2 inhibitor"
+        - "fedratinib is a JAK2 inhibitor"
+        - "baricitinib is a JAK inhibitor"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "braf_target_drugs_018"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "BRAF"
+    expected_facts:
+      required:
+        - "Drugs targeting BRAF are returned"
+      optional:
+        - "vemurafenib is a BRAF inhibitor"
+        - "dabrafenib is a BRAF inhibitor"
+        - "encorafenib is a BRAF inhibitor"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "alk_target_drugs_019"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "ALK"
+    expected_facts:
+      required:
+        - "Drugs targeting ALK are returned"
+      optional:
+        - "crizotinib is an ALK inhibitor"
+        - "alectinib is an ALK inhibitor"
+        - "lorlatinib is an ALK inhibitor"
+        - "ceritinib is an ALK inhibitor"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "cdk4_target_drugs_020"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "CDK4"
+    expected_facts:
+      required:
+        - "Drugs targeting CDK4 are returned"
+      optional:
+        - "palbociclib is a CDK4/6 inhibitor"
+        - "ribociclib is a CDK4/6 inhibitor"
+        - "abemaciclib is a CDK4/6 inhibitor"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "vegfr2_target_drugs_021"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "KDR"
+    expected_facts:
+      required:
+        - "Drugs targeting KDR/VEGFR2 are returned"
+      optional:
+        - "sunitinib is a VEGFR inhibitor"
+        - "sorafenib is a VEGFR inhibitor"
+        - "axitinib is a VEGFR inhibitor"
+        - "pazopanib is a VEGFR inhibitor"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "met_target_drugs_022"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "MET"
+    expected_facts:
+      required:
+        - "Drugs targeting MET are returned"
+      optional:
+        - "capmatinib is a MET inhibitor"
+        - "tepotinib is a MET inhibitor"
+        - "crizotinib has MET activity"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "mtor_target_drugs_023"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "MTOR"
+    expected_facts:
+      required:
+        - "Drugs targeting MTOR are returned"
+      optional:
+        - "everolimus is an MTOR inhibitor"
+        - "temsirolimus is an MTOR inhibitor"
+        - "sirolimus/rapamycin is an MTOR inhibitor"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "ros1_target_drugs_024"
+    tool: "search_target_drugs"
+    input:
+      gene_symbol: "ROS1"
+    expected_facts:
+      required:
+        - "Drugs targeting ROS1 are returned"
+      optional:
+        - "crizotinib is a ROS1 inhibitor"
+        - "entrectinib is a ROS1 inhibitor"
+        - "lorlatinib is a ROS1 inhibitor"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  # ========================================
+  # ADDITIONAL WELL-KNOWN DRUG-TARGET PAIRS
+  # ========================================
+  - id: "osimertinib_targets_025"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "osimertinib"
+    expected_facts:
+      required:
+        - "EGFR is a target of osimertinib"
+      optional:
+        - "osimertinib targets EGFR T790M mutation"
+        - "osimertinib is a third-generation EGFR TKI"
+        - "AstraZeneca's Tagrisso"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "crizotinib_targets_026"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "crizotinib"
+    expected_facts:
+      required:
+        - "ALK is a target of crizotinib"
+        - "MET is a target of crizotinib"
+      optional:
+        - "ROS1 is a target of crizotinib"
+        - "Pfizer's Xalkori"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "alectinib_targets_027"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "alectinib"
+    expected_facts:
+      required:
+        - "ALK is a target of alectinib"
+      optional:
+        - "alectinib is a second-generation ALK inhibitor"
+        - "Roche's Alecensa"
+        - "alectinib is used for ALK-positive NSCLC"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "dabrafenib_targets_028"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "dabrafenib"
+    expected_facts:
+      required:
+        - "BRAF is a target of dabrafenib"
+      optional:
+        - "dabrafenib targets BRAF V600E"
+        - "dabrafenib is used for melanoma"
+        - "Novartis/GSK Tafinlar"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "trametinib_targets_029"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "trametinib"
+    expected_facts:
+      required:
+        - "MAP2K1 (MEK1) is a target of trametinib"
+      optional:
+        - "MAP2K2 (MEK2) is a target"
+        - "trametinib is a MEK inhibitor"
+        - "Often combined with dabrafenib for BRAF-mutant melanoma"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  - id: "larotrectinib_targets_030"
+    tool: "search_drug_targets"
+    input:
+      drug_name: "larotrectinib"
+    expected_facts:
+      required:
+        - "NTRK1 is a target of larotrectinib"
+      optional:
+        - "NTRK2 is a target"
+        - "NTRK3 is a target"
+        - "larotrectinib is a TRK inhibitor"
+        - "Bayer's Vitrakvi"
+    source: "ChEMBL/DrugCentral"
+    confidence: "high"
+
+  # ========================================
+  # CONSOLIDATED PHARMACOLOGY SEARCH
+  # ========================================
+  - id: "imatinib_indications_101"
+    tool: "pharmacology_search"
+    input:
+      search_type: "drug_indications"
+      drug_name: "imatinib"
+    expected_facts:
+      required:
+        - "imatinib is indicated for chronic myeloid leukemia"
+      optional:
+        - "imatinib is indicated for gastrointestinal stromal tumor"
+    source: "DrugCentral"
+    confidence: "medium"
+
+  - id: "egfr_pathways_102"
+    tool: "pharmacology_search"
+    input:
+      search_type: "target_pathways"
+      gene_symbol: "EGFR"
+    expected_facts:
+      required:
+        - "EGFR is associated with a signaling pathway"
+      optional:
+        - "EGFR is in MAPK pathway"
+    source: "DrugCentral/Pathway"
+    confidence: "medium"
+
+  - id: "warfarin_interactions_103"
+    tool: "pharmacology_search"
+    input:
+      search_type: "drug_interactions"
+      drug_name: "warfarin"
+    expected_facts:
+      required:
+        - "warfarin has drug interactions"
+      optional:
+        - "interaction includes bleeding risk"
+    source: "DrugCentral"
+    confidence: "low"

@@ -21,6 +21,9 @@ sys.path.insert(0, str(TESTS_DIR))
 from llm_judge import LLMJudge, load_ground_truth_cases  # noqa: E402
 
 
+EXCLUDED_TOOLS = {"search_drug_interactions"}
+
+
 def _get_tool_function(tool_name: str):
     for tool in DBSEARCH_TOOLS:
         if tool.name == tool_name:
@@ -53,6 +56,7 @@ async def run_evaluations(ground_truth_dir: Path, model_name: str) -> dict[str, 
     judge = LLMJudge(model)
 
     cases = load_ground_truth_cases(ground_truth_dir)
+    cases = [case for case in cases if case.tool not in EXCLUDED_TOOLS]
     results: list[dict[str, Any]] = []
 
     for case in cases:
@@ -86,7 +90,7 @@ async def main() -> int:
     )
     parser.add_argument(
         "--model",
-        default="google/gemini-2.5-flash",
+        default="google/gemini-3-flash-preview",
         help="Model name for LLM judge",
     )
     parser.add_argument("--output", default=None, help="Write JSON output to file")

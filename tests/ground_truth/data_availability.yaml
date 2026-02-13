@@ -1,0 +1,30 @@
+test_cases:
+  - id: "availability_imatinib_001"
+    tool: "check_data_availability"
+    input:
+      entity: "imatinib"
+      entity_type: "drug"
+    expected_facts:
+      required:
+        - "Entity: imatinib"
+        - "Detected type: drug"
+        - "Clinical trials"
+      optional:
+        - "FDA drug labels"
+        - "Pharmacology targets"
+    source: "Multiple"
+    confidence: "low"
+
+  - id: "availability_egfr_002"
+    tool: "check_data_availability"
+    input:
+      entity: "EGFR"
+      entity_type: "gene"
+    expected_facts:
+      required:
+        - "Entity: EGFR"
+        - "Detected type: gene"
+      optional:
+        - "Target-linked drugs"
+    source: "Multiple"
+    confidence: "low"

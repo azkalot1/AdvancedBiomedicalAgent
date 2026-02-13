@@ -232,6 +232,23 @@ TOOL_TEST_CASES: dict[str, dict[str, Any]] = {
                 query="Find completed trials for metformin in diabetes",
                 expected_any=["metformin", "diabetes"],
             ),
+            ToolTestCase(
+                query="Find Phase 3 breast cancer trials, give me just a brief overview",
+                expected_any=["breast", "phase 3"],
+            ),
+        ],
+    },
+    "get_clinical_trial_details": {
+        "description": "Get detailed info for specific NCT IDs",
+        "cases": [
+            ToolTestCase(
+                query="Get full details for trial NCT04280705",
+                expected_any=["NCT04280705"],
+            ),
+            ToolTestCase(
+                query="Show me details for NCT01295827 and NCT03456789",
+                expected_any=["NCT01295827"],
+            ),
         ],
     },
     "search_drug_labels": {
@@ -251,20 +268,54 @@ TOOL_TEST_CASES: dict[str, dict[str, Any]] = {
             ),
         ],
     },
-    "search_molecule_trials": {
-        "description": "Link molecules to clinical trials",
+    "check_data_availability": {
+        "description": "Check what data is available for an entity",
         "cases": [
             ToolTestCase(
-                query="Find trials linked to imatinib",
+                query="What data do we have about imatinib?",
+                expected_any=["imatinib", "clinical trials"],
+            ),
+            ToolTestCase(
+                query="Check data availability for EGFR",
+                expected_any=["EGFR", "target"],
+            ),
+        ],
+    },
+    "search_molecule_trials": {
+        "description": "Link molecules to clinical trials via name, target, or structure",
+        "cases": [
+            # Mode: trials_by_molecule
+            ToolTestCase(
+                query="Find clinical trials linked to the drug imatinib",
                 expected_any=["imatinib", "nct"],
             ),
+            # Mode: molecules_by_condition
             ToolTestCase(
-                query="Find molecules associated with breast cancer",
+                query="Find molecules being studied for breast cancer",
                 expected_any=["breast"],
             ),
+            # Mode: trials_by_target - KEY TEST: Target/Gene → Clinical Trials
             ToolTestCase(
-                query="Find trials linked to EGFR target",
-                expected_any=["egfr"],
+                query="Find clinical trials for drugs that target EGFR. Use the trials_by_target mode.",
+                expected_any=["egfr", "nct"],
+            ),
+            ToolTestCase(
+                query="What clinical trials exist for drugs targeting JAK2? I want to go from target to trials.",
+                expected_any=["jak2", "nct"],
+            ),
+            ToolTestCase(
+                query="Find trials for drugs that modulate the ABL1 target gene",
+                expected_any=["abl1", "nct"],
+            ),
+            # Mode: trials_by_structure - Structure similarity → Trials
+            ToolTestCase(
+                query="Find clinical trials for molecules similar to this SMILES: CC(=O)Oc1ccccc1C(=O)O. Use trials_by_structure mode.",
+                expected_any=["aspirin", "nct", "trial"],
+            ),
+            # Mode: trials_by_substructure - Substructure → Trials
+            ToolTestCase(
+                query="Find clinical trials for molecules containing a benzene ring substructure. Use the smiles c1ccccc1.",
+                expected_any=["nct", "trial"],
             ),
         ],
     },
@@ -337,12 +388,8 @@ TOOL_TEST_CASES: dict[str, dict[str, Any]] = {
         ],
     },
     "search_biotherapeutics": {
-        "description": "Search biologics by sequence motif or target",
+        "description": "Search biologics by sequence motif",
         "cases": [
-            ToolTestCase(
-                query="Find biologics targeting PDCD1",
-                expected_any=["PDCD1"],
-            ),
             ToolTestCase(
                 query="Find antibody sequence motif QVQLV",
                 expected_any=["QVQLV"],
@@ -367,6 +414,7 @@ TOOL_TEST_CASES: dict[str, dict[str, Any]] = {
             ToolTestCase(query="What drugs inhibit EGFR?", expected_any=["EGFR", "erlotinib"]),
             ToolTestCase(query="Find all compounds that target ABL1", expected_any=["ABL1", "imatinib"]),
             ToolTestCase(query="What medications affect JAK2?", expected_any=["JAK2", "ruxolitinib"]),
+            ToolTestCase(query="Find biologics targeting PDCD1", expected_any=["PDCD1"]),
         ],
     },
     "search_similar_molecules": {
@@ -487,6 +535,9 @@ TOOL_TEST_CASES: dict[str, dict[str, Any]] = {
             ToolTestCase(query="Find all targets for imatinib using unified search", expected_any=["imatinib"]),
             ToolTestCase(query="Search for drugs targeting EGFR with unified tool", expected_any=["EGFR"]),
             ToolTestCase(query="Get comprehensive drug profile for aspirin using unified search", expected_any=["aspirin"]),
+            ToolTestCase(query="Find indications for imatinib using unified search", expected_any=["imatinib"]),
+            ToolTestCase(query="What pathways involve EGFR? Use pharmacology search.", expected_any=["EGFR"]),
+            ToolTestCase(query="Find drug interactions for warfarin using unified search", expected_any=["warfarin"]),
         ],
     },
 }
@@ -497,10 +548,11 @@ async def main() -> int:
     parser.add_argument("tools", nargs="*", help="Tool names to test (default: all)")
     parser.add_argument("--json", dest="json_path", default=None, help="Write JSON results to file")
     parser.add_argument("--fail-fast", action="store_true", help="Stop on first failure")
+    parser.add_argument("--model", default="google/gemini-3-flash-preview", help="Model to use for testing")
     args = parser.parse_args()
 
     try:
-        model = get_chat_model("google/gemini-2.5-flash", "openrouter", model_parameters={"temperature": 0.5})
+        model = get_chat_model(args.model, "openrouter", model_parameters={"temperature": 0.5})
     except Exception as exc:
         print(f"Failed to initialize model: {exc}")
         return 1

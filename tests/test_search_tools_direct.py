@@ -44,6 +44,7 @@ def _raises_or_pytest(*expected: Type[BaseException]):
 
 
 from bioagent.data.ingest.config import DEFAULT_CONFIG
+from bioagent.data.ingest.async_config import get_async_connection
 from bioagent.data.search import (
     target_search_async,
     TargetSearchInput,
@@ -310,11 +311,18 @@ class TestResult:
 
 
 class SearchToolTester:
-    def __init__(self, verbose: bool = False, fail_fast: bool = False, json_output: bool = False) -> None:
+    def __init__(
+        self,
+        verbose: bool = False,
+        fail_fast: bool = False,
+        json_output: bool = False,
+        output_file: str | None = None,
+    ) -> None:
         self.results: list[TestResult] = []
         self.verbose = verbose
         self.fail_fast = fail_fast
         self.json_output = json_output
+        self.output_file = output_file
 
     async def _run_test(
         self,
@@ -1016,6 +1024,18 @@ class SearchToolTester:
             ),
             self._assert_not_error,
         )
+        await self._run_test(
+            "drugs_for_indication_breast_neoplasms_equivalence",
+            target_search_async(
+                DEFAULT_CONFIG,
+                TargetSearchInput(
+                    mode=SearchMode.DRUGS_FOR_INDICATION,
+                    query="breast neoplasms",
+                    limit=20,
+                ),
+            ),
+            self._assert_not_error,
+        )
 
     async def test_pathways_and_interactions(self) -> None:
         """Test target pathway and drug interaction modes."""
@@ -1215,6 +1235,32 @@ class SearchToolTester:
             self._assert_not_error,
         )
         await self._run_test(
+            "mol_trial_by_molecule_pembrolizumab",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_molecule",
+                    molecule_name="pembrolizumab",
+                    molecule_type="biotherapeutic",
+                    limit=10,
+                ),
+            ),
+            self._assert_not_error,
+        )
+        await self._run_test(
+            "mol_trial_by_molecule_trastuzumab",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_molecule",
+                    molecule_name="trastuzumab",
+                    molecule_type="biotherapeutic",
+                    limit=10,
+                ),
+            ),
+            self._assert_not_error,
+        )
+        await self._run_test(
             "mol_trial_by_target_egfr",
             molecule_trial_search_async(
                 DEFAULT_CONFIG,
@@ -1222,6 +1268,32 @@ class SearchToolTester:
                     mode="trials_by_target",
                     target_gene="EGFR",
                     min_pchembl=7.0,
+                    limit=10,
+                ),
+            ),
+            self._assert_not_error,
+        )
+        await self._run_test(
+            "mol_trial_by_target_pdcd1_bio",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_target",
+                    target_gene="PDCD1",
+                    molecule_type="biotherapeutic",
+                    limit=10,
+                ),
+            ),
+            self._assert_not_error,
+        )
+        await self._run_test(
+            "mol_trial_by_target_erbb2_bio",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_target",
+                    target_gene="ERBB2",
+                    molecule_type="biotherapeutic",
                     limit=10,
                 ),
             ),
@@ -1284,6 +1356,19 @@ class SearchToolTester:
                 ),
                 self._assert_not_error,
             )
+        await self._run_test(
+            "mol_trial_condition_melanoma_bio",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="molecules_by_condition",
+                    condition="melanoma",
+                    molecule_type="biotherapeutic",
+                    limit=20,
+                ),
+            ),
+            self._assert_not_error,
+        )
         # Test correctness: imatinib should have trials
         await self._run_test(
             "mol_trial_imatinib_correctness",
@@ -1310,6 +1395,213 @@ class SearchToolTester:
                 ),
             ),
             self._assert_not_error,
+        )
+        await self._run_test(
+            "mol_trial_group_by_condition",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_molecule",
+                    molecule_name="crizotinib",
+                    group_by="condition",
+                    limit=20,
+                ),
+            ),
+            self._assert_mol_trial_grouped_hits,
+        )
+        await self._run_test(
+            "mol_trial_group_by_molecule_concept",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_molecule",
+                    molecule_name="crizotinib",
+                    group_by="molecule_concept",
+                    limit=20,
+                ),
+            ),
+            self._assert_mol_trial_grouped_hits,
+        )
+        await self._run_test(
+            "mol_target_group_by_condition",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_target",
+                    target_gene="EGFR",
+                    group_by="condition",
+                    limit=20,
+                ),
+            ),
+            self._assert_mol_trial_grouped_hits,
+        )
+        await self._run_test(
+            "mol_target_group_by_intervention",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_target",
+                    target_gene="EGFR",
+                    group_by="intervention",
+                    limit=20,
+                ),
+            ),
+            self._assert_mol_trial_grouped_hits,
+        )
+        await self._run_test(
+            "mol_target_group_by_molecule_concept",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_target",
+                    target_gene="EGFR",
+                    group_by="molecule_concept",
+                    limit=20,
+                ),
+            ),
+            self._assert_mol_trial_grouped_hits,
+        )
+        await self._run_test(
+            "mol_target_alk_biotherapeutic_type_guard",
+            self._run_target_biotherapeutic_subset_check("ALK"),
+            self._assert_target_biotherapeutic_subset_check,
+        )
+
+    async def test_trials_by_sequence(self) -> None:
+        """Test sequence-based trial search for biotherapeutics."""
+        await self._run_test(
+            "mol_trial_by_sequence_vh",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_sequence",
+                    sequence="EVQLVESGG",
+                    molecule_type="biotherapeutic",
+                    limit=10,
+                ),
+            ),
+            self._assert_not_error,
+        )
+        await self._run_test(
+            "mol_trial_by_sequence_vl",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_sequence",
+                    sequence="DIQMTQ",
+                    molecule_type="biotherapeutic",
+                    limit=10,
+                ),
+            ),
+            self._assert_not_error,
+        )
+
+    async def test_molecule_trial_type_filter(self) -> None:
+        """Test molecule_type filter across trial search modes."""
+        await self._run_test(
+            "mol_trial_imatinib_small_molecule",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_molecule",
+                    molecule_name="imatinib",
+                    molecule_type="small_molecule",
+                    limit=10,
+                ),
+            ),
+            self._assert_not_error,
+        )
+        await self._run_test(
+            "mol_trial_imatinib_biotherapeutic",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_molecule",
+                    molecule_name="imatinib",
+                    molecule_type="biotherapeutic",
+                    limit=10,
+                ),
+            ),
+            self._assert_status_in_allowed,
+        )
+        await self._run_test(
+            "mol_trial_pembrolizumab_biotherapeutic",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_molecule",
+                    molecule_name="pembrolizumab",
+                    molecule_type="biotherapeutic",
+                    limit=10,
+                ),
+            ),
+            self._assert_not_error,
+        )
+        await self._run_test(
+            "mol_trial_pembrolizumab_small_molecule",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_molecule",
+                    molecule_name="pembrolizumab",
+                    molecule_type="small_molecule",
+                    limit=10,
+                ),
+            ),
+            self._assert_status_in_allowed,
+        )
+        await self._run_test(
+            "mol_trial_target_egfr_small_molecule",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_target",
+                    target_gene="EGFR",
+                    molecule_type="small_molecule",
+                    min_pchembl=7.0,
+                    limit=10,
+                ),
+            ),
+            self._assert_not_error,
+        )
+        await self._run_test(
+            "mol_trial_target_pdcd1_biotherapeutic",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_target",
+                    target_gene="PDCD1",
+                    molecule_type="biotherapeutic",
+                    limit=10,
+                ),
+            ),
+            self._assert_not_error,
+        )
+        await self._run_test(
+            "mol_trial_condition_melanoma_biotherapeutic",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="molecules_by_condition",
+                    condition="melanoma",
+                    molecule_type="biotherapeutic",
+                    limit=10,
+                ),
+            ),
+            self._assert_not_error,
+        )
+        await self._run_test(
+            "mol_trial_structure_biotherapeutic_invalid",
+            molecule_trial_search_async(
+                DEFAULT_CONFIG,
+                MoleculeTrialSearchInput(
+                    mode="trials_by_structure",
+                    smiles="CC(=O)Oc1ccccc1C(=O)O",
+                    molecule_type="biotherapeutic",
+                    limit=10,
+                ),
+            ),
+            lambda r: self._assert_status_in(r, ["invalid_input", "error"]),
         )
 
     async def test_adverse_events_search(self) -> None:
@@ -1770,7 +2062,7 @@ class SearchToolTester:
                     include_targets=False,
                 ),
             ),
-            self._assert_not_error,
+            self._assert_cross_db_exact_name_priority,
         )
         # Test include_targets option
         await self._run_test(
@@ -1837,14 +2129,16 @@ class SearchToolTester:
         )
 
     async def test_biotherapeutic_sequence_search(self) -> None:
-        """Test biotherapeutic sequence search (by_target, by_sequence, similar_biologics) and biotherapeutic_type (all, antibody, enzyme)."""
+        """Test biotherapeutic sequence search (by_sequence, similar_biologics) and biologic subtype filters."""
         await self._run_test(
             "bio_sequence_pdcd1",
-            biotherapeutic_sequence_search_async(
+            target_search_async(
                 DEFAULT_CONFIG,
-                BiotherapeuticSearchInput(
-                    mode="by_target",
-                    target_gene="PDCD1",
+                TargetSearchInput(
+                    mode=SearchMode.DRUGS_FOR_TARGET,
+                    query="PDCD1",
+                    data_source=DataSource.MECHANISM,
+                    molecule_type_filter="biotherapeutic",
                     limit=10,
                 ),
             ),
@@ -1876,12 +2170,14 @@ class SearchToolTester:
         )
         await self._run_test(
             "bio_type_antibody",
-            biotherapeutic_sequence_search_async(
+            target_search_async(
                 DEFAULT_CONFIG,
-                BiotherapeuticSearchInput(
-                    mode="by_target",
-                    target_gene="PDCD1",
-                    biotherapeutic_type="antibody",
+                TargetSearchInput(
+                    mode=SearchMode.DRUGS_FOR_TARGET,
+                    query="PDCD1",
+                    data_source=DataSource.MECHANISM,
+                    molecule_type_filter="biotherapeutic",
+                    biotherapeutic_subtype="antibody",
                     limit=10,
                 ),
             ),
@@ -1889,12 +2185,14 @@ class SearchToolTester:
         )
         await self._run_test(
             "bio_type_enzyme",
-            biotherapeutic_sequence_search_async(
+            target_search_async(
                 DEFAULT_CONFIG,
-                BiotherapeuticSearchInput(
-                    mode="by_target",
-                    target_gene="EGFR",
-                    biotherapeutic_type="enzyme",
+                TargetSearchInput(
+                    mode=SearchMode.DRUGS_FOR_TARGET,
+                    query="EGFR",
+                    data_source=DataSource.MECHANISM,
+                    molecule_type_filter="biotherapeutic",
+                    biotherapeutic_subtype="enzyme",
                     limit=10,
                 ),
             ),
@@ -1903,15 +2201,17 @@ class SearchToolTester:
 
     async def test_biotherapeutic_sequence_search_extended(self) -> None:
         """Extended biotherapeutic sequence search tests."""
-        # Test by_target for various targets
+        # Test target-based biologics for various targets
         for target in ["ERBB2", "TNF", "VEGFA", "MS4A1", "CTLA4"]:
             await self._run_test(
                 f"bio_by_target_{target}",
-                biotherapeutic_sequence_search_async(
+                target_search_async(
                     DEFAULT_CONFIG,
-                    BiotherapeuticSearchInput(
-                        mode="by_target",
-                        target_gene=target,
+                    TargetSearchInput(
+                        mode=SearchMode.DRUGS_FOR_TARGET,
+                        query=target,
+                        data_source=DataSource.MECHANISM,
+                        molecule_type_filter="biotherapeutic",
                         limit=10,
                     ),
                 ),
@@ -1934,12 +2234,13 @@ class SearchToolTester:
         # Test biotherapeutic_type="all"
         await self._run_test(
             "bio_type_all",
-            biotherapeutic_sequence_search_async(
+            target_search_async(
                 DEFAULT_CONFIG,
-                BiotherapeuticSearchInput(
-                    mode="by_target",
-                    target_gene="EGFR",
-                    biotherapeutic_type="all",
+                TargetSearchInput(
+                    mode=SearchMode.DRUGS_FOR_TARGET,
+                    query="EGFR",
+                    data_source=DataSource.MECHANISM,
+                    molecule_type_filter="biotherapeutic",
                     limit=20,
                 ),
             ),
@@ -2087,9 +2388,9 @@ class SearchToolTester:
     async def test_invalid_literals_biotherapeutic(self) -> None:
         """Unsupported mode or biotherapeutic_type raises ValidationError at input construction."""
         with _raises_or_pytest(ValidationError):
-            BiotherapeuticSearchInput(mode="invalid", target_gene="PDCD1")
+            BiotherapeuticSearchInput(mode="invalid", sequence="CDR")
         with _raises_or_pytest(ValidationError):
-            BiotherapeuticSearchInput(mode="by_target", target_gene="PDCD1", biotherapeutic_type="peptide")
+            BiotherapeuticSearchInput(mode="by_sequence", sequence="CDR", biotherapeutic_type="peptide")
 
     async def test_invalid_literals_molecule_trial(self) -> None:
         """Unsupported mode raises ValidationError at input construction."""
@@ -2207,20 +2508,13 @@ class SearchToolTester:
         assert out.error
 
     async def test_invalid_input_missing_required_biotherapeutic(self) -> None:
-        """Missing sequence or target_gene for mode returns status=invalid_input."""
+        """Missing sequence for mode returns status=invalid_input."""
         out = await biotherapeutic_sequence_search_async(
             DEFAULT_CONFIG,
             BiotherapeuticSearchInput(mode="by_sequence", sequence=None, limit=10),
         )
         assert out.status == "invalid_input"
         assert out.error
-        # Test by_target missing target_gene
-        out2 = await biotherapeutic_sequence_search_async(
-            DEFAULT_CONFIG,
-            BiotherapeuticSearchInput(mode="by_target", target_gene=None, limit=10),
-        )
-        assert out2.status == "invalid_input"
-        assert out2.error
 
     async def test_invalid_input_missing_required_target_search(self) -> None:
         """Missing query for TARGETS_FOR_DRUG returns status=invalid_input with diagnostics."""
@@ -2552,6 +2846,104 @@ class SearchToolTester:
             raise AssertionError(f"Expected >= {min_trials} trials, got {len(result.hits)}")
 
     @staticmethod
+    def _assert_mol_trial_grouped_hits(result) -> None:
+        """Assert grouped molecule-trial output shape."""
+        if result.status == "not_found":
+            raise AssertionError("Expected grouped hits but got not_found")
+        if result.status != "success":
+            raise AssertionError(f"Expected success, got {result.status}")
+        if not result.hits:
+            raise AssertionError("Expected grouped hits")
+
+        for group in result.hits:
+            group_label = getattr(group, "group_label", None)
+            n_trials = getattr(group, "n_trials", None)
+            trials = getattr(group, "trials", None)
+            if not group_label or not isinstance(group_label, str):
+                raise AssertionError("Grouped hit missing group_label")
+            if not isinstance(n_trials, int) or n_trials <= 0:
+                raise AssertionError("Grouped hit has invalid n_trials")
+            if not isinstance(trials, list) or not trials:
+                raise AssertionError("Grouped hit has empty trials list")
+            first = trials[0]
+            if not getattr(first, "nct_id", None):
+                raise AssertionError("Nested trial is missing nct_id")
+
+    @staticmethod
+    async def _run_target_biotherapeutic_subset_check(target_gene: str):
+        """Run target trial search and return (result, allowed_bio_concept_ids)."""
+        result = await molecule_trial_search_async(
+            DEFAULT_CONFIG,
+            MoleculeTrialSearchInput(
+                mode="trials_by_target",
+                target_gene=target_gene,
+                molecule_type="biotherapeutic",
+                group_by="intervention",
+                limit=50,
+            ),
+        )
+        if result.status != "success" or not result.hits:
+            return result, set()
+
+        concept_ids: list[int] = []
+        for hit in result.hits:
+            trials = getattr(hit, "trials", None)
+            if trials and isinstance(trials, list):
+                for trial in trials:
+                    cid = getattr(trial, "concept_id", None)
+                    if isinstance(cid, int):
+                        concept_ids.append(cid)
+            else:
+                cid = getattr(hit, "concept_id", None)
+                if isinstance(cid, int):
+                    concept_ids.append(cid)
+        unique_concept_ids = sorted(set(concept_ids))
+        if not unique_concept_ids:
+            return result, set()
+
+        async_config = await get_async_connection(DEFAULT_CONFIG)
+        rows = await async_config.execute_query(
+            """
+            SELECT concept_id
+            FROM dm_molecule_concept
+            WHERE concept_id = ANY($1::bigint[])
+              AND is_biotherapeutic = TRUE
+            """,
+            unique_concept_ids,
+        )
+        allowed = {int(r["concept_id"]) for r in rows if r.get("concept_id") is not None}
+        return result, allowed
+
+    @staticmethod
+    def _assert_target_biotherapeutic_subset_check(check_result) -> None:
+        """Assert trials_by_target + molecule_type=biotherapeutic returns only biotherapeutic concepts."""
+        result, allowed_concepts = check_result
+        if result.status not in {"success", "not_found"}:
+            raise AssertionError(f"Expected success/not_found, got {result.status}")
+        if result.status != "success":
+            return
+
+        seen_concepts: set[int] = set()
+        for hit in result.hits:
+            trials = getattr(hit, "trials", None)
+            if trials and isinstance(trials, list):
+                for trial in trials:
+                    cid = getattr(trial, "concept_id", None)
+                    if isinstance(cid, int):
+                        seen_concepts.add(cid)
+            else:
+                cid = getattr(hit, "concept_id", None)
+                if isinstance(cid, int):
+                    seen_concepts.add(cid)
+
+        leaking = sorted(cid for cid in seen_concepts if cid not in allowed_concepts)
+        if leaking:
+            raise AssertionError(
+                "Found non-biotherapeutic concepts in biotherapeutic target trials: "
+                + ", ".join(str(cid) for cid in leaking[:20])
+            )
+
+    @staticmethod
     def _assert_adverse_events_has_data(result) -> None:
         """Assert adverse events search returns data."""
         if result.status == "not_found":
@@ -2597,6 +2989,14 @@ class SearchToolTester:
             raise AssertionError(f"Expected success, got {result.status}")
         if not result.molecules:
             raise AssertionError("Expected molecules in cross-db lookup")
+
+    @staticmethod
+    def _assert_cross_db_exact_name_priority(result) -> None:
+        """Ensure exact name match is prioritized over fuzzy neighbors."""
+        SearchToolTester._assert_cross_db_has_molecules(result)
+        top_name = ((result.molecules[0].pref_name or "") if result.molecules else "").lower()
+        if "pembrolizumab" not in top_name:
+            raise AssertionError(f"Expected top hit to be pembrolizumab, got '{top_name}'")
 
     # ---------------------------------------------------------------------
     # Runner
@@ -2678,27 +3078,42 @@ class SearchToolTester:
 
         self._print_summary()
 
+    def _build_json_payload(self) -> dict:
+        passed = sum(1 for r in self.results if r.passed)
+        failed = len(self.results) - passed
+        total_ms = sum(r.duration_ms for r in self.results)
+        failed_tests = [
+            {"name": r.name, "details": r.details, "duration_ms": round(r.duration_ms, 2)}
+            for r in self.results
+            if not r.passed
+        ]
+        return {
+            "total": len(self.results),
+            "passed": passed,
+            "failed": failed,
+            "duration_ms": round(total_ms, 2),
+            "failed_tests": failed_tests,
+            "results": [
+                {
+                    "name": r.name,
+                    "passed": r.passed,
+                    "duration_ms": round(r.duration_ms, 2),
+                    "details": r.details,
+                }
+                for r in self.results
+            ],
+        }
+
     def _print_summary(self) -> None:
         passed = sum(1 for r in self.results if r.passed)
         failed = len(self.results) - passed
         total_ms = sum(r.duration_ms for r in self.results)
         if self.json_output:
-            payload = {
-                "total": len(self.results),
-                "passed": passed,
-                "failed": failed,
-                "duration_ms": round(total_ms, 2),
-                "results": [
-                    {
-                        "name": r.name,
-                        "passed": r.passed,
-                        "duration_ms": round(r.duration_ms, 2),
-                        "details": r.details,
-                    }
-                    for r in self.results
-                ],
-            }
+            payload = self._build_json_payload()
             print(json.dumps(payload, indent=2))
+            if self.output_file:
+                with open(self.output_file, "w") as f:
+                    json.dump(payload, f, indent=2)
             return
 
         print("\n" + "=" * 80)
@@ -2711,6 +3126,11 @@ class SearchToolTester:
             for result in self.results:
                 if not result.passed:
                     print(f"FAIL - {result.name}: {result.details}")
+        if self.output_file:
+            payload = self._build_json_payload()
+            with open(self.output_file, "w") as f:
+                json.dump(payload, f, indent=2)
+            print(f"\nResults saved to {self.output_file}")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -2723,7 +3143,15 @@ Examples:
   python -m tests.test_search_tools_direct --category targets
   python -m tests.test_search_tools_direct --category edge_cases
   python -m tests.test_search_tools_direct -v --fail-fast
+  python -m tests.test_search_tools_direct --output results.json
         """,
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        metavar="FILE",
+        default=None,
+        help="Save results as JSON to FILE (still prints output and summary to stdout)",
     )
     parser.add_argument(
         "--category",
@@ -2777,6 +3205,7 @@ async def main() -> None:
         verbose=args.verbose,
         fail_fast=args.fail_fast,
         json_output=args.json,
+         output_file=args.output,
     )
     await tester.run(args.category)
 
