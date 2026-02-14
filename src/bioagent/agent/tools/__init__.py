@@ -39,7 +39,5 @@ __all__ = [
     "TARGET_SEARCH_TOOLS",
     "WEB_SEARCH_TOOLS",
     "make_summarizing_tool",
-    "retrieve_full_output",
-    "list_research_outputs",
     "get_summarized_tools",
 ]
