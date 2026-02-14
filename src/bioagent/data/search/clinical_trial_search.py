@@ -416,13 +416,23 @@ class TrialPhase(str, Enum):
     def from_display(cls, display_name: str) -> "TrialPhase | None":
         if not display_name:
             return None
-        normalized = display_name.upper().replace(" ", "").replace("-", "").replace("_", "")
+        normalized = (
+            display_name.upper()
+            .replace(" ", "")
+            .replace("-", "")
+            .replace("_", "")
+        )
         mapping = {
             "PHASE1": cls.PHASE_1, "PHASE2": cls.PHASE_2, "PHASE3": cls.PHASE_3, "PHASE4": cls.PHASE_4,
             "PHASE1/PHASE2": cls.PHASE_1_2, "PHASE1PHASE2": cls.PHASE_1_2,
             "PHASE2/PHASE3": cls.PHASE_2_3, "PHASE2PHASE3": cls.PHASE_2_3,
             "EARLYPHASE1": cls.EARLY_PHASE_1, "NA": cls.NA, "N/A": cls.NA,
             "PHASEI": cls.PHASE_1, "PHASEII": cls.PHASE_2, "PHASEIII": cls.PHASE_3, "PHASEIV": cls.PHASE_4,
+            "I": cls.PHASE_1, "II": cls.PHASE_2, "III": cls.PHASE_3, "IV": cls.PHASE_4,
+            "1": cls.PHASE_1, "2": cls.PHASE_2, "3": cls.PHASE_3, "4": cls.PHASE_4,
+            "1/2": cls.PHASE_1_2, "I/II": cls.PHASE_1_2,
+            "2/3": cls.PHASE_2_3, "II/III": cls.PHASE_2_3,
+            "EARLY1": cls.EARLY_PHASE_1,
         }
         return mapping.get(normalized)
 
@@ -452,7 +462,14 @@ class TrialStatus(str, Enum):
     def from_display(cls, display_name: str) -> "TrialStatus | None":
         if not display_name:
             return None
-        normalized = display_name.upper().replace(" ", "_").replace(",", "").replace("-", "_")
+        normalized = (
+            display_name.upper()
+            .replace(",", " ")
+            .replace("-", " ")
+            .replace("_", " ")
+        )
+        normalized = "_".join(part for part in normalized.split() if part)
+        compact = normalized.replace("_", "")
         mapping = {
             "COMPLETED": cls.COMPLETED, "UNKNOWN": cls.UNKNOWN, "UNKNOWN_STATUS": cls.UNKNOWN,
             "RECRUITING": cls.RECRUITING, "TERMINATED": cls.TERMINATED,
@@ -461,8 +478,11 @@ class TrialStatus(str, Enum):
             "ACTIVE": cls.ACTIVE_NOT_RECRUITING, "WITHDRAWN": cls.WITHDRAWN,
             "ENROLLING_BY_INVITATION": cls.ENROLLING_BY_INVITATION,
             "ENROLLINGBYINVITATION": cls.ENROLLING_BY_INVITATION, "SUSPENDED": cls.SUSPENDED,
+            # Common shorthand/LLM variants
+            "NOT_RECRUITING": cls.ACTIVE_NOT_RECRUITING,
+            "CLOSED": cls.COMPLETED,
         }
-        return mapping.get(normalized)
+        return mapping.get(normalized) or mapping.get(compact)
 
     @property
     def display_name(self) -> str:
@@ -966,7 +986,12 @@ class ClinicalTrialsSearchInput(BaseModel):
             allowed = ", ".join(s.display_name for s in TrialStatus)
             raise ValueError(f"Cannot convert {type(val)} to TrialStatus. Allowed: {allowed}")
         if isinstance(v, (list, tuple)):
-            return [to_enum(x) for x in v]
+            out: list[TrialStatus] = []
+            for item in v:
+                parsed = to_enum(item)
+                if parsed not in out:
+                    out.append(parsed)
+            return out
         return [to_enum(v)]
 
     @field_validator('phase', mode='before')
@@ -978,7 +1003,12 @@ class ClinicalTrialsSearchInput(BaseModel):
             if isinstance(val, TrialPhase):
                 return val
             if isinstance(val, str):
-                normalized = val.upper().replace(" ", "").replace("-", "")
+                normalized = (
+                    val.upper()
+                    .replace(" ", "")
+                    .replace("-", "")
+                    .replace("_", "")
+                )
                 try:
                     return TrialPhase(normalized)
                 except ValueError:
@@ -991,7 +1021,12 @@ class ClinicalTrialsSearchInput(BaseModel):
             allowed = ", ".join(p.display_name for p in TrialPhase)
             raise ValueError(f"Cannot convert {type(val)} to TrialPhase. Allowed: {allowed}")
         if isinstance(v, (list, tuple)):
-            return [to_enum(x) for x in v]
+            out: list[TrialPhase] = []
+            for item in v:
+                parsed = to_enum(item)
+                if parsed not in out:
+                    out.append(parsed)
+            return out
         return [to_enum(v)]
 
     @field_validator('study_type', mode='before')

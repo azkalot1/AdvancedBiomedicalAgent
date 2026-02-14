@@ -12,6 +12,7 @@ import json
 import inspect
 from datetime import date
 from functools import wraps
+import re
 
 from langchain_core.tools import tool
 
@@ -144,6 +145,38 @@ def _validate_detail_level(detail_level: str | None) -> tuple[str | None, str | 
     if value not in allowed:
         return None, "detail_level must be one of: brief, standard, comprehensive"
     return value, None
+
+
+def _split_filter_values(raw: str | None) -> list[str] | None:
+    """Split multi-value filter strings on common separators."""
+    if not raw or not isinstance(raw, str):
+        return None
+    parts = [p.strip() for p in re.split(r"[;,|]", raw) if p and p.strip()]
+    return parts or None
+
+
+def _normalize_status_tokens(raw: str | None) -> list[str] | None:
+    """
+    Parse status filters while preserving the canonical phrase
+    'Active, not recruiting' when users/LLMs provide split tokens.
+    """
+    parts = _split_filter_values(raw)
+    if not parts:
+        return None
+
+    normalized: list[str] = []
+    i = 0
+    while i < len(parts):
+        current = parts[i].strip()
+        curr_l = current.lower()
+        next_l = parts[i + 1].strip().lower() if i + 1 < len(parts) else None
+        if curr_l == "active" and next_l in {"not recruiting", "not_recruiting"}:
+            normalized.append("Active, not recruiting")
+            i += 2
+            continue
+        normalized.append(current)
+        i += 1
+    return normalized
 
 
 # =============================================================================
@@ -1074,15 +1107,10 @@ async def search_clinical_trials(
         if nct_ids:
             nct_id_list = [n.strip().upper() for n in nct_ids.split(",") if n.strip()]
         
-        # Parse comma-separated phases
-        phase_list = None
-        if phase:
-            phase_list = [p.strip() for p in phase.split(",") if p.strip()]
-        
-        # Parse comma-separated statuses
-        status_list = None
-        if status:
-            status_list = [s.strip() for s in status.split(",") if s.strip()]
+        # Parse multi-value phase and status filters.
+        # Status parsing includes a repair for split "Active, not recruiting".
+        phase_list = _split_filter_values(phase)
+        status_list = _normalize_status_tokens(status)
         
         # Parse comma-separated intervention types
         intervention_type_list = None
