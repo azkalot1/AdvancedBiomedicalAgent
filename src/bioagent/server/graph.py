@@ -48,7 +48,8 @@ def _build_middleware() -> list[Any]:
 
 
 def _build_agent() -> Any:
-    model_name = os.getenv("BIOAGENT_MODEL", "google/gemini-2.5-flash")
+    model_name = os.getenv("BIOAGENT_MODEL", "google/gemini-3-flash-preview")
+    summarizer_model_name = os.getenv("BIOAGENT_SUMMARIZER_MODEL", "google/gemini-3-flash-preview")
     provider = os.getenv("BIOAGENT_PROVIDER", "openrouter")
 
     model = get_chat_model(
@@ -57,7 +58,7 @@ def _build_agent() -> Any:
         model_parameters={"temperature": float(os.getenv("BIOAGENT_TEMPERATURE", "0.5"))},
     )
     summarizer = get_chat_model(
-        model_name,
+        summarizer_model_name,
         provider,
         model_parameters={"temperature": float(os.getenv("BIOAGENT_SUMMARIZER_TEMPERATURE", "0.2"))},
     )
