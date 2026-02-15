@@ -29,3 +29,52 @@ biomedagent-db ingest --generate-search
 **Tools available.** Retrieval tools cover clinical trial search, drug labels, molecule–trial connectivity, adverse events, outcomes, Orange Book, cross-database lookup, biotherapeutic sequence search, and target/drug pharmacology; agent tools wrap these with LLM-friendly formatting. Full reference: [docs/tools.md](docs/tools.md).
 
 For pipeline order and script roles, see [docs/INGESTION.md](docs/INGESTION.md).
+
+## Chat Server + CLI
+
+Full guide: [docs/CHAT_INTERFACE.md](docs/CHAT_INTERFACE.md)
+
+You can run the LangGraph server and CLI chat together with one script:
+
+```bash
+./scripts/start_chat_stack.sh
+```
+
+This script:
+- starts `langgraph dev` in the project root
+- waits for `/v1/ok` (or `/ok`) readiness
+- launches `biomedagent-db chat`
+- stops the dev server when chat exits
+
+Server logs are written to `.langgraph_api/dev.log` by default.
+
+### Auth-enabled example
+
+```bash
+export BIOAGENT_API_TOKEN=dev-token
+export BIOAGENT_API_USER_ID=1
+export BIOAGENT_AUTH_REQUIRED=true
+
+./scripts/start_chat_stack.sh --api-token "$BIOAGENT_API_TOKEN"
+```
+
+### Useful options
+
+```bash
+./scripts/start_chat_stack.sh --help
+./scripts/start_chat_stack.sh --assistant-id co_scientist
+./scripts/start_chat_stack.sh --server-url http://localhost:2024
+./scripts/start_chat_stack.sh --api-token dev-token -- --stream-tool-args
+```
+
+### Manual (two terminals)
+
+Terminal 1:
+```bash
+langgraph dev
+```
+
+Terminal 2:
+```bash
+biomedagent-db chat --server-url http://localhost:2024 --assistant-id co_scientist --api-token dev-token
+```
