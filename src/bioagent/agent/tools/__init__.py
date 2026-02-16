@@ -12,7 +12,6 @@ from langchain_core.tools import BaseTool, StructuredTool
 
 from .dbsearch import DBSEARCH_TOOLS
 from .summarizing import (
-    DEFAULT_OUTPUT_DIR,
     _make_list_tool,
     _make_retrieve_tool,
     make_summarizing_tool,
@@ -168,28 +167,19 @@ def with_tool_status_streaming(tool: BaseTool) -> BaseTool:
 
 def get_summarized_tools(
     summarizer_llm: Runnable,
-    session_id: str | None = None,
 ) -> list[BaseTool]:
     """Wrap all tools with summarization and add retrieval tools."""
-    
-    # Create agent-specific output directory
-    if session_id:
-        output_dir = DEFAULT_OUTPUT_DIR / session_id
-    else:
-        output_dir = DEFAULT_OUTPUT_DIR / str(uuid.uuid4())
-    
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     all_tools = DBSEARCH_TOOLS + TARGET_SEARCH_TOOLS + WEB_SEARCH_TOOLS
     wrapped_tools = [
-        with_tool_status_streaming(make_summarizing_tool(tool, summarizer_llm, output_dir=output_dir))
+        with_tool_status_streaming(make_summarizing_tool(tool, summarizer_llm))
         for tool in all_tools
     ]
     
-    # Create agent-specific retrieval tools
+    # Add report retrieval/listing tools
     wrapped_tools.extend([
-        with_tool_status_streaming(_make_retrieve_tool(output_dir)),
-        with_tool_status_streaming(_make_list_tool(output_dir)),
+        with_tool_status_streaming(_make_retrieve_tool()),
+        with_tool_status_streaming(_make_list_tool()),
     ])
     return wrapped_tools
 

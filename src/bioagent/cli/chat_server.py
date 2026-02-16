@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -444,10 +443,6 @@ def _extract_last_assistant_text(state_payload: dict[str, Any]) -> str:
             continue
         return _extract_text(message.get("content"))
     return ""
-
-
-def _extract_ref_ids(text: str) -> list[str]:
-    return [match.group(1).strip() for match in re.finditer(r"\[ref:\s*([^\]]+)\]", text)]
 
 
 def _messages_from_state(state_payload: dict[str, Any]) -> list[dict[str, Any]]:

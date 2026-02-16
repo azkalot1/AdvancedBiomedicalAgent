@@ -133,3 +133,17 @@ def test_v1_report_not_found_envelope(monkeypatch) -> None:
     payload = response.json()
     assert payload["error"]["code"] == "report_not_found"
     assert "request_id" in payload["error"]
+
+
+def test_v1_report_id_validation_envelope(monkeypatch) -> None:
+    monkeypatch.setenv("BIOAGENT_API_TOKEN", "validate-token")
+    monkeypatch.setenv("BIOAGENT_API_USER_ID", "user_validate")
+
+    app = webapp.create_webapp()
+    client = TestClient(app)
+
+    response = client.get("/v1/reports/%2A/content", headers=_auth_header("validate-token"))
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"]["code"] == "invalid_report_id"
+    assert "request_id" in payload["error"]

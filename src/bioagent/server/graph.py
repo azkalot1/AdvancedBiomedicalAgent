@@ -63,10 +63,7 @@ def _build_agent() -> Any:
         model_parameters={"temperature": float(os.getenv("BIOAGENT_SUMMARIZER_TEMPERATURE", "0.2"))},
     )
 
-    tools = [with_tool_status_streaming(think)] + get_summarized_tools(
-        summarizer,
-        session_id=os.getenv("BIOAGENT_SERVER_SESSION_ID", "server"),
-    )
+    tools = [with_tool_status_streaming(think)] + get_summarized_tools(summarizer)
     kwargs: dict[str, Any] = {
         "model": model,
         "system_prompt": SYSTEM_PROMPT,

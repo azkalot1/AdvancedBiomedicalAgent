@@ -4,9 +4,7 @@ import asyncio
 import functools
 import inspect
 import json
-import os
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -22,8 +20,6 @@ from bioagent.persistence import (
     resolve_scope,
     thread_tool_outputs_dir,
 )
-
-DEFAULT_OUTPUT_DIR = Path(os.getenv("BIOAGENT_RESEARCH_OUTPUT_DIR", "./research_outputs"))
 
 SUMMARIZATION_PROMPT = PromptTemplate.from_template(
     """
@@ -150,15 +146,12 @@ async def _generate_summary(
 def make_summarizing_tool(
     original_tool: BaseTool,
     summarizer_llm: Runnable,
-    output_dir: Path = DEFAULT_OUTPUT_DIR,
     max_output_length: int = 4000,
 ) -> BaseTool:
     """
     Factory that wraps any tool with summarization capability while preserving
     the original tool name, description, and args schema.
     """
-
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     original_func = original_tool.coroutine or original_tool.func
     original_is_async = inspect.iscoroutinefunction(original_func)
@@ -280,7 +273,7 @@ def make_summarizing_tool(
     )
 
 
-def _make_retrieve_tool(output_dir: Path) -> BaseTool:
+def _make_retrieve_tool() -> BaseTool:
     @tool("retrieve_full_output", return_direct=False)
     async def retrieve_full_output(
         reference_id: str,
@@ -362,7 +355,7 @@ def _make_retrieve_tool(output_dir: Path) -> BaseTool:
     return retrieve_full_output
 
 
-def _make_list_tool(output_dir: Path) -> BaseTool:
+def _make_list_tool() -> BaseTool:
     @tool("list_research_outputs", return_direct=False)
     async def list_research_outputs(
         tool_filter: str | None = None,

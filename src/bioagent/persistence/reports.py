@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,11 +14,23 @@ import yaml
 
 DEFAULT_REPORTS_ROOT = Path(os.getenv("BIOAGENT_RESEARCH_OUTPUT_DIR", "./research_outputs"))
 DEFAULT_USER_ID = os.getenv("BIOAGENT_DEFAULT_USER_ID", "anonymous")
+REPORT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$")
 
 
 def _safe_segment(value: str | None, fallback: str) -> str:
     raw = (value or "").strip() or fallback
     return raw.replace("/", "_").replace("\\", "_")
+
+
+def normalize_report_id(report_id: str | None) -> str | None:
+    if report_id is None:
+        return None
+    normalized = str(report_id).strip()
+    if not normalized:
+        return None
+    if REPORT_ID_PATTERN.fullmatch(normalized) is None:
+        return None
+    return normalized
 
 
 def thread_tool_outputs_namespace(user_id: str, thread_id: str) -> tuple[str, ...]:
@@ -224,10 +237,6 @@ def _write_report_markdown(file_path: Path, metadata: dict[str, Any], content: s
     file_path.write_text(payload)
 
 
-def _list_report_stems(output_dir: Path, limit: int = 10) -> list[str]:
-    return [item.stem for item in output_dir.glob("*.md")][:limit]
-
-
 def _read_file_text(path: Path) -> str:
     return path.read_text()
 
@@ -254,7 +263,8 @@ async def persist_tool_output_report(
     root: Path = DEFAULT_REPORTS_ROOT,
 ) -> dict[str, Any]:
     resolved_user, resolved_thread = resolve_scope(runtime=runtime, user_id=user_id, thread_id=thread_id)
-    final_report_id = report_id or f"{tool_name}_{uuid4().hex[:8]}"
+    safe_tool_name = _safe_segment(tool_name, "tool")
+    final_report_id = normalize_report_id(report_id) or f"{safe_tool_name}_{uuid4().hex[:8]}"
     output_dir = _thread_output_dir(root, resolved_user, resolved_thread)
     output_path = output_dir / f"{final_report_id}.md"
 
@@ -292,19 +302,23 @@ async def persist_tool_output_report(
 
 
 def _find_record_in_filesystem(root: Path, user_id: str, report_id: str) -> dict[str, Any] | None:
-    for candidate in (root / "users" / user_id).glob(f"threads/*/tool_outputs/{report_id}.md"):
+    safe_report_id = normalize_report_id(report_id)
+    if not safe_report_id:
+        return None
+
+    for candidate in (root / "users" / user_id).glob(f"threads/*/tool_outputs/{safe_report_id}.md"):
         metadata, _ = _parse_frontmatter(candidate.read_text())
         if not metadata:
             metadata = {
-                "id": report_id,
-                "ref_id": report_id,
+                "id": safe_report_id,
+                "ref_id": safe_report_id,
                 "filename": candidate.name,
                 "path": str(candidate),
                 "status": "complete",
                 "created_at": datetime.fromtimestamp(candidate.stat().st_mtime, tz=timezone.utc).isoformat(),
             }
         if "id" not in metadata:
-            metadata["id"] = report_id
+            metadata["id"] = safe_report_id
         if "path" not in metadata:
             metadata["path"] = str(candidate)
         return metadata
@@ -353,8 +367,8 @@ async def list_reports(
         "asearch",
         "search",
         user_reports_namespace(scoped_user),
-        None,
         limit=limit,
+        query=None,
     )
 
     records: list[dict[str, Any]] = []
@@ -398,6 +412,9 @@ async def get_report(
     store: Any | None = None,
     root: Path = DEFAULT_REPORTS_ROOT,
 ) -> dict[str, Any] | None:
+    safe_report_id = normalize_report_id(report_id)
+    if not safe_report_id:
+        return None
     scoped_user = _safe_segment(user_id, DEFAULT_USER_ID)
 
     item = await _store_call(
@@ -405,19 +422,19 @@ async def get_report(
         "aget",
         "get",
         user_reports_namespace(scoped_user),
-        report_id,
+        safe_report_id,
     )
     value = _item_value(item)
     if isinstance(value, dict):
         record = dict(value)
-        record.setdefault("id", report_id)
+        record.setdefault("id", safe_report_id)
         return record
 
     for candidate in await asyncio.to_thread(_load_user_index, root, scoped_user):
-        if str(candidate.get("id")) == report_id:
+        if str(candidate.get("id")) == safe_report_id:
             return candidate
 
-    return await asyncio.to_thread(_find_record_in_filesystem, root, scoped_user, report_id)
+    return await asyncio.to_thread(_find_record_in_filesystem, root, scoped_user, safe_report_id)
 
 
 async def get_report_content(
@@ -469,8 +486,8 @@ async def list_thread_tool_outputs(
         "asearch",
         "search",
         thread_tool_outputs_namespace(scoped_user, scoped_thread),
-        None,
         limit=limit,
+        query=None,
     )
     records: list[dict[str, Any]] = []
     if isinstance(items, list):
@@ -510,8 +527,11 @@ async def delete_report(
     store: Any | None = None,
     root: Path = DEFAULT_REPORTS_ROOT,
 ) -> bool:
+    safe_report_id = normalize_report_id(report_id)
+    if not safe_report_id:
+        return False
     scoped_user = _safe_segment(user_id, DEFAULT_USER_ID)
-    record = await get_report(user_id=scoped_user, report_id=report_id, store=store, root=root)
+    record = await get_report(user_id=scoped_user, report_id=safe_report_id, store=store, root=root)
     if not record:
         return False
 
@@ -520,7 +540,7 @@ async def delete_report(
         "adelete",
         "delete",
         user_reports_namespace(scoped_user),
-        report_id,
+        safe_report_id,
     )
 
     thread_id = record.get("thread_id")
@@ -530,7 +550,7 @@ async def delete_report(
             "adelete",
             "delete",
             thread_tool_outputs_namespace(scoped_user, _safe_segment(thread_id, "default")),
-            report_id,
+            safe_report_id,
         )
 
     path_value = record.get("path")
@@ -538,5 +558,5 @@ async def delete_report(
         file_path = Path(path_value)
         await asyncio.to_thread(_unlink_if_exists, file_path)
 
-    await asyncio.to_thread(_remove_user_index_record, root, scoped_user, report_id)
+    await asyncio.to_thread(_remove_user_index_record, root, scoped_user, safe_report_id)
     return True

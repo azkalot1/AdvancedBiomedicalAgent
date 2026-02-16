@@ -8,7 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from bioagent.persistence import delete_report, get_report, get_report_content, list_reports
+from bioagent.persistence import delete_report, get_report, get_report_content, list_reports, normalize_report_id
 
 
 class ApiErrorBody(BaseModel):
@@ -186,6 +186,20 @@ def _as_report_metadata(item: dict[str, Any]) -> ReportMetadata:
     return ReportMetadata.model_validate(item)
 
 
+def _validated_report_id(report_id: str) -> str:
+    safe_report_id = normalize_report_id(report_id)
+    if not safe_report_id:
+        raise ApiError(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code="invalid_report_id",
+            message=(
+                "Invalid report_id format. Allowed: letters, digits, underscores, dashes, dots; "
+                "must start with a letter or digit."
+            ),
+        )
+    return safe_report_id
+
+
 def _normalize_limit(
     limit: int | None,
     *,
@@ -332,17 +346,18 @@ def create_webapp() -> FastAPI:
 
     @app.get("/v1/reports/{report_id}", response_model=ReportMetadata, tags=["reports"])
     async def get_report_v1(report_id: str, request: Request) -> ReportMetadata:
+        safe_report_id = _validated_report_id(report_id)
         user_id = _auth_user_id(request)
         report = await get_report(
             user_id=user_id,
-            report_id=report_id,
+            report_id=safe_report_id,
             store=_get_store(request),
         )
         if not report:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code="report_not_found",
-                message=f"Report '{report_id}' not found.",
+                message=f"Report '{safe_report_id}' not found.",
             )
         return _as_report_metadata(report)
 
@@ -353,29 +368,30 @@ def create_webapp() -> FastAPI:
         offset: int = Query(default=0, ge=0),
         max_chars: int | None = Query(default=None, ge=1),
     ) -> ReportContentResponse:
+        safe_report_id = _validated_report_id(report_id)
         user_id = _auth_user_id(request)
         report = await get_report(
             user_id=user_id,
-            report_id=report_id,
+            report_id=safe_report_id,
             store=_get_store(request),
         )
         if not report:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code="report_not_found",
-                message=f"Report '{report_id}' not found.",
+                message=f"Report '{safe_report_id}' not found.",
             )
 
         content = await get_report_content(
             user_id=user_id,
-            report_id=report_id,
+            report_id=safe_report_id,
             store=_get_store(request),
         )
         if content is None:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code="report_content_not_found",
-                message=f"Report '{report_id}' content not found.",
+                message=f"Report '{safe_report_id}' content not found.",
             )
 
         content_default_limit = int(request.app.state.report_content_default_chars)
@@ -389,8 +405,8 @@ def create_webapp() -> FastAPI:
         total_chars = len(content)
         snippet = content[offset : offset + normalized_chars] if offset < total_chars else ""
         return ReportContentResponse(
-            id=report_id,
-            filename=str(report.get("filename", f"{report_id}.md")),
+            id=safe_report_id,
+            filename=str(report.get("filename", f"{safe_report_id}.md")),
             content=snippet,
             total_chars=total_chars,
             returned_chars=len(snippet),
@@ -401,19 +417,20 @@ def create_webapp() -> FastAPI:
 
     @app.delete("/v1/reports/{report_id}", response_model=DeleteReportResponse, tags=["reports"])
     async def delete_report_v1(report_id: str, request: Request) -> DeleteReportResponse:
+        safe_report_id = _validated_report_id(report_id)
         user_id = _auth_user_id(request)
         deleted = await delete_report(
             user_id=user_id,
-            report_id=report_id,
+            report_id=safe_report_id,
             store=_get_store(request),
         )
         if not deleted:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code="report_not_found",
-                message=f"Report '{report_id}' not found.",
+                message=f"Report '{safe_report_id}' not found.",
             )
-        return DeleteReportResponse(ok=True, deleted=report_id)
+        return DeleteReportResponse(ok=True, deleted=safe_report_id)
 
     # Backward-compatible routes (deprecated): enforce authenticated user ownership.
     @app.get("/users/{user_id}/reports", tags=["reports", "legacy"])
@@ -438,6 +455,7 @@ def create_webapp() -> FastAPI:
 
     @app.get("/users/{user_id}/reports/{report_id}", tags=["reports", "legacy"])
     async def get_user_report_legacy(user_id: str, report_id: str, request: Request) -> dict[str, Any]:
+        safe_report_id = _validated_report_id(report_id)
         auth_user = _auth_user_id(request)
         if user_id != auth_user:
             raise ApiError(
@@ -447,19 +465,20 @@ def create_webapp() -> FastAPI:
             )
         report = await get_report(
             user_id=auth_user,
-            report_id=report_id,
+            report_id=safe_report_id,
             store=_get_store(request),
         )
         if not report:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code="report_not_found",
-                message=f"Report '{report_id}' not found.",
+                message=f"Report '{safe_report_id}' not found.",
             )
         return report
 
     @app.get("/users/{user_id}/reports/{report_id}/content", response_model=LegacyContentResponse, tags=["reports", "legacy"])
     async def get_user_report_content_legacy(user_id: str, report_id: str, request: Request) -> LegacyContentResponse:
+        safe_report_id = _validated_report_id(report_id)
         auth_user = _auth_user_id(request)
         if user_id != auth_user:
             raise ApiError(
@@ -470,34 +489,35 @@ def create_webapp() -> FastAPI:
 
         report = await get_report(
             user_id=auth_user,
-            report_id=report_id,
+            report_id=safe_report_id,
             store=_get_store(request),
         )
         if not report:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code="report_not_found",
-                message=f"Report '{report_id}' not found.",
+                message=f"Report '{safe_report_id}' not found.",
             )
         content = await get_report_content(
             user_id=auth_user,
-            report_id=report_id,
+            report_id=safe_report_id,
             store=_get_store(request),
         )
         if content is None:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code="report_content_not_found",
-                message=f"Report '{report_id}' content not found.",
+                message=f"Report '{safe_report_id}' content not found.",
             )
         return LegacyContentResponse(
-            id=report_id,
-            filename=str(report.get("filename", f"{report_id}.md")),
+            id=safe_report_id,
+            filename=str(report.get("filename", f"{safe_report_id}.md")),
             content=content,
         )
 
     @app.delete("/users/{user_id}/reports/{report_id}", response_model=DeleteReportResponse, tags=["reports", "legacy"])
     async def delete_user_report_legacy(user_id: str, report_id: str, request: Request) -> DeleteReportResponse:
+        safe_report_id = _validated_report_id(report_id)
         auth_user = _auth_user_id(request)
         if user_id != auth_user:
             raise ApiError(
@@ -507,16 +527,16 @@ def create_webapp() -> FastAPI:
             )
         deleted = await delete_report(
             user_id=auth_user,
-            report_id=report_id,
+            report_id=safe_report_id,
             store=_get_store(request),
         )
         if not deleted:
             raise ApiError(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code="report_not_found",
-                message=f"Report '{report_id}' not found.",
+                message=f"Report '{safe_report_id}' not found.",
             )
-        return DeleteReportResponse(ok=True, deleted=report_id)
+        return DeleteReportResponse(ok=True, deleted=safe_report_id)
 
     return app
 
