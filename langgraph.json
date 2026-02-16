@@ -1,0 +1,10 @@
+{
+  "graphs": {
+    "co_scientist": "./src/bioagent/server/graph.py:graph"
+  },
+  "dependencies": ["./requirements.txt"],
+  "env": ".env",
+  "http": {
+    "app": "./src/bioagent/server/webapp.py:app"
+  }
+}

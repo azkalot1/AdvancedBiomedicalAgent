@@ -22,6 +22,7 @@ def show_help() -> None:
     print("  vacuum                   - Vacuum database")
     print("  tables                   - List all tables")
     print("  verify-deps              - Verify Python dependencies are installed")
+    print("  chat                     - Start CLI chat client (LangGraph Server)")
     print()
     print("Data Ingestion Commands:")
     print("  ingest                   - Run full data ingestion pipeline")
@@ -107,6 +108,7 @@ def show_help() -> None:
     print("  biomedagent-db ingest --generate-search   # full-text indexes on raw CT.gov tables")
     print("  biomedagent-db ingest --ctgov-enriched-search-only   # standalone enriched search table")
     print("  biomedagent-db extract-schema --output schema.txt --sample-rows 5")
+    print("  biomedagent-db chat --server-url http://localhost:2024 --user-id alice")
 
 
 def route_setup_postgres() -> NoReturn:
@@ -213,6 +215,27 @@ def route_db_command(command: str, args: list[str]) -> NoReturn:
     sys.exit(0)
 
 
+def route_chat_command() -> NoReturn:
+    """Route to server-backed chat client."""
+    try:
+        from bioagent.cli.chat_server import main as chat_main
+
+        original_argv = sys.argv.copy()
+        sys.argv = ["chat_server.py"] + sys.argv[2:]
+        chat_main()
+    except ImportError as e:
+        print(f"❌ Error importing chat client: {e}")
+        print("Make sure all dependencies are installed with: pip install -e .")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error running chat client: {e}")
+        sys.exit(1)
+    finally:
+        if "original_argv" in locals():
+            sys.argv = original_argv
+    sys.exit(0)
+
+
 def main() -> NoReturn:
     """Main CLI entry point."""
     if len(sys.argv) < 2:
@@ -231,6 +254,8 @@ def main() -> NoReturn:
         route_extract_schema()
     elif command in ["info", "reset", "vacuum", "tables", "verify-deps"]:
         route_db_command(command, args)
+    elif command in ["chat", "chat-server"]:
+        route_chat_command()
     elif command in ["help", "--help", "-h"]:
         show_help()
         sys.exit(0)

@@ -19,9 +19,6 @@ import asyncio
 import re
 from collections import defaultdict
 from typing import Any
-import os
-import sys
-from contextlib import redirect_stderr
 import json
 import requests
 from rich.console import Console
@@ -69,7 +66,18 @@ async def dailymed_find(drug_name: str, limit: int = 10) -> list[dict]:
 
 
 SIMILARITY_THRESHOLD = 0.87
-SENTENCE_MODEL = SentenceTransformer('all-MiniLM-L6-v2')
+_SENTENCE_MODEL: SentenceTransformer | None = None
+
+
+def _get_sentence_model() -> SentenceTransformer:
+    global _SENTENCE_MODEL
+    if _SENTENCE_MODEL is None:
+        _SENTENCE_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+    return _SENTENCE_MODEL
+
+
+async def _encode_async(model: SentenceTransformer, value: str | list[str]) -> Any:
+    return await asyncio.to_thread(model.encode, value, show_progress_bar=False)
 
 
 def _strip_chemical_suffixes(drug_name: str) -> str:
@@ -297,6 +305,10 @@ def _deduplicate_by_embedding_sync(results: list[SearchResultItem], model: Sente
     return unique_results
 
 
+async def _deduplicate_by_embedding(results: list[SearchResultItem], model: SentenceTransformer) -> list[SearchResultItem]:
+    return await asyncio.to_thread(_deduplicate_by_embedding_sync, results, model)
+
+
 # --- 3. Core Data Fetching Logic ---
 
 
@@ -322,7 +334,7 @@ async def _search_structured_sections_async(
         if search_input.section_queries:
             all_relevant_section_ids = set()
             for s_query in search_input.section_queries:
-                query_embedding = model.encode(s_query, show_progress_bar=False)
+                query_embedding = await _encode_async(model, s_query)
                 rows = await async_config.execute_query(
                     "SELECT id FROM section_names ORDER BY name_embedding <=> $1 LIMIT $2;",
                     query_embedding.tolist(),
@@ -366,7 +378,7 @@ async def _search_dailymed_structured_async(
         if search_input.section_queries:
             all_relevant_section_ids = set()
             for s_query in search_input.section_queries:
-                query_embedding = model.encode(s_query, show_progress_bar=False)  # TO DO: make async
+                query_embedding = await _encode_async(model, s_query)
                 rows = await async_config.execute_query(
                     "SELECT id FROM dailymed_section_names ORDER BY embedding <=> $1 LIMIT $2;",
                     query_embedding.tolist(),
@@ -460,7 +472,7 @@ async def _group_and_enrich_discovery_results(
 
     enriched_results = []
     for product_name, sections in grouped_by_drug.items():
-        deduplicated_sections = _deduplicate_by_embedding_sync(sections, model)
+        deduplicated_sections = await _deduplicate_by_embedding(sections, model)
         if not deduplicated_sections:
             continue
         properties = await _find_drug_properties_async(async_config, product_name)
@@ -495,7 +507,7 @@ async def _handle_label_search(
             if not all_sections_for_this_drug:
                 continue
 
-            deduplicated_sections = _deduplicate_by_embedding_sync(all_sections_for_this_drug, model)
+            deduplicated_sections = await _deduplicate_by_embedding(all_sections_for_this_drug, model)
             properties = await _find_drug_properties_async(async_config, drug_name)
 
             aggregated_result = DailyMedAndOpenFDASearchResult(
@@ -534,6 +546,7 @@ async def dailymed_and_openfda_search_async(db_config: DatabaseConfig, search_in
     """
     try:
         async_config = await get_async_connection(db_config)
+        model = await asyncio.to_thread(_get_sentence_model)
 
         if (
             search_input.drug_names
@@ -543,11 +556,10 @@ async def dailymed_and_openfda_search_async(db_config: DatabaseConfig, search_in
         ):
             results = await _handle_property_lookup(async_config, search_input.drug_names)
         else:
-            results = await _handle_label_search(async_config, search_input, SENTENCE_MODEL)
+            results = await _handle_label_search(async_config, search_input, model)
 
         status = "not_found" if not results else "success"
         error = "No documents matched all criteria." if not results else None
         return DailyMedAndOpenFDASearchOutput(status=status, results=results or None, error=error)
     except Exception as e:
-        print(f"Caught unexpected exception: {e}")
         return DailyMedAndOpenFDASearchOutput(status="error", error=f"An unexpected server error occurred: {type(e).__name__}")

@@ -9,7 +9,6 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
-from tqdm import tqdm
 
 # Load environment variables from .env file at module import
 load_dotenv()
@@ -155,6 +154,8 @@ def reset_database(config: DatabaseConfig, confirm: bool = False) -> bool:
                     print(f"🗑️  Dropping {len(tables)} tables from public schema...")
 
                     # Drop tables with progress bar
+                    from tqdm import tqdm
+
                     with tqdm(tables, desc="Dropping tables", unit="table") as pbar:
                         for table in pbar:
                             pbar.set_postfix_str(f"Dropping {table}")
