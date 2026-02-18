@@ -29,9 +29,6 @@ ingest-quick: ## Run lightweight prototype ingest profile
 langgraph-dev: ## Start LangGraph dev server
 	langgraph dev
 
-langgraph-up: ## Start LangGraph server in persistent mode
-	langgraph up
-
 chat: ## Start CLI chat (assumes LangGraph server is already running)
 	biomedagent-db chat --server-url $${LANGGRAPH_API_URL:-http://localhost:2024} --assistant-id $${BIOAGENT_ASSISTANT_ID:-co_scientist}
 
@@ -40,10 +37,6 @@ chat-stack: ## Start LangGraph dev + CLI chat in one command
 
 gui-stack: ## Start LangGraph dev + Next.js GUI in one command
 	./scripts/run_langgraph_and_web.sh
-
-gui-stack-up: ## Start LangGraph up (persistent) + Next.js GUI in one command
-	./scripts/run_langgraph_up_and_web.sh
-
 web-install: ## Install web dependencies
 	cd $(WEB_DIR) && $(NPM) install
 
