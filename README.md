@@ -126,11 +126,11 @@ Two-DB layout:
 - `coscientist_data` (`5432`): scientific source tables used by tools/ingestion
 - `coscientist_app` (`5432`): `app_users` + LangGraph checkpoint/store data
 
-Start both DBs (optional helper, only if you want isolated containers):
+Use your existing local PostgreSQL service (same instance/port, separate databases).
+Ensure Postgres is running before setup:
 
-```bash
-docker compose -f docker-compose.dev.yml up -d
-```
+- Ubuntu/Debian: `sudo systemctl start postgresql`
+- macOS (Homebrew): `brew services start postgresql`
 
 Initialize and seed users:
 
@@ -151,8 +151,7 @@ make users-remove EMAIL=dr.new@lab.org
 ```
 
 Generated credentials are written to `credentials.txt` (gitignored). Share securely and delete after use.
-You do **not** need Docker if you already run Postgres locally.
-In that case, create two DBs in your existing server on the same port (for example `5432`) and point env vars there.
+This project uses two databases on the same Postgres instance/port (for example `5432`), configured via env vars:
 Example:
 ```bash
 APP_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/coscientist_app

@@ -178,6 +178,7 @@ def make_summarizing_tool(
     original_tool: BaseTool,
     summarizer_llm: Runnable,
     max_output_length: int = 4000,
+    tool_timeout_seconds: float | None = None,
 ) -> BaseTool:
     """
     Factory that wraps any tool with summarization capability while preserving
@@ -190,9 +191,20 @@ def make_summarizing_tool(
     @functools.wraps(original_func)
     async def wrapped_func(**kwargs) -> str:
         if original_is_async:
-            raw_output = await original_tool.ainvoke(kwargs)
+            invoke_coro = original_tool.ainvoke(kwargs)
         else:
-            raw_output = original_tool.invoke(kwargs)
+            invoke_coro = asyncio.to_thread(original_tool.invoke, kwargs)
+
+        if tool_timeout_seconds and tool_timeout_seconds > 0:
+            try:
+                raw_output = await asyncio.wait_for(invoke_coro, timeout=tool_timeout_seconds)
+            except asyncio.TimeoutError as exc:
+                timeout_txt = int(tool_timeout_seconds) if float(tool_timeout_seconds).is_integer() else tool_timeout_seconds
+                raise TimeoutError(
+                    f"Tool '{original_tool.name}' timed out after {timeout_txt} seconds."
+                ) from exc
+        else:
+            raw_output = await invoke_coro
 
         if not isinstance(raw_output, str) or len(raw_output) <= max_output_length:
             return raw_output
@@ -305,10 +317,16 @@ def make_summarizing_tool(
             f'*Full output stored. To retrieve:* `retrieve_full_output("{ref_id}")`\n'
         )
 
+    timeout_note = ""
+    if tool_timeout_seconds and tool_timeout_seconds > 0:
+        timeout_txt = int(tool_timeout_seconds) if float(tool_timeout_seconds).is_integer() else tool_timeout_seconds
+        timeout_note = f" Tool execution timeout: {timeout_txt} seconds."
+
     enhanced_description = original_tool.description + (
         "\n\n**Note:** Long outputs (>4000 chars) are automatically summarized. "
         "Use `retrieve_full_output(ref_id)` to access the complete data. "
         "Use `list_research_outputs()` to browse stored outputs."
+        f"{timeout_note}"
     )
 
     return StructuredTool.from_function(

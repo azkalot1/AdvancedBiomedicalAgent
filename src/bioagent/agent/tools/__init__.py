@@ -76,6 +76,19 @@ def _runtime_stream_settings() -> tuple[bool, str | None]:
     return stream_tool_args, tool_call_id
 
 
+def _resolve_tool_timeout_seconds() -> float | None:
+    raw = os.getenv("BIOAGENT_TOOL_TIMEOUT_SECONDS", "60").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return 60.0
+    if value <= 0:
+        return None
+    return value
+
+
 def _emit_tool_status(
     *,
     status: str,
@@ -170,9 +183,16 @@ def get_summarized_tools(
 ) -> list[BaseTool]:
     """Wrap all tools with summarization and add retrieval tools."""
 
+    tool_timeout_seconds = _resolve_tool_timeout_seconds()
     all_tools = DBSEARCH_TOOLS + TARGET_SEARCH_TOOLS + WEB_SEARCH_TOOLS
     wrapped_tools = [
-        with_tool_status_streaming(make_summarizing_tool(tool, summarizer_llm))
+        with_tool_status_streaming(
+            make_summarizing_tool(
+                tool,
+                summarizer_llm,
+                tool_timeout_seconds=tool_timeout_seconds,
+            )
+        )
         for tool in all_tools
     ]
     
