@@ -39,7 +39,7 @@ export function WorkbenchShell({ initialData }: { initialData: InitialWorkbenchD
     void (async () => {
       let knownThreads = [] as ReturnType<typeof sortThreadsByCreatedAt>;
       try {
-        knownThreads = sortThreadsByCreatedAt(await listThreads(100));
+        knownThreads = sortThreadsByCreatedAt(await listThreads(100, initialData.userId));
         if (cancelled) {
           return;
         }

@@ -30,15 +30,17 @@ Open `http://localhost:3000/login` and sign in with a seeded user.
 From repo root you can also run the full GUI stack (backend + web):
 
 ```bash
-make gui-stack
+make gui-stack-up
 ```
+
+Use `make gui-stack` only for ephemeral dev runtime.
 
 Recommended flow from repo root:
 
 ```bash
 make users-setup
 make users-list
-make gui-stack
+make gui-stack-up
 ```
 
 The UI proxies all backend calls through `app/api/backend/[...path]/route.ts` and injects `x-bioagent-user-id` from the authenticated NextAuth session.

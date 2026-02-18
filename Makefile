@@ -6,7 +6,7 @@ PIP ?= pip
 NPM ?= npm
 WEB_DIR := web
 
-.PHONY: help install verify-deps setup-postgres ingest ingest-quick langgraph-dev chat chat-stack gui-stack web-install web-dev web-check users-db users-init users-setup users-list users-add users-reset-pw users-deactivate users-activate users-remove
+.PHONY: help install verify-deps setup-postgres ingest ingest-quick langgraph-dev langgraph-up chat chat-stack gui-stack gui-stack-up web-install web-dev web-check users-db users-init users-setup users-list users-add users-reset-pw users-deactivate users-activate users-remove
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -29,6 +29,9 @@ ingest-quick: ## Run lightweight prototype ingest profile
 langgraph-dev: ## Start LangGraph dev server
 	langgraph dev
 
+langgraph-up: ## Start LangGraph server in persistent mode
+	langgraph up
+
 chat: ## Start CLI chat (assumes LangGraph server is already running)
 	biomedagent-db chat --server-url $${LANGGRAPH_API_URL:-http://localhost:2024} --assistant-id $${BIOAGENT_ASSISTANT_ID:-co_scientist}
 
@@ -37,6 +40,9 @@ chat-stack: ## Start LangGraph dev + CLI chat in one command
 
 gui-stack: ## Start LangGraph dev + Next.js GUI in one command
 	./scripts/run_langgraph_and_web.sh
+
+gui-stack-up: ## Start LangGraph up (persistent) + Next.js GUI in one command
+	./scripts/run_langgraph_up_and_web.sh
 
 web-install: ## Install web dependencies
 	cd $(WEB_DIR) && $(NPM) install
