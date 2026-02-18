@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -142,13 +144,43 @@ class RuntimeModelSelectionMiddleware(AgentMiddleware):
 
 
 def _build_checkpointer() -> Any | None:
-    checkpoint_db = Path(os.getenv("BIOAGENT_CHECKPOINT_DB", ".bioagent/checkpoints.db"))
-    checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
+    postgres_uri = (
+        os.getenv("BIOAGENT_CHECKPOINT_POSTGRES_URI")
+        or os.getenv("POSTGRES_URI")
+        or os.getenv("APP_DATABASE_URL")
+        or os.getenv("DATABASE_URL")
+        or ""
+    ).strip()
+
+    if postgres_uri:
+        try:
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+            checkpointer = AsyncPostgresSaver.from_conn_string(postgres_uri)
+            if inspect.isawaitable(checkpointer):
+                checkpointer = asyncio.run(checkpointer)
+
+            setup_method = getattr(checkpointer, "setup", None)
+            if callable(setup_method):
+                setup_result = setup_method()
+                if inspect.isawaitable(setup_result):
+                    asyncio.run(setup_result)
+            print("[bioagent] Checkpointer: Postgres")
+            return checkpointer
+        except Exception as exc:
+            print(f"[bioagent] Warning: could not initialize Postgres checkpointer, falling back to SQLite: {exc}")
+
+    checkpoint_path = (os.getenv("BIOAGENT_CHECKPOINT_DB", ".bioagent/checkpoints.db") or ".bioagent/checkpoints.db").strip()
+    checkpoint_db = Path(checkpoint_path)
+    if checkpoint_db != Path(":memory:"):
+        checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
     try:
         from langgraph.checkpoint.sqlite import SqliteSaver
 
+        print(f"[bioagent] Checkpointer: SQLite ({checkpoint_db})")
         return SqliteSaver.from_conn_string(str(checkpoint_db))
     except Exception:
+        print("[bioagent] Checkpointer: disabled (no Postgres/SQLite backend available)")
         return None
 
 

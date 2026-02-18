@@ -45,10 +45,7 @@ export function FileExplorerPanel(): React.ReactElement {
     }
     return threads.filter((item) => {
       const metadataUser = item.metadata?.user_id;
-      if (typeof metadataUser !== "string" || !metadataUser) {
-        return true;
-      }
-      return metadataUser === userId;
+      return typeof metadataUser === "string" && metadataUser === userId;
     });
   }, [threads, userId]);
 
@@ -71,7 +68,7 @@ export function FileExplorerPanel(): React.ReactElement {
     setThreadsRefreshing(true);
     setError(null);
     try {
-      setThreads(sortThreadsByCreatedAt(await listThreads(100)));
+      setThreads(sortThreadsByCreatedAt(await listThreads(100, userId)));
     } catch (refreshError) {
       const message = refreshError instanceof Error ? refreshError.message : "Failed to refresh threads.";
       setError(message);

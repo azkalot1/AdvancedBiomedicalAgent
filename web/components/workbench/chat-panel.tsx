@@ -265,10 +265,7 @@ export function ChatPanel(): React.ReactElement {
     }
     return threads.filter((item) => {
       const metadataUser = item.metadata?.user_id;
-      if (typeof metadataUser !== "string" || !metadataUser) {
-        return true;
-      }
-      return metadataUser === userId;
+      return typeof metadataUser === "string" && metadataUser === userId;
     });
   }, [threads, userId]);
 
@@ -322,7 +319,7 @@ export function ChatPanel(): React.ReactElement {
     setThreadMenuOpen(true);
     setThreadsLoading(true);
     try {
-      const items = sortThreadsByCreatedAt(await listThreads(100));
+      const items = sortThreadsByCreatedAt(await listThreads(100, userId));
       setThreads(items);
     } catch {
       setThreads([]);

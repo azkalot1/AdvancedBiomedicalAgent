@@ -20,6 +20,7 @@ dependencies = [
   "langchain_community",
   "langgraph",
   "langgraph-checkpoint-sqlite",
+  "langgraph-checkpoint-postgres",
   # Database
   "psycopg2-binary",  # PostgreSQL adapter
   "asyncpg",          # Async PostgreSQL adapter

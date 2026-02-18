@@ -69,9 +69,9 @@ make users-setup
 make users-list
 ```
 
-5. Start GUI stack (backend + web):
+5. Start GUI stack (backend + web, persistent runtime):
 ```bash
-make gui-stack
+make gui-stack-up
 ```
 
 6. Open:
@@ -110,6 +110,7 @@ make ingest-quick
 make langgraph-dev
 make chat
 make chat-stack
+make gui-stack
 make web-install
 make web-dev
 make web-check
@@ -218,13 +219,13 @@ Full web details: [web/README.md](web/README.md)
 make gui-stack
 ```
 
-This starts `langgraph dev`, waits for backend health, then runs the Next.js app.
+This starts `langgraph dev` waits for backend health, then runs the Next.js app.
 
 ### Manual (Two Terminals)
 
 Terminal 1:
 ```bash
-langgraph dev
+make langgraph-up
 ```
 
 Terminal 2:
@@ -243,10 +244,14 @@ Required env for GUI auth/backend wiring (in `.env`):
 APP_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/coscientist_app
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/coscientist_app
 POSTGRES_URI=postgresql://postgres:postgres@localhost:5432/coscientist_app
+BIOAGENT_RESEARCH_OUTPUT_DIR=./research_outputs
 NEXTAUTH_URL=http://localhost:3000
 NEXTAUTH_SECRET=replace_with_long_random_secret
 BIOAGENT_BACKEND_URL=http://localhost:2024
 ```
+
+Report files are stored under `BIOAGENT_RESEARCH_OUTPUT_DIR` (default `./research_outputs`), scoped by user/thread.
+`langgraph dev` still uses in-memory runtime for thread/run registry; use `langgraph up` for persistent `/threads` behavior across logins/restarts.
 
 Seed login users first:
 

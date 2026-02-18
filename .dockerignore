@@ -1,0 +1,13 @@
+.git
+.env
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+node_modules
+web/.next
+web/node_modules
+notebooks/
+.bioagent/
+research_outputs/
+*.dump
