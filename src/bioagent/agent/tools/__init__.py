@@ -105,7 +105,7 @@ def _emit_tool_status(
         payload["tool_call_id"] = tool_call_id
     if duration_ms is not None:
         payload["duration_ms"] = int(duration_ms)
-    if args and stream_tool_args and status in {"queued", "running"}:
+    if args and stream_tool_args and status in {"queued", "running", "success", "error"}:
         payload["args_preview"] = _preview_value(args)
     if error is not None:
         payload["error_type"] = type(error).__name__

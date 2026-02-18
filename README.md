@@ -15,13 +15,11 @@ Biomedical research agent that integrates OpenFDA, DailyMed, ClinicalTrials.gov,
 ### 2. After that
 
 ```bash
-pip install -e ./
+cp .env.example .env
+pip install -e .
 biomedagent-db verify-deps
 biomedagent-db setup_postgres
 biomedagent-db ingest
-biomedagent-db ingest --ctgov-rag-corpus-only
-biomedagent-db ingest --ctgov-rag-keys-only
-biomedagent-db ingest --generate-search
 ```
 
 **Data available.** The database unifies clinical trials (ClinicalTrials.gov), molecular structures and biotherapeutics (ChEMBL, DrugCentral, BindingDB), biological targets, drug labels (OpenFDA, DailyMed), and regulatory data (Orange Book), with mappings from trials and products to molecules. Full schema: [docs/DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md).
@@ -30,6 +28,138 @@ biomedagent-db ingest --generate-search
 
 For pipeline order and script roles, see [docs/INGESTION.md](docs/INGESTION.md).
 
+## Local Reproduction (Start to Working GUI)
+
+This is the fastest reproducible path on a single local Postgres instance/port (`5432`).
+
+1. Prepare env and install dependencies:
+```bash
+cp .env.example .env
+pip install -e .
+```
+
+2. Set correct DB credentials in `.env` for your local Postgres user:
+```bash
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=coscientist_data
+DB_USER=<your_db_user>
+DB_PASSWORD=<your_db_password>
+
+DATA_DATABASE_URL=postgresql://<your_db_user>:<your_db_password>@localhost:5432/coscientist_data
+APP_DATABASE_URL=postgresql://<your_db_user>:<your_db_password>@localhost:5432/coscientist_app
+DATABASE_URL=postgresql://<your_db_user>:<your_db_password>@localhost:5432/coscientist_app
+POSTGRES_URI=postgresql://<your_db_user>:<your_db_password>@localhost:5432/coscientist_app
+
+NEXTAUTH_URL=http://localhost:3000
+NEXTAUTH_SECRET=replace_with_long_random_secret
+BIOAGENT_BACKEND_URL=http://localhost:2024
+```
+
+3. Setup data database and optional quick ingest:
+```bash
+make verify-deps
+make setup-postgres
+make ingest-quick
+```
+
+4. Setup app users/auth DB:
+```bash
+make users-setup
+make users-list
+```
+
+5. Start GUI stack (backend + web):
+```bash
+make gui-stack
+```
+
+6. Open:
+- `http://localhost:3000/login`
+- sign in with seeded credentials from `credentials.txt`
+
+7. (Optional) Start CLI chat instead:
+```bash
+make chat-stack
+```
+
+## Quick Prototype Ingestion
+
+For a lightweight prototype dataset (fastest path), run:
+
+```bash
+biomedagent-db ingest --quick-prototype
+```
+
+This profile ingests OpenFDA + Orange Book only, skips heavy sources (CT.gov, DailyMed, BindingDB, ChEMBL, DrugCentral, dm_target, dm_molecule), and applies defaults:
+- `--openfda-files 2`
+- `--n-max 2000`
+
+You can still override these limits explicitly.
+
+## Makefile Shortcuts
+
+Common commands:
+
+```bash
+make install
+make verify-deps
+make setup-postgres
+make ingest
+make ingest-quick
+make langgraph-dev
+make chat
+make chat-stack
+make web-install
+make web-dev
+make web-check
+make users-setup
+make users-list
+```
+
+Run `make help` to list all targets.
+
+## Auth + User Management (Local)
+
+Two-DB layout:
+
+- `coscientist_data` (`5432`): scientific source tables used by tools/ingestion
+- `coscientist_app` (`5432`): `app_users` + LangGraph checkpoint/store data
+
+Start both DBs (optional helper, only if you want isolated containers):
+
+```bash
+docker compose -f docker-compose.dev.yml up -d
+```
+
+Initialize and seed users:
+
+```bash
+make users-setup
+make users-list
+```
+
+Additional user commands:
+
+```bash
+make users-db
+make users-add EMAIL=dr.new@lab.org NAME="Dr. New" ROLE=user
+make users-reset-pw EMAIL=dr.new@lab.org
+make users-deactivate EMAIL=dr.new@lab.org
+make users-activate EMAIL=dr.new@lab.org
+make users-remove EMAIL=dr.new@lab.org
+```
+
+Generated credentials are written to `credentials.txt` (gitignored). Share securely and delete after use.
+You do **not** need Docker if you already run Postgres locally.
+In that case, create two DBs in your existing server on the same port (for example `5432`) and point env vars there.
+Example:
+```bash
+APP_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/coscientist_app
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/coscientist_app
+POSTGRES_URI=postgresql://postgres:postgres@localhost:5432/coscientist_app
+```
+
 ## Chat Server + CLI
 
 Full guide: [docs/CHAT_INTERFACE.md](docs/CHAT_INTERFACE.md)
@@ -37,7 +167,7 @@ Full guide: [docs/CHAT_INTERFACE.md](docs/CHAT_INTERFACE.md)
 You can run the LangGraph server and CLI chat together with one script:
 
 ```bash
-./scripts/start_chat_stack.sh
+./scripts/run_langgraph_and_chat.sh
 ```
 
 This script:
@@ -55,16 +185,16 @@ export BIOAGENT_API_TOKEN=dev-token
 export BIOAGENT_API_USER_ID=1
 export BIOAGENT_AUTH_REQUIRED=true
 
-./scripts/start_chat_stack.sh --api-token "$BIOAGENT_API_TOKEN"
+./scripts/run_langgraph_and_chat.sh --api-token "$BIOAGENT_API_TOKEN"
 ```
 
 ### Useful options
 
 ```bash
-./scripts/start_chat_stack.sh --help
-./scripts/start_chat_stack.sh --assistant-id co_scientist
-./scripts/start_chat_stack.sh --server-url http://localhost:2024
-./scripts/start_chat_stack.sh --api-token dev-token -- --stream-tool-args
+./scripts/run_langgraph_and_chat.sh --help
+./scripts/run_langgraph_and_chat.sh --assistant-id co_scientist
+./scripts/run_langgraph_and_chat.sh --server-url http://localhost:2024
+./scripts/run_langgraph_and_chat.sh --api-token dev-token -- --stream-tool-args
 ```
 
 ### Manual (two terminals)
@@ -78,3 +208,67 @@ Terminal 2:
 ```bash
 biomedagent-db chat --server-url http://localhost:2024 --assistant-id co_scientist --api-token dev-token
 ```
+
+## GUI Workbench (Local)
+
+Full web details: [web/README.md](web/README.md)
+
+### One Command
+
+```bash
+make gui-stack
+```
+
+This starts `langgraph dev`, waits for backend health, then runs the Next.js app.
+
+### Manual (Two Terminals)
+
+Terminal 1:
+```bash
+langgraph dev
+```
+
+Terminal 2:
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Then open:
+- `http://localhost:3000/login`
+
+Required env for GUI auth/backend wiring (in `.env`):
+
+```bash
+APP_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/coscientist_app
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/coscientist_app
+POSTGRES_URI=postgresql://postgres:postgres@localhost:5432/coscientist_app
+NEXTAUTH_URL=http://localhost:3000
+NEXTAUTH_SECRET=replace_with_long_random_secret
+BIOAGENT_BACKEND_URL=http://localhost:2024
+```
+
+Seed login users first:
+
+```bash
+make users-setup
+make users-list
+```
+
+## Troubleshooting
+
+- `Missing DATABASE_URL (or APP_DATABASE_URL) for NextAuth`:
+Set `DATABASE_URL` in shell or `web/.env.local` when running `cd web && npm run dev`.
+
+- `SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string`:
+`DATABASE_URL` is malformed or missing password. Use `postgresql://user:password@host:port/dbname`.
+
+- `password authentication failed for user ...`:
+`APP_DATABASE_URL`/`DATABASE_URL` credentials do not match your Postgres server.
+
+- `permission denied to create database` during `make users-setup`:
+The current DB role lacks `CREATEDB`; either set `APP_DATABASE_ADMIN_URL` or use sudo/admin once.
+
+- `permission denied for schema public` during `make users-setup`:
+Grant schema privileges once using admin user; `manage_users.py` can auto-fix via `APP_DATABASE_ADMIN_URL` or sudo fallback.

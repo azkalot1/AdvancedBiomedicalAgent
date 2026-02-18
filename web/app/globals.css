@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background:
+    radial-gradient(circle at 10% 10%, rgba(59, 130, 246, 0.14), transparent 30%),
+    radial-gradient(circle at 90% 20%, rgba(45, 212, 191, 0.12), transparent 28%),
+    radial-gradient(circle at 50% 100%, rgba(37, 99, 235, 0.18), transparent 42%),
+    linear-gradient(140deg, #0a1020 0%, #10192d 45%, #0e1729 100%);
+  color: #e2e8f0;
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.3);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.7);
+  border-radius: 999px;
+}
+
+.prose markdown {
+  color: inherit;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  color: #f8fafc;
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  padding: 0.45rem 0.55rem;
+}
+
+.markdown-body th {
+  background: rgba(30, 41, 59, 0.65);
+}
+
+.markdown-body code {
+  background: rgba(15, 23, 42, 0.7);
+  padding: 0.1rem 0.3rem;
+  border-radius: 0.3rem;
+}
+
+.markdown-body pre {
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  border-radius: 0.75rem;
+  overflow-x: auto;
+  padding: 0.9rem;
+}

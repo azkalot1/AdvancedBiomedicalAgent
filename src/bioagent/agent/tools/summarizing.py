@@ -50,6 +50,20 @@ One-line:
 """
 )
 
+REPORT_DISPLAY_NAME_PROMPT = PromptTemplate.from_template(
+    """
+Create a concise report title for a biomedical tool output.
+- Max 8 words
+- Plain text only
+
+Tool: {tool_name}
+Query: {query}
+Preview: {preview}
+
+Title:
+"""
+)
+
 
 def _escape_frontmatter(value: str) -> str:
     sanitized = value.replace("\n", " ").replace("\r", " ")
@@ -143,6 +157,23 @@ async def _generate_summary(
     )
 
 
+async def _generate_report_display_name(
+    summarizer_llm: Runnable,
+    tool_name: str,
+    params: dict[str, Any],
+    content_preview: str,
+) -> str:
+    name_chain = REPORT_DISPLAY_NAME_PROMPT | summarizer_llm | StrOutputParser()
+    generated = await name_chain.ainvoke(
+        {
+            "tool_name": tool_name,
+            "query": json.dumps(params, default=str)[:220],
+            "preview": content_preview[:600],
+        }
+    )
+    return str(generated).replace("\n", " ").strip()[:80]
+
+
 def make_summarizing_tool(
     original_tool: BaseTool,
     summarizer_llm: Runnable,
@@ -180,7 +211,20 @@ def make_summarizing_tool(
         except Exception:
             one_line = f"{original_tool.name} output ({len(raw_output):,} chars)"
 
+        report_display_name = one_line.strip()[:80]
+        try:
+            report_display_name = await _generate_report_display_name(
+                summarizer_llm=summarizer_llm,
+                tool_name=original_tool.name,
+                params=kwargs,
+                content_preview=raw_output,
+            )
+        except Exception:
+            if not report_display_name:
+                report_display_name = original_tool.name.replace("_", " ").strip().title()[:80]
+
         escaped_one_line = _escape_frontmatter(one_line)
+        escaped_display_name = _escape_frontmatter(report_display_name)
         stored_content = (
             "---\n"
             f"tool: {original_tool.name}\n"
@@ -189,6 +233,7 @@ def make_summarizing_tool(
             f"query_params: {json.dumps(kwargs, default=str)}\n"
             f"size_chars: {len(raw_output)}\n"
             f"one_line: \"{escaped_one_line}\"\n"
+            f"display_name: \"{escaped_display_name}\"\n"
             "---\n\n"
             f"{raw_output}\n"
         )
@@ -202,6 +247,7 @@ def make_summarizing_tool(
                 tool_name=original_tool.name,
                 report_id=ref_id,
                 one_line=one_line,
+                display_name=report_display_name,
                 store=store,
                 user_id=user_id,
                 thread_id=thread_id,
@@ -214,6 +260,7 @@ def make_summarizing_tool(
                     tool_name=original_tool.name,
                     report_id=ref_id,
                     one_line=one_line,
+                    display_name=report_display_name,
                     store=None,
                     user_id=user_id,
                     thread_id=thread_id,

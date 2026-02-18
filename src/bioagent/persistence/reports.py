@@ -197,6 +197,16 @@ def _upsert_user_index_record(root: Path, user_id: str, record: dict[str, Any]) 
     _write_user_index(root, user_id, list(keyed.values()))
 
 
+def _ensure_report_display_name(record: dict[str, Any]) -> dict[str, Any]:
+    if str(record.get("display_name") or "").strip():
+        return record
+    one_line = str(record.get("one_line") or "").strip()
+    filename = str(record.get("filename") or "").strip()
+    report_id = str(record.get("id") or record.get("ref_id") or "").strip()
+    record["display_name"] = one_line or filename or report_id or "report.md"
+    return record
+
+
 def _remove_user_index_record(root: Path, user_id: str, report_id: str) -> None:
     existing = _load_user_index(root, user_id)
     filtered = [item for item in existing if str(item.get("id")) != report_id]
@@ -211,10 +221,14 @@ def _build_report_metadata(
     thread_id: str,
     size_chars: int,
     one_line: str,
+    display_name: str,
     file_path: Path,
     created_at: str | None = None,
 ) -> dict[str, Any]:
     now = created_at or datetime.now(timezone.utc).isoformat()
+    cleaned_one_line = one_line.strip()
+    cleaned_display_name = display_name.strip()
+    resolved_display_name = cleaned_display_name or cleaned_one_line or file_path.name
     return {
         "id": report_id,
         "ref_id": report_id,
@@ -222,10 +236,11 @@ def _build_report_metadata(
         "user_id": user_id,
         "thread_id": thread_id,
         "filename": file_path.name,
+        "display_name": resolved_display_name,
         "path": str(file_path),
         "status": "complete",
         "size_chars": int(size_chars),
-        "one_line": one_line.strip(),
+        "one_line": cleaned_one_line,
         "created_at": now,
     }
 
@@ -256,6 +271,7 @@ async def persist_tool_output_report(
     tool_name: str,
     report_id: str | None = None,
     one_line: str = "",
+    display_name: str = "",
     store: Any | None = None,
     runtime: Any | None = None,
     user_id: str | None = None,
@@ -275,6 +291,7 @@ async def persist_tool_output_report(
         thread_id=resolved_thread,
         size_chars=len(content),
         one_line=one_line,
+        display_name=display_name,
         file_path=output_path,
     )
     await asyncio.to_thread(_write_report_markdown, output_path, metadata, content)
@@ -321,6 +338,9 @@ def _find_record_in_filesystem(root: Path, user_id: str, report_id: str) -> dict
             metadata["id"] = safe_report_id
         if "path" not in metadata:
             metadata["path"] = str(candidate)
+        if "display_name" not in metadata:
+            one_line = str(metadata.get("one_line") or "").strip()
+            metadata["display_name"] = one_line or str(metadata.get("filename") or candidate.name)
         return metadata
     return None
 
@@ -347,6 +367,7 @@ def _list_thread_records_from_filesystem(
         metadata.setdefault("created_at", datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc).isoformat())
         metadata.setdefault("status", "complete")
         metadata.setdefault("size_chars", file_path.stat().st_size)
+        metadata.setdefault("display_name", str(metadata.get("one_line") or "").strip() or file_path.name)
         records.append(metadata)
 
     return records
@@ -402,7 +423,8 @@ async def list_reports(
         scoped_thread = _safe_segment(thread_id, "default")
         records = [item for item in records if str(item.get("thread_id", "")) == scoped_thread]
 
-    return sorted(records, key=lambda item: str(item.get("created_at", "")), reverse=True)
+    normalized_records = [_ensure_report_display_name(dict(record)) for record in records]
+    return sorted(normalized_records, key=lambda item: str(item.get("created_at", "")), reverse=True)
 
 
 async def get_report(
@@ -428,13 +450,16 @@ async def get_report(
     if isinstance(value, dict):
         record = dict(value)
         record.setdefault("id", safe_report_id)
-        return record
+        return _ensure_report_display_name(record)
 
     for candidate in await asyncio.to_thread(_load_user_index, root, scoped_user):
         if str(candidate.get("id")) == safe_report_id:
-            return candidate
+            return _ensure_report_display_name(dict(candidate))
 
-    return await asyncio.to_thread(_find_record_in_filesystem, root, scoped_user, safe_report_id)
+    fallback = await asyncio.to_thread(_find_record_in_filesystem, root, scoped_user, safe_report_id)
+    if isinstance(fallback, dict):
+        return _ensure_report_display_name(fallback)
+    return fallback
 
 
 async def get_report_content(
@@ -517,7 +542,8 @@ async def list_thread_tool_outputs(
             merged[report_id] = {**merged.get(report_id, {}), **record}
         records = list(merged.values())
 
-    return sorted(records, key=lambda item: str(item.get("created_at", "")), reverse=True)
+    normalized_records = [_ensure_report_display_name(dict(record)) for record in records]
+    return sorted(normalized_records, key=lambda item: str(item.get("created_at", "")), reverse=True)
 
 
 async def delete_report(
