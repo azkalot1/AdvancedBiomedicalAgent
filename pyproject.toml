@@ -45,6 +45,7 @@ dependencies = [
   "jupyterlab",
   # Environment and data
   "python-dotenv",
+  "bcrypt",
   # printing
   "rich",
   # Chemistry

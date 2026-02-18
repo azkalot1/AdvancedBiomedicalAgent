@@ -1,0 +1,308 @@
+
+============================================================
+TABLE: public.activities
+============================================================
+
+COLUMNS:
+  activity_id: bigint NOT NULL
+  assay_id: bigint NOT NULL
+  doc_id: bigint NULL
+  record_id: bigint NOT NULL
+  molregno: bigint NULL
+  standard_relation: character varying NULL
+  standard_value: numeric NULL
+  standard_units: character varying NULL
+  standard_flag: smallint NULL
+  standard_type: character varying NULL
+  activity_comment: character varying NULL
+  data_validity_comment: character varying NULL
+  potential_duplicate: smallint NULL
+  pchembl_value: numeric NULL
+  bao_endpoint: character varying NULL
+  uo_units: character varying NULL
+  qudt_units: character varying NULL
+  toid: integer NULL
+  upper_value: numeric NULL
+  standard_upper_value: numeric NULL
+  src_id: integer NULL
+  type: character varying NOT NULL
+  relation: character varying NULL
+  value: numeric NULL
+  units: character varying NULL
+  text_value: character varying NULL
+  standard_text_value: character varying NULL
+  action_type: character varying NULL
+
+TOTAL ROWS: 24267312
+
+SAMPLE DATA (2 rows):
+
+Row 1:
+  activity_id: 31863
+  assay_id: 54505
+  doc_id: 6424
+  record_id: 206172
+  molregno: 180094
+  standard_relation: >
+  standard_value: 100000.0
+  standard_units: nM
+  standard_flag: 1
+  standard_type: IC50
+  activity_comment: NULL
+  data_validity_comment: NULL
+  potential_duplicate: 0
+  pchembl_value: NULL
+  bao_endpoint: BAO_0000190
+  uo_units: UO_0000065
+  qudt_units: http://www.openphacts.org/units/Nanomolar
+  toid: NULL
+  upper_value: NULL
+  standard_upper_value: NULL
+  src_id: 1
+  type: IC50
+  relation: >
+  value: 100.0
+  units: uM
+  text_value: NULL
+  standard_text_value: NULL
+  action_type: NULL
+
+Row 2:
+  activity_id: 31864
+  assay_id: 83907
+  doc_id: 6432
+  record_id: 208970
+  molregno: 182268
+  standard_relation: =
+  standard_value: 2500.0
+  standard_units: nM
+  standard_flag: 1
+  standard_type: IC50
+  activity_comment: NULL
+  data_validity_comment: NULL
+  potential_duplicate: 0
+  pchembl_value: 5.60
+  bao_endpoint: BAO_0000190
+  uo_units: UO_0000065
+  qudt_units: http://www.openphacts.org/units/Nanomolar
+  toid: NULL
+  upper_value: NULL
+  standard_upper_value: NULL
+  src_id: 1
+  type: IC50
+  relation: =
+  value: 2.5
+  units: uM
+  text_value: NULL
+  standard_text_value: NULL
+  action_type: NULL
+
+----------------------------------------
+SUMMARY STATISTICS (from sample):
+
+  activity_id:
+    Non-NULL: 2/2 (100.0%)
+    Range: 31863 to 31864
+    Avg: 31863.50
+
+  assay_id:
+    Non-NULL: 2/2 (100.0%)
+    Range: 54505 to 83907
+    Avg: 69206.00
+
+  doc_id:
+    Non-NULL: 2/2 (100.0%)
+    Range: 6424 to 6432
+    Avg: 6428.00
+
+  record_id:
+    Non-NULL: 2/2 (100.0%)
+    Range: 206172 to 208970
+    Avg: 207571.00
+
+  molregno:
+    Non-NULL: 2/2 (100.0%)
+    Range: 180094 to 182268
+    Avg: 181181.00
+
+  standard_relation:
+    Non-NULL: 2/2 (100.0%)
+
+  standard_value:
+    Non-NULL: 2/2 (100.0%)
+
+  standard_units:
+    Non-NULL: 2/2 (100.0%)
+
+  standard_flag:
+    Non-NULL: 2/2 (100.0%)
+    Range: 1 to 1
+    Avg: 1.00
+
+  standard_type:
+    Non-NULL: 2/2 (100.0%)
+
+  activity_comment:
+    Non-NULL: 0/2 (0.0%)
+
+  data_validity_comment:
+    Non-NULL: 0/2 (0.0%)
+
+  potential_duplicate:
+    Non-NULL: 2/2 (100.0%)
+    Range: 0 to 0
+    Avg: 0.00
+
+  pchembl_value:
+    Non-NULL: 1/2 (50.0%)
+
+  bao_endpoint:
+    Non-NULL: 2/2 (100.0%)
+
+  uo_units:
+    Non-NULL: 2/2 (100.0%)
+
+  qudt_units:
+    Non-NULL: 2/2 (100.0%)
+
+  toid:
+    Non-NULL: 0/2 (0.0%)
+
+  upper_value:
+    Non-NULL: 0/2 (0.0%)
+
+  standard_upper_value:
+    Non-NULL: 0/2 (0.0%)
+
+  src_id:
+    Non-NULL: 2/2 (100.0%)
+    Range: 1 to 1
+    Avg: 1.00
+
+  type:
+    Non-NULL: 2/2 (100.0%)
+
+  relation:
+    Non-NULL: 2/2 (100.0%)
+
+  value:
+    Non-NULL: 2/2 (100.0%)
+
+  units:
+    Non-NULL: 2/2 (100.0%)
+
+  text_value:
+    Non-NULL: 0/2 (0.0%)
+
+  standard_text_value:
+    Non-NULL: 0/2 (0.0%)
+
+  action_type:
+    Non-NULL: 0/2 (0.0%)
+
+============================================================
+TABLE: public.activity_properties
+============================================================
+
+COLUMNS:
+  ap_id: bigint NOT NULL
+  activity_id: bigint NOT NULL
+  type: character varying NOT NULL
+  relation: character varying NULL
+  value: numeric NULL
+  units: character varying NULL
+  text_value: character varying NULL
+  standard_type: character varying NULL
+  standard_relation: character varying NULL
+  standard_value: numeric NULL
+  standard_units: character varying NULL
+  standard_text_value: character varying NULL
+  comments: character varying NULL
+  result_flag: smallint NOT NULL
+
+TOTAL ROWS: 11898213
+
+SAMPLE DATA (2 rows):
+
+Row 1:
+  ap_id: 1
+  activity_id: 17126237
+  type: DATASET
+  relation: NULL
+  value: NULL
+  units: NULL
+  text_value: Hematology
+  standard_type: DATASET
+  standard_relation: NULL
+  standard_value: NULL
+  standard_units: NULL
+  standard_text_value: Hematology
+  comments: NULL
+  result_flag: 0
+
+Row 2:
+  ap_id: 2
+  activity_id: 17126237
+  type: ACTIVITY_TEST
+  relation: NULL
+  value: NULL
+  units: NULL
+  text_value: RBC (Erythrocytes)
+  standard_type: ACTIVITY_TEST
+  standard_relation: NULL
+  standard_value: NULL
+  standard_units: NULL
+  standard_text_value: RBC (Erythrocytes)
+  comments: NULL
+  result_flag: 0
+
+----------------------------------------
+SUMMARY STATISTICS (from sample):
+
+  ap_id:
+    Non-NULL: 2/2 (100.0%)
+    Range: 1 to 2
+    Avg: 1.50
+
+  activity_id:
+    Non-NULL: 2/2 (100.0%)
+    Range: 17126237 to 17126237
+    Avg: 17126237.00
+
+  type:
+    Non-NULL: 2/2 (100.0%)
+
+  relation:
+    Non-NULL: 0/2 (0.0%)
+
+  value:
+    Non-NULL: 0/2 (0.0%)
+
+  units:
+    Non-NULL: 0/2 (0.0%)
+
+  text_value:
+    Non-NULL: 2/2 (100.0%)
+
+  standard_type:
+    Non-NULL: 2/2 (100.0%)
+
+  standard_relation:
+    Non-NULL: 0/2 (0.0%)
+
+  standard_value:
+    Non-NULL: 0/2 (0.0%)
+
+  standard_units:
+    Non-NULL: 0/2 (0.0%)
+
+  standard_text_value:
+    Non-NULL: 2/2 (100.0%)
+
+  comments:
+    Non-NULL: 0/2 (0.0%)
+
+  result_flag:
+    Non-NULL: 2/2 (100.0%)
+    Range: 0 to 0
+    Avg: 0.00

@@ -9,6 +9,15 @@ from uuid import uuid4
 
 import requests
 
+DEFAULT_PREDEFINED_MODELS = (
+    "anthropic/claude-opus-4.6",
+    "anthropic/claude-sonnet-4.5",
+    "moonshotai/kimi-k2.5",
+    "google/gemini-3-flash-preview",
+    "google/gemini-3-pro-preview",
+    "openai/gpt-5.2",
+)
+
 
 def _extract_text(payload: Any) -> str:
     if isinstance(payload, str):
@@ -118,6 +127,14 @@ def _http_error_details(exc: requests.HTTPError) -> str:
         return f"{response.status_code} {response.reason}: {payload}"
     except Exception:
         return f"{response.status_code} {response.reason}: {body}"
+
+
+def _predefined_models_from_env() -> list[str]:
+    raw = os.getenv("BIOAGENT_PREDEFINED_MODELS", "").strip()
+    if not raw:
+        return list(DEFAULT_PREDEFINED_MODELS)
+    parsed = [item.strip() for item in raw.split(",") if item.strip()]
+    return parsed or list(DEFAULT_PREDEFINED_MODELS)
 
 
 @dataclass
@@ -257,7 +274,14 @@ class LangGraphServerClient:
         response = self.session.delete(self._url(f"/v1/reports/{report_id}"), timeout=self.timeout)
         response.raise_for_status()
 
-    def stream_run(self, thread_id: str, message: str, context_items: list[ContextItem]) -> None:
+    def stream_run(
+        self,
+        thread_id: str,
+        message: str,
+        context_items: list[ContextItem],
+        *,
+        model_name: str | None = None,
+    ) -> None:
         if context_items:
             context_blob = "\n\n".join(
                 f"[Context:{item.source}] {item.content.strip()}"
@@ -284,6 +308,7 @@ class LangGraphServerClient:
                     "thread_id": thread_id,
                     "conversation_uuid": thread_id,
                     "stream_tool_args": self.stream_tool_args,
+                    **({"model_name": model_name} if model_name else {}),
                 }
             },
             "stream_mode": ["messages", "messages-tuple", "updates", "custom"],
@@ -387,6 +412,8 @@ def _print_help() -> None:
     print("  /add_to_context <text>            Add manual context for next messages")
     print("  /context                          List current context items")
     print("  /clear_context                    Clear context items")
+    print("  /model_list                       Show predefined model options")
+    print("  /model_change <index|name>        Switch active model")
     print("  /quit                             Exit")
 
 
@@ -426,6 +453,13 @@ def _print_context(context_items: list[ContextItem]) -> None:
         if len(preview) > 120:
             preview = preview[:120] + "..."
         print(f" - {item.id} [{item.source}] {preview}")
+
+
+def _print_models(models: list[str], active_model: str) -> None:
+    print("Models:")
+    for index, model in enumerate(models, start=1):
+        marker = "*" if model == active_model else " "
+        print(f" {marker} {index}. {model}")
 
 
 def _extract_last_assistant_text(state_payload: dict[str, Any]) -> str:
@@ -534,6 +568,8 @@ def run_repl(
     assistant_id: str,
     user_id: str | None,
     initial_thread_id: str | None = None,
+    initial_model: str | None = None,
+    predefined_models: list[str] | None = None,
     stream_tool_args: bool = False,
     api_token: str | None = None,
 ) -> None:
@@ -551,6 +587,18 @@ def run_repl(
         raise RuntimeError(f"Could not reach server at {base_url}: {exc}") from exc
 
     thread_id = initial_thread_id or client.create_thread()
+    models = predefined_models[:] if predefined_models else _predefined_models_from_env()
+    initial_model_value = initial_model.strip() if isinstance(initial_model, str) else ""
+    if initial_model_value and initial_model_value not in models:
+        print(
+            f"Requested initial model '{initial_model_value}' is not in predefined list. "
+            f"Falling back to '{models[0] if models else ''}'."
+        )
+    active_model = (
+        initial_model_value
+        if initial_model_value and initial_model_value in models
+        else (models[0] if models else "")
+    )
     context_items: list[ContextItem] = []
 
     print("AI Co-Scientist terminal client (LangGraph Server)")
@@ -558,6 +606,7 @@ def run_repl(
     print(f"User: {resolved_user}")
     print(f"Assistant: {assistant_id}")
     print(f"Thread: {thread_id}")
+    print(f"Model: {active_model or 'n/a'}")
     _print_help()
 
     while True:
@@ -584,6 +633,27 @@ def run_repl(
                     continue
                 if command == "/threads":
                     _print_threads(client.list_threads(), thread_id)
+                    continue
+                if command in {"/model_list", "/models"}:
+                    _print_models(models, active_model)
+                    continue
+                if command in {"/model_change", "/model"}:
+                    if not arg:
+                        print("Usage: /model_change <index|model_name>")
+                        continue
+                    selected_model: str | None = None
+                    if arg.isdigit():
+                        index = int(arg)
+                        if 1 <= index <= len(models):
+                            selected_model = models[index - 1]
+                    else:
+                        if arg in models:
+                            selected_model = arg
+                    if not selected_model:
+                        print("Unknown model. Use /model_list to see predefined options.")
+                        continue
+                    active_model = selected_model
+                    print(f"Switched model: {active_model}")
                     continue
                 if command == "/switch":
                     if not arg:
@@ -651,7 +721,12 @@ def run_repl(
                 continue
 
         try:
-            client.stream_run(thread_id=thread_id, message=user_input, context_items=context_items)
+            client.stream_run(
+                thread_id=thread_id,
+                message=user_input,
+                context_items=context_items,
+                model_name=active_model or None,
+            )
         except requests.HTTPError as exc:
             details = exc.response.text if exc.response is not None else str(exc)
             print(f"Request failed: {details}")
@@ -691,7 +766,23 @@ def main() -> None:
         action="store_true",
         help="Stream sanitized tool argument previews in tool_status events.",
     )
+    parser.add_argument(
+        "--model",
+        default=os.getenv("BIOAGENT_MODEL"),
+        help="Initial active model for this chat session.",
+    )
+    parser.add_argument(
+        "--predefined-models",
+        default=os.getenv("BIOAGENT_PREDEFINED_MODELS"),
+        help="Comma-separated predefined model list for /model_list and /model_change.",
+    )
     args = parser.parse_args()
+
+    parsed_models = (
+        [item.strip() for item in args.predefined_models.split(",") if item.strip()]
+        if isinstance(args.predefined_models, str) and args.predefined_models.strip()
+        else None
+    )
 
     try:
         run_repl(
@@ -699,6 +790,8 @@ def main() -> None:
             assistant_id=args.assistant_id,
             user_id=args.user_id,
             initial_thread_id=args.thread_id,
+            initial_model=args.model,
+            predefined_models=parsed_models,
             stream_tool_args=args.stream_tool_args,
             api_token=args.api_token,
         )

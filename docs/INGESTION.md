@@ -52,6 +52,7 @@ Optional post-processing:
 ## Quick reference
 
 - Full pipeline: `biomedagent-db ingest` (see README for prerequisites).
+- Quick prototype: `biomedagent-db ingest --quick-prototype` (OpenFDA + Orange Book only; applies `--openfda-files 2 --n-max 2000` unless overridden).
 - Skip steps: `--skip-openfda`, `--skip-orange-book`, `--skip-ctgov`, `--skip-dailymed`, `--skip-drugcentral`, `--skip-chembl`, `--skip-bindingdb`, `--skip-dm-target`, `--skip-dm-molecule`.
 - CT.gov RAG only: `biomedagent-db ingest --ctgov-rag-corpus-only` then `--ctgov-rag-keys-only`.
 - CT.gov enriched search only: `biomedagent-db ingest --ctgov-enriched-search-only`.

@@ -24,7 +24,7 @@ You also need `langgraph` available in your active environment.
 Use the helper script:
 
 ```bash
-./scripts/start_chat_stack.sh
+./scripts/run_langgraph_and_chat.sh
 ```
 
 What it does:
@@ -66,7 +66,7 @@ export BIOAGENT_AUTH_REQUIRED=true
 Then run:
 
 ```bash
-./scripts/start_chat_stack.sh --api-token "$BIOAGENT_API_TOKEN"
+./scripts/run_langgraph_and_chat.sh --api-token "$BIOAGENT_API_TOKEN"
 ```
 
 or:
@@ -89,6 +89,8 @@ In chat prompt (`You>`), supported commands:
 - `/add_to_context <text>`: add manual context
 - `/context`: list current context items
 - `/clear_context`: clear context items
+- `/model_list`: list predefined models
+- `/model_change <index|name>`: switch model for subsequent turns
 - `/help`: show command help
 - `/quit`: exit
 
@@ -145,6 +147,7 @@ This validates:
 
 - If `langgraph dev` fails to load app, check:
   - `langgraph.json` points to `./src/bioagent/server/webapp.py:app`
+  - `langgraph.json` dependencies use the package root (`"."`) rather than `pyproject.toml`
   - environment has project installed (`pip install -e .`)
 - If chat cannot connect, verify:
   - server is running on `LANGGRAPH_API_URL` (default `http://localhost:2024`)

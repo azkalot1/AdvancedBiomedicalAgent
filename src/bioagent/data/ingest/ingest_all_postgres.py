@@ -637,6 +637,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  %(prog)s --quick-prototype               # Lightweight prototype ingest profile
   %(prog)s --get-db-info                    # Show database information and sample data
   %(prog)s --get-db-info --sample-size 5    # Show 5 sample rows per table
   %(prog)s --reset --force                  # Reset database (no confirmation)
@@ -662,6 +663,15 @@ Examples:
         """,
     )
     parser.add_argument("--reset", action="store_true", help="Reset database before ingestion")
+    parser.add_argument(
+        "--quick-prototype",
+        action="store_true",
+        help=(
+            "Run a lightweight prototype profile. Keeps OpenFDA + Orange Book only, skips CT.gov, "
+            "DailyMed, BindingDB, ChEMBL, DrugCentral, dm_target, and dm_molecule. "
+            "Defaults: --openfda-files 2 and --n-max 2000 (unless explicitly set)."
+        ),
+    )
     parser.add_argument("--skip-openfda", action="store_true", help="Skip OpenFDA ingestion")
     parser.add_argument("--skip-orange-book", action="store_true", help="Skip Orange Book ingestion")
     parser.add_argument("--skip-ctgov", action="store_true", help="Skip ClinicalTrials.gov ingestion")
@@ -703,6 +713,27 @@ Examples:
     parser.add_argument("--restore-db", type=str, help="Restore database from specified dump file")
 
     args = parser.parse_args()
+
+    if args.quick_prototype:
+        if args.openfda_files is None:
+            args.openfda_files = 2
+        if args.n_max is None:
+            args.n_max = 2000
+
+        args.skip_ctgov = True
+        args.skip_dailymed = True
+        args.skip_bindingdb = True
+        args.skip_drugcentral = True
+        args.skip_chembl = True
+        args.skip_dm_target = True
+        args.skip_dm_molecule = True
+        args.skip_ctgov_enriched_search = True
+
+        print("\n⚡ Quick prototype profile enabled")
+        print("   Included: OpenFDA, Orange Book")
+        print("   Skipped: CT.gov, DailyMed, BindingDB, ChEMBL, DrugCentral, dm_target, dm_molecule")
+        print(f"   OpenFDA files limit: {args.openfda_files}")
+        print(f"   n-max limit: {args.n_max}")
 
     # Handle --get-db-info command (standalone)
     if args.get_db_info:

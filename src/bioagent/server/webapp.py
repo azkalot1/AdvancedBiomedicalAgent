@@ -1,13 +1,19 @@
+import asyncio
 import json
 import os
+import re
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, ConfigDict, Field
 
+from bioagent.agent import get_chat_model
 from bioagent.persistence import delete_report, get_report, get_report_content, list_reports, normalize_report_id
 
 
@@ -42,10 +48,29 @@ class ReportMetadata(BaseModel):
     status: str | None = None
     size_chars: int | None = None
     one_line: str | None = None
+    display_name: str | None = None
     thread_id: str | None = None
     user_id: str | None = None
     created_at: str | None = None
     path: str | None = None
+
+
+class ThreadDisplayNameMessage(BaseModel):
+    role: str
+    content: str
+
+
+class GenerateThreadDisplayNameRequest(BaseModel):
+    messages: list[ThreadDisplayNameMessage] = Field(default_factory=list)
+    min_messages: int = Field(default=2, ge=1, le=20)
+    max_messages: int = Field(default=2, ge=1, le=20)
+    force: bool = False
+
+
+class GenerateThreadDisplayNameResponse(BaseModel):
+    thread_id: str
+    display_name: str
+    generated: bool
 
 
 class ReportsListResponse(BaseModel):
@@ -214,6 +239,71 @@ def _normalize_limit(
     return normalized
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+THREAD_DISPLAY_NAME_MODEL = "google/gemini-3-flash-preview"
+THREAD_DISPLAY_NAME_PROMPT = PromptTemplate.from_template(
+    """
+You write concise biomedical conversation titles.
+
+Conversation snippets:
+{conversation}
+
+Return only a short title (max 8 words), no quotes, no punctuation at the end.
+"""
+)
+
+
+def _thread_name_fallback(messages: list[dict[str, str]]) -> str:
+    for item in messages:
+        if item.get("role") == "user":
+            text = item.get("content", "").strip()
+            if text:
+                words = text.split()
+                return " ".join(words[:8]).strip()
+    return "Biomedical research session"
+
+
+def _sanitize_title(value: str) -> str:
+    text = re.sub(r"\s+", " ", value).strip()
+    text = text.strip("`\"' ")
+    text = text.rstrip(".,;:!?")
+    return text[:80]
+
+
+async def _generate_thread_display_name(messages: list[dict[str, str]]) -> str:
+    date_prefix = datetime.now().strftime("%d-%m_%Y %H-%M")
+    provider = os.getenv("BIOAGENT_PROVIDER", "openrouter")
+
+    formatted_lines = [
+        f"{item['role']}: {item['content']}"
+        for item in messages
+        if item.get("content")
+    ]
+    conversation = "\n".join(formatted_lines)[:6000]
+
+    try:
+        llm = get_chat_model(
+            THREAD_DISPLAY_NAME_MODEL,
+            provider,
+            model_parameters={"temperature": 0.2},
+        )
+        chain = THREAD_DISPLAY_NAME_PROMPT | llm | StrOutputParser()
+        generated = await chain.ainvoke({"conversation": conversation})
+        title = _sanitize_title(str(generated))
+    except Exception:
+        title = _sanitize_title(_thread_name_fallback(messages))
+
+    if not title:
+        title = "Biomedical research session"
+    return f"{date_prefix} {title}".strip()[:120]
+
+
 def create_webapp() -> FastAPI:
     app = FastAPI(
         title="AdvancedBiomedicalAgent Custom API",
@@ -225,6 +315,7 @@ def create_webapp() -> FastAPI:
     app.state.reports_max_fetch = int(os.getenv("BIOAGENT_REPORTS_MAX_FETCH", "2000"))
     app.state.report_content_default_chars = int(os.getenv("BIOAGENT_REPORT_CONTENT_DEFAULT_CHARS", "12000"))
     app.state.report_content_max_chars = int(os.getenv("BIOAGENT_REPORT_CONTENT_MAX_CHARS", "100000"))
+    app.state.trust_x_user_id = _env_flag("BIOAGENT_TRUST_X_USER_ID", True)
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
@@ -264,6 +355,11 @@ def create_webapp() -> FastAPI:
             )
         else:
             resolved_user = settings.default_user_id
+
+        if request.app.state.trust_x_user_id:
+            header_user = request.headers.get("X-Bioagent-User-Id", "").strip()
+            if header_user:
+                resolved_user = header_user
 
         request.state.user_id = resolved_user or settings.default_user_id
         response = await call_next(request)
@@ -311,6 +407,45 @@ def create_webapp() -> FastAPI:
     async def me(request: Request) -> MeResponse:
         settings: AuthSettings = request.app.state.auth_settings
         return MeResponse(user_id=_auth_user_id(request), auth_required=settings.required)
+
+    @app.post("/v1/threads/{thread_id}/display-name/generate", response_model=GenerateThreadDisplayNameResponse, tags=["threads"])
+    async def generate_thread_display_name(
+        thread_id: str,
+        payload: GenerateThreadDisplayNameRequest,
+        request: Request,
+    ) -> GenerateThreadDisplayNameResponse:
+        _auth_user_id(request)
+
+        normalized_thread_id = thread_id.strip()
+        if not normalized_thread_id:
+            raise ApiError(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="invalid_thread_id",
+                message="thread_id cannot be empty.",
+            )
+
+        normalized_messages = [
+            {"role": item.role.strip().lower()[:20], "content": item.content.strip()}
+            for item in payload.messages
+            if item.content.strip()
+        ]
+        message_subset = normalized_messages[:2]
+
+        if len(message_subset) < payload.min_messages and not payload.force:
+            fallback = await asyncio.to_thread(_thread_name_fallback, message_subset)
+            date_prefix = datetime.now().strftime("%d-%m_%Y %H-%M")
+            return GenerateThreadDisplayNameResponse(
+                thread_id=normalized_thread_id,
+                display_name=f"{date_prefix} {fallback}".strip()[:120],
+                generated=False,
+            )
+
+        display_name = await _generate_thread_display_name(message_subset)
+        return GenerateThreadDisplayNameResponse(
+            thread_id=normalized_thread_id,
+            display_name=display_name,
+            generated=True,
+        )
 
     @app.get("/v1/reports", response_model=ReportsListResponse, tags=["reports"])
     async def list_reports_v1(
