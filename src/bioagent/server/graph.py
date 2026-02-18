@@ -31,7 +31,7 @@ _MODEL_NAME_KEYS = ("model", "model_name", "llm_model")
 DEFAULT_SUMMARIZER_MODEL = "google/gemini-3-flash-preview"
 ALLOWED_CHAT_MODELS = (
     "anthropic/claude-opus-4.6",
-    "anthropic/claude-sonnet-4.5",
+    "anthropic/claude-sonnet-4.6",
     "moonshotai/kimi-k2.5",
     "google/gemini-3-flash-preview",
     "google/gemini-3-pro-preview",

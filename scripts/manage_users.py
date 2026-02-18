@@ -28,18 +28,33 @@ APP_DATABASE_URL = (
     or "postgresql://postgres:postgres@localhost:5432/coscientist_app"
 )
 
+APP_USERS_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS app_users (
+    id              SERIAL PRIMARY KEY,
+    email           VARCHAR(255) UNIQUE NOT NULL,
+    name            VARCHAR(255) NOT NULL,
+    password_hash   VARCHAR(255) NOT NULL,
+    role            VARCHAR(50) DEFAULT 'user',
+    is_active       BOOLEAN DEFAULT true,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_login      TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_app_users_email ON app_users(email);
+"""
+
 
 DEMO_USERS: list[dict[str, str]] = [
-    {"email": "dr.smith@pharma.com", "name": "Dr. Smith", "role": "admin"},
-    {"email": "dr.jones@university.edu", "name": "Dr. Jones", "role": "user"},
-    {"email": "sarah.chen@biotech.com", "name": "Sarah Chen", "role": "user"},
-    {"email": "m.rodriguez@hospital.org", "name": "Dr. Rodriguez", "role": "user"},
-    {"email": "j.patel@research.ac.uk", "name": "Dr. Patel", "role": "user"},
-    {"email": "a.kumar@genomics.io", "name": "Dr. Kumar", "role": "user"},
-    {"email": "l.mueller@pharma.de", "name": "Dr. Mueller", "role": "user"},
-    {"email": "y.tanaka@riken.jp", "name": "Dr. Tanaka", "role": "user"},
-    {"email": "c.dubois@inserm.fr", "name": "Dr. Dubois", "role": "user"},
-    {"email": "r.williams@nih.gov", "name": "Dr. Williams", "role": "user"},
+    {"email": "admin@coscientist.com", "name": "demo_admin_user", "role": "admin"},
+    {"email": "user_1@coscientist.com", "name": "user_1", "role": "user"},
+    {"email": "user_2@coscientist.com", "name": "user_2", "role": "user"},
+    {"email": "user_3@coscientist.com", "name": "user_3", "role": "user"},
+    {"email": "user_4@coscientist.com", "name": "user_4", "role": "user"},
+    {"email": "user_5@coscientist.com", "name": "user_5", "role": "user"},
+    {"email": "user_6@coscientist.com", "name": "user_6", "role": "user"},
+    {"email": "user_7@coscientist.com", "name": "user_7", "role": "user"},
+    {"email": "user_8@coscientist.com", "name": "user_8", "role": "user"},
+    {"email": "user_9@coscientist.com", "name": "user_9", "role": "user"},
 ]
 
 
@@ -279,16 +294,11 @@ def hash_password(password: str) -> str:
 def ensure_schema() -> None:
     ensure_database()
 
-    schema_path = ROOT_DIR / "sql" / "create_users.sql"
-    if not schema_path.exists():
-        raise FileNotFoundError(f"Schema file not found: {schema_path}")
-    sql = schema_path.read_text()
-
     target = _parsed_db_info(APP_DATABASE_URL)
     conn = get_conn()
     cur = conn.cursor()
     try:
-        cur.execute(sql)
+        cur.execute(APP_USERS_SCHEMA_SQL)
         conn.commit()
     except psycopg2.Error as exc:
         conn.rollback()
@@ -298,7 +308,7 @@ def ensure_schema() -> None:
             if not fixed:
                 fixed = _ensure_schema_privileges_with_sudo(target)
             if fixed:
-                cur.execute(sql)
+                cur.execute(APP_USERS_SCHEMA_SQL)
                 conn.commit()
             else:
                 _print_schema_permission_fix_hint(target)
