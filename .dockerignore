@@ -1,13 +1,62 @@
+# Git
 .git
+.gitignore
+
+# Environment
 .env
+.env.*
+!.env.example
+
+# Python cache
 __pycache__
 *.pyc
 *.pyo
+*.pyd
+.Python
+*.egg-info
+*.egg
+dist/
+build/
+.eggs/
+
+# Testing
 .pytest_cache
-node_modules
-web/.next
-web/node_modules
+.coverage
+htmlcov/
+.tox/
+
+# Frontend (not needed for backend build)
+web/
+node_modules/
+
+# Notebooks & research
 notebooks/
-.bioagent/
 research_outputs/
+.bioagent/
+
+# DB dumps
 *.dump
+*.sql
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile*
+docker-compose*
+
+# Docs
+docs/
+*.md
+README*
+
+# Logs
+*.log
+logs/

@@ -1,12 +1,11 @@
 FROM langchain/langgraph-api:3.13
 
-# Set working directory
 WORKDIR /app
-
-# Copy everything
 COPY . .
 
-# Install the package and all dependencies
+# Force CPU-only torch BEFORE installing everything else
+RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
+
 RUN pip install -e ".[dev]" || pip install -e .
 
 EXPOSE 2024
