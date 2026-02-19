@@ -42,4 +42,4 @@ if [[ $# -eq 0 ]]; then
   set -- "${AEGRA_DEFAULT_COMMAND:-dev}"
 fi
 
-exec aegra "$@"
+exec aegra "$@" --host 0.0.0.0 --port "${PORT:-8000}"
