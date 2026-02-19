@@ -7,10 +7,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY . .
 
-# Force CPU-only torch BEFORE installing everything else.
 RUN pip install --upgrade pip
 RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
 RUN pip install -e ".[dev]" || pip install -e .
 
-EXPOSE 2024
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/ok || exit 1
+
+EXPOSE 8000
 CMD ["./scripts/run_aegra.sh", "serve"]
