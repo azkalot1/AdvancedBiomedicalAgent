@@ -11,9 +11,9 @@ import { FileExplorerPanel } from "@/components/workbench/file-explorer-panel";
 import { StatusBar } from "@/components/workbench/status-bar";
 import { ToolStatePanel } from "@/components/workbench/tool-state-panel";
 import { TopBar } from "@/components/workbench/top-bar";
-import { createThread, listThreads } from "@/lib/backend-client";
+import { listThreads } from "@/lib/backend-client";
 import { useBioAgentStore } from "@/lib/stores/use-bioagent-store";
-import { prependThread, sortThreadsByCreatedAt } from "@/lib/thread-session";
+import { sortThreadsByCreatedAt } from "@/lib/thread-session";
 import type { InitialWorkbenchData } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -36,42 +36,19 @@ export function WorkbenchShell({ initialData }: { initialData: InitialWorkbenchD
     initializedRef.current = true;
 
     let cancelled = false;
+    clearThreadWorkspace();
+    setThreadId(null);
     void (async () => {
-      let knownThreads = [] as ReturnType<typeof sortThreadsByCreatedAt>;
       try {
-        knownThreads = sortThreadsByCreatedAt(await listThreads(100, initialData.userId));
+        const knownThreads = sortThreadsByCreatedAt(await listThreads(100, initialData.userId));
         if (cancelled) {
           return;
         }
         setThreads(knownThreads);
-      } catch {
-        knownThreads = [];
-        if (!cancelled) {
-          setThreads([]);
-        }
-      }
-
-      try {
-        const freshThreadId = await createThread(initialData.userId);
-        if (cancelled) {
-          return;
-        }
-
-        clearThreadWorkspace();
-        setThreadId(freshThreadId);
-        setThreads(
-          prependThread(knownThreads, {
-            id: freshThreadId,
-            createdAt: new Date().toISOString(),
-            metadata: {
-              app: "co-scientist",
-              ...(initialData.userId ? { user_id: initialData.userId } : {})
-            }
-          })
-        );
         setConnection("connected");
       } catch {
         if (!cancelled) {
+          setThreads([]);
           setConnection("degraded");
         }
       }

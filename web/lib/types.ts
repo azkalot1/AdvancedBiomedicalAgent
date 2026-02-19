@@ -66,6 +66,26 @@ export interface ChatMessage {
   reportRefIds?: string[];
 }
 
+export type ResponseFeedbackReason =
+  | "wrong_or_outdated"
+  | "did_not_address_question"
+  | "missing_information"
+  | "too_much_irrelevant_detail"
+  | "unclear_reliability";
+
+export interface ResponseFeedbackRecord {
+  helpful: boolean;
+  reason?: ResponseFeedbackReason;
+  submittedAt: string;
+  messageId?: string;
+}
+
+export interface StarterPromptCategory {
+  id: string;
+  title: string;
+  prompts: string[];
+}
+
 export interface MeResponse {
   user_id: string;
   auth_required: boolean;
@@ -111,4 +131,5 @@ export interface InitialWorkbenchData {
   authRequired: boolean;
   reports: ReportFile[];
   backendOk: boolean;
+  starterPromptCategories: StarterPromptCategory[];
 }

@@ -14,7 +14,15 @@ from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, ConfigDict, Field
 
 from bioagent.agent import get_chat_model
-from bioagent.persistence import delete_report, get_report, get_report_content, list_reports, normalize_report_id
+from bioagent.persistence import (
+    delete_report,
+    get_report,
+    get_report_content,
+    list_prompt_click_popularity,
+    list_reports,
+    normalize_report_id,
+    persist_prompt_click,
+)
 
 
 class ApiErrorBody(BaseModel):
@@ -101,6 +109,35 @@ class LegacyContentResponse(BaseModel):
     id: str
     filename: str
     content: str
+
+
+class PromptClickRequest(BaseModel):
+    prompt_text: str = Field(min_length=1, max_length=4000)
+    category_id: str | None = Field(default=None, max_length=120)
+    category_title: str | None = Field(default=None, max_length=200)
+    thread_id: str | None = Field(default=None, max_length=200)
+    source: str | None = Field(default="web_starter_prompt", max_length=120)
+
+
+class PromptClickResponse(BaseModel):
+    ok: bool
+    click_id: int
+    clicked_at: str
+
+
+class PromptPopularityItem(BaseModel):
+    category_id: str | None = None
+    category_title: str | None = None
+    prompt_text: str
+    click_count: int
+    last_clicked_at: str
+
+
+class PromptPopularityResponse(BaseModel):
+    items: list[PromptPopularityItem]
+    limit: int
+    days: int
+    scope: str
 
 
 class AuthSettings:
@@ -409,6 +446,59 @@ def create_webapp() -> FastAPI:
     async def me(request: Request) -> MeResponse:
         settings: AuthSettings = request.app.state.auth_settings
         return MeResponse(user_id=_auth_user_id(request), auth_required=settings.required)
+
+    @app.post("/v1/analytics/prompt-clicks", response_model=PromptClickResponse, tags=["analytics"])
+    async def log_prompt_click(payload: PromptClickRequest, request: Request) -> PromptClickResponse:
+        user_id = _auth_user_id(request)
+        try:
+            record = await persist_prompt_click(
+                user_id=user_id,
+                prompt_text=payload.prompt_text,
+                category_id=payload.category_id,
+                category_title=payload.category_title,
+                thread_id=payload.thread_id,
+                source=payload.source,
+            )
+        except ValueError as exc:
+            raise ApiError(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="invalid_prompt_click",
+                message=str(exc),
+            ) from exc
+
+        return PromptClickResponse(
+            ok=True,
+            click_id=int(record["id"]),
+            clicked_at=str(record["clicked_at"]),
+        )
+
+    @app.get("/v1/analytics/prompt-clicks/top", response_model=PromptPopularityResponse, tags=["analytics"])
+    async def top_prompt_clicks(
+        request: Request,
+        limit: int = Query(default=20, ge=1, le=200),
+        days: int = Query(default=90, ge=1, le=3650),
+        scope: str = Query(default="global"),
+    ) -> PromptPopularityResponse:
+        user_id = _auth_user_id(request)
+        normalized_scope = scope.strip().lower()
+        if normalized_scope not in {"global", "me"}:
+            raise ApiError(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="invalid_scope",
+                message="scope must be 'global' or 'me'.",
+            )
+
+        rows = await list_prompt_click_popularity(
+            limit=limit,
+            days=days,
+            user_id=user_id if normalized_scope == "me" else None,
+        )
+        return PromptPopularityResponse(
+            items=[PromptPopularityItem.model_validate(item) for item in rows],
+            limit=limit,
+            days=days,
+            scope=normalized_scope,
+        )
 
     @app.post("/v1/threads/{thread_id}/display-name/generate", response_model=GenerateThreadDisplayNameResponse, tags=["threads"])
     async def generate_thread_display_name(

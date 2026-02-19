@@ -177,7 +177,7 @@ export function FileExplorerPanel(): React.ReactElement {
         <div className="h-full space-y-1 overflow-y-auto pr-1">
           {!threadId ? (
             <div className="rounded-md border border-dashed border-surface-edge px-2 py-2 text-xs text-zinc-500">
-              Waiting for thread initialization.
+              No active thread. Send a message or open an existing thread.
             </div>
           ) : filteredReports.length === 0 ? (
             <div className="rounded-md border border-dashed border-surface-edge px-2 py-2 text-xs text-zinc-500">

@@ -1,0 +1,100 @@
+categories:
+  - id: target_validation
+    title: Target Validation and Prioritization
+    prompts:
+      - "What is the genetic evidence supporting [GENE] as a target in [DISEASE]?"
+      - "Are there any approved drugs that work through [GENE/TARGET]?"
+      - "What phase are the most advanced programs targeting [GENE] currently in?"
+      - "Has [GENE] been implicated in any other diseases beyond [PRIMARY_INDICATION]?"
+      - "What are the known safety liabilities of modulating [TARGET]?"
+      - "How many companies are actively targeting [GENE] and at what stages?"
+      - "Is [TARGET] considered druggable — are there known small molecule or biologic binders?"
+      - "What is the binding affinity profile of known [TARGET] inhibitors in ChEMBL?"
+
+  - id: competitive_landscape
+    title: Competitive Landscape Mapping
+    prompts:
+      - "Give me a competitive landscape for [DISEASE] — all active clinical programs by company, phase, and mechanism of action."
+      - "Which companies have Phase 2 or Phase 3 trials in [INDICATION] right now?"
+      - "What mechanisms of action are being pursued in [DISEASE] and which is most represented in late-stage trials?"
+      - "Are there any programs in [INDICATION] that recently failed or were discontinued? What were the reasons?"
+      - "Who are the emerging smaller biotech players in [TARGET_CLASS] space versus the large pharma players?"
+      - "What is the most advanced program targeting [MECHANISM] in [DISEASE], and who owns it?"
+      - "Has any company run a trial in [INDICATION] with a [DRUG_CLASS] and what were the outcomes?"
+
+  - id: company_pipeline_intelligence
+    title: Company Pipeline Intelligence
+    prompts:
+      - "What is [COMPANY]'s current clinical pipeline in [THERAPEUTIC_AREA]?"
+      - "What targets is [COMPANY] pursuing across all their active trials?"
+      - "Has [COMPANY] recently started any new trials in [INDICATION]?"
+      - "What is [COMPANY]'s most advanced asset in [DISEASE_AREA] and what is its current status?"
+      - "Are there any trials where [COMPANY_A] and [COMPANY_B] are testing similar mechanisms?"
+      - "What adverse events have been reported in [COMPANY]'s trials for [DRUG]?"
+
+  - id: drug_molecule_intelligence
+    title: Drug and Molecule Intelligence
+    prompts:
+      - "What is the full clinical history of [DRUG_NAME] — all trials, indications, and outcomes?"
+      - "What is the mechanism of action of [DRUG] and what target does it bind?"
+      - "What are the most commonly reported adverse events for [DRUG] across all clinical trials?"
+      - "Is [DRUG] approved anywhere in the world? In which indications and by which agencies?"
+      - "What is the binding affinity of [COMPOUND] against [TARGET] and how does it compare to other known inhibitors?"
+      - "Are there any structurally similar compounds to [DRUG] currently in clinical trials?"
+      - "What is the label content for [DRUG] — approved indications, contraindications, black box warnings?"
+
+  - id: indication_disease_strategy
+    title: Indication and Disease Area Strategy
+    prompts:
+      - "How crowded is the [DISEASE] clinical trial space — how many active trials and how many sponsors?"
+      - "What are the primary endpoints being used in [DISEASE] trials and which are most accepted by regulators?"
+      - "Are there any [DISEASE] trials that have shown statistically significant results in the last 3 years?"
+      - "What unmet needs remain in [DISEASE] despite existing approved therapies?"
+      - "Which patient subpopulations in [DISEASE] are underserved by current clinical programs?"
+      - "What is the trial failure rate in [DISEASE] and what are the most common reasons for failure?"
+      - "Are there any [DISEASE] trials using biomarker-driven patient selection, and what biomarkers are they using?"
+
+  - id: safety_risk_profile
+    title: Safety and Risk Assessment
+    prompts:
+      - "What adverse events are most commonly associated with [MECHANISM_OF_ACTION] drugs as a class?"
+      - "Compare the safety profiles of [DRUG_A] and [DRUG_B] across their clinical trial programs."
+      - "Have there been any serious adverse events or deaths reported in trials targeting [TARGET]?"
+      - "What are the post-market safety signals for [APPROVED_DRUG] based on FAERS data?"
+      - "Are there any black box warnings associated with [DRUG_CLASS] and what triggered them?"
+      - "What is the discontinuation rate due to adverse events in [DISEASE] trials for [DRUG]?"
+
+  - id: bd_licensing_context
+    title: BD and Licensing Context
+    prompts:
+      - "What is the most advanced stage reached by any program targeting [TARGET] — and who owns it?"
+      - "Are there any [INDICATION] assets currently in Phase 2 with no large pharma partner?"
+      - "What companies have out-licensed assets in [THERAPEUTIC_AREA] in the last 2 years?"
+      - "Has [COMPANY] done any deals or partnerships around their [DRUG_OR_PROGRAM]?"
+      - "What is the competitive context for [ASSET] — how differentiated is it from what is already in trials?"
+
+  - id: regulatory_approval_intelligence
+    title: Regulatory and Approval Intelligence
+    prompts:
+      - "What drugs have received FDA Breakthrough Therapy designation in [DISEASE] and what was the basis?"
+      - "Has any drug in [INDICATION] received accelerated approval, and on what surrogate endpoint?"
+      - "What is the approved label for [DRUG] and how has it changed since initial approval?"
+      - "Are there any [DISEASE] drugs with Orphan Drug Designation and what exclusivity does that confer?"
+      - "What was the FDA Complete Response Letter basis for [DRUG]'s rejection, if any?"
+
+  - id: cross_indication_repurposing
+    title: Cross-Indication and Repurposing Signals
+    prompts:
+      - "Is [TARGET] being pursued in any indication outside of [PRIMARY_DISEASE]?"
+      - "Are there any trials testing [DRUG] in indications beyond its approved use?"
+      - "What other diseases share the same pathway as [DISEASE] that might be addressable with a [MECHANISM] drug?"
+      - "Has [DRUG_CLASS] shown efficacy signals in any indication outside its primary development program?"
+
+  - id: portfolio_prioritization
+    title: Portfolio and Resource Allocation
+    prompts:
+      - "Compare the competitive intensity in [INDICATION_A] vs [INDICATION_B] — which is more crowded at late stage?"
+      - "For our target [GENE], how does the clinical validation evidence compare to [COMPETITOR_TARGET]?"
+      - "Which of these three mechanisms — [MECHANISM_A], [MECHANISM_B], [MECHANISM_C] — has the strongest human genetic evidence in [DISEASE]?"
+      - "What is the attrition rate for [MECHANISM] drugs between Phase 2 and Phase 3 historically?"
+      - "Are there any [DISEASE] programs that have been deprioritized by large pharma recently, suggesting a crowded or de-risked space?"

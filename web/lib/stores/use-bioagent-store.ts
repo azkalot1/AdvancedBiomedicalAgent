@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 import { DEFAULT_MODEL_ID, isAllowedCatalogModel } from "@/lib/model-catalog";
-import type { ChatMessage, ContextItem, InitialWorkbenchData, ReportFile, ThreadSummary, ToolEvent } from "@/lib/types";
+import type { ChatMessage, ContextItem, InitialWorkbenchData, ReportFile, StarterPromptCategory, ThreadSummary, ToolEvent } from "@/lib/types";
 
 const MAX_CONTEXT_TOKENS = 128_000;
 
@@ -18,6 +18,7 @@ interface BioAgentStore {
   model: string;
   mode: ResearchMode;
   reports: ReportFile[];
+  starterPromptCategories: StarterPromptCategory[];
   threads: ThreadSummary[];
   selectedReportId: string | null;
   reportContentById: Record<string, string>;
@@ -33,7 +34,7 @@ interface BioAgentStore {
   connection: ConnectionState;
 
   hydrate: (data: InitialWorkbenchData) => void;
-  setThreadId: (threadId: string) => void;
+  setThreadId: (threadId: string | null) => void;
   setModel: (model: string) => void;
   setMode: (mode: ResearchMode) => void;
   setDraft: (draft: string) => void;
@@ -95,6 +96,7 @@ export const useBioAgentStore = create<BioAgentStore>((set, get) => ({
       : DEFAULT_MODEL_ID,
   mode: "deep_research",
   reports: [],
+  starterPromptCategories: [],
   threads: [],
   selectedReportId: null,
   reportContentById: {},
@@ -115,6 +117,7 @@ export const useBioAgentStore = create<BioAgentStore>((set, get) => ({
       authRequired: data.authRequired,
       backendOk: data.backendOk,
       reports: [],
+      starterPromptCategories: data.starterPromptCategories,
       selectedReportId: null,
       currentPromptTokens: null,
       connection: data.backendOk ? "connected" : "offline"

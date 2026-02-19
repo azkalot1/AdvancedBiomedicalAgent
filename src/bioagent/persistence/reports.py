@@ -37,6 +37,23 @@ CREATE INDEX IF NOT EXISTS idx_bioagent_reports_user
 
 CREATE INDEX IF NOT EXISTS idx_bioagent_reports_thread
     ON bioagent_reports (user_id, thread_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS bioagent_prompt_clicks (
+    id BIGSERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    thread_id TEXT,
+    category_id TEXT,
+    category_title TEXT,
+    prompt_text TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'web_starter_prompt',
+    clicked_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_bioagent_prompt_clicks_user
+    ON bioagent_prompt_clicks (user_id, clicked_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_bioagent_prompt_clicks_clicked
+    ON bioagent_prompt_clicks (clicked_at DESC);
 """
 
 
@@ -167,6 +184,15 @@ def _normalize_limit(limit: int, *, default: int, max_value: int) -> int:
     if normalized > max_value:
         normalized = max_value
     return normalized
+
+
+def _clean_optional_text(value: str | None, *, max_length: int) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    return cleaned[:max_length]
 
 
 async def persist_tool_output_report(
@@ -394,3 +420,114 @@ async def delete_report(
     except (TypeError, ValueError, IndexError):
         return False
     return deleted_count > 0
+
+
+async def persist_prompt_click(
+    *,
+    user_id: str,
+    prompt_text: str,
+    category_id: str | None = None,
+    category_title: str | None = None,
+    thread_id: str | None = None,
+    source: str | None = "web_starter_prompt",
+) -> dict[str, Any]:
+    cleaned_prompt = str(prompt_text).strip()
+    if not cleaned_prompt:
+        raise ValueError("prompt_text cannot be empty.")
+
+    scoped_user = _safe_segment(user_id, DEFAULT_USER_ID)
+    scoped_thread = _safe_segment(thread_id, "default") if thread_id and str(thread_id).strip() else None
+    cleaned_category_id = _safe_segment(category_id, "category") if category_id and str(category_id).strip() else None
+    cleaned_category_title = _clean_optional_text(category_title, max_length=200)
+    cleaned_source = _safe_segment(source, "web_starter_prompt")
+    cleaned_prompt = cleaned_prompt[:4000]
+
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO bioagent_prompt_clicks (
+                user_id,
+                thread_id,
+                category_id,
+                category_title,
+                prompt_text,
+                source
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id, clicked_at
+            """,
+            scoped_user,
+            scoped_thread,
+            cleaned_category_id,
+            cleaned_category_title,
+            cleaned_prompt,
+            cleaned_source,
+        )
+
+    clicked_at = row["clicked_at"] if row else datetime.now(timezone.utc)
+    return {
+        "id": int(row["id"]) if row else 0,
+        "user_id": scoped_user,
+        "thread_id": scoped_thread,
+        "category_id": cleaned_category_id,
+        "category_title": cleaned_category_title,
+        "prompt_text": cleaned_prompt,
+        "source": cleaned_source,
+        "clicked_at": clicked_at.isoformat() if isinstance(clicked_at, datetime) else str(clicked_at),
+    }
+
+
+async def list_prompt_click_popularity(
+    *,
+    limit: int = 20,
+    days: int = 90,
+    user_id: str | None = None,
+) -> list[dict[str, Any]]:
+    scoped_limit = _normalize_limit(limit, default=20, max_value=200)
+    try:
+        scoped_days = int(days)
+    except (TypeError, ValueError):
+        scoped_days = 90
+    if scoped_days < 1:
+        scoped_days = 1
+    if scoped_days > 3650:
+        scoped_days = 3650
+
+    scoped_user = _safe_segment(user_id, DEFAULT_USER_ID) if user_id and str(user_id).strip() else None
+
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                category_id,
+                category_title,
+                prompt_text,
+                COUNT(*)::BIGINT AS click_count,
+                MAX(clicked_at) AS last_clicked_at
+            FROM bioagent_prompt_clicks
+            WHERE ($1::TEXT IS NULL OR user_id = $1)
+              AND clicked_at >= now() - ($2::INT * INTERVAL '1 day')
+            GROUP BY category_id, category_title, prompt_text
+            ORDER BY click_count DESC, last_clicked_at DESC
+            LIMIT $3
+            """,
+            scoped_user,
+            scoped_days,
+            scoped_limit,
+        )
+
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        last_clicked_at = row.get("last_clicked_at")
+        output.append(
+            {
+                "category_id": row.get("category_id"),
+                "category_title": row.get("category_title"),
+                "prompt_text": str(row.get("prompt_text") or ""),
+                "click_count": int(row.get("click_count") or 0),
+                "last_clicked_at": last_clicked_at.isoformat() if isinstance(last_clicked_at, datetime) else str(last_clicked_at),
+            }
+        )
+    return output
