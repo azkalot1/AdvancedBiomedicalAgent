@@ -11,13 +11,13 @@ Modes:
     - molecules_by_condition: find molecules associated with a condition
     - trials_by_target: find trials linked to a target gene
     - trials_by_structure: find trials for molecules similar to a SMILES
-    - trials_by_substructure: find trials for molecules containing a substructure
+    - trials_by_substructure: reserved (substructure search disabled in pgvector mode)
 
 Data Sources:
     - map_ctgov_molecules
     - dm_molecule / dm_molecule_concept / dm_molecule_synonyms
     - rag_study_search
-    - compound_structures (for RDKit searches)
+    - dm_molecule.mfp2_vec (for pgvector similarity search)
 """
 
 from __future__ import annotations
@@ -38,6 +38,9 @@ from bioagent.data.search.clinical_trial_search import render_study_text_full
 from rich.console import Console
 from rich.panel import Panel
 from rich.tree import Tree
+
+MORGAN_FP_BITS = 1024
+MORGAN_FP_RADIUS = 2
 
 
 def _sanitize_tsquery(text: str) -> str:
@@ -162,7 +165,7 @@ async def _validate_and_canonicalize_smiles(
     smiles: str,
 ) -> SmilesValidationResult:
     """
-    Validate and canonicalize SMILES using PostgreSQL RDKit cartridge.
+    Validate and canonicalize SMILES using Python RDKit.
     
     This function:
     1. Preprocesses the input string (removes prefixes, quotes, etc.)
@@ -171,7 +174,7 @@ async def _validate_and_canonicalize_smiles(
     4. Returns detailed error information if invalid
     
     Args:
-        async_config: Database connection
+        async_config: Database connection (unused, kept for compatibility)
         smiles: Input SMILES string
         
     Returns:
@@ -194,17 +197,12 @@ async def _validate_and_canonicalize_smiles(
         )
     
     # Step 3: RDKit validation and canonicalization
-    # We use multiple queries to get detailed error information
     try:
-        # First, try to parse the molecule
-        parse_sql = """
-            SELECT 
-                mol_from_smiles($1::cstring) IS NOT NULL AS is_valid
-        """
-        rows = await async_config.execute_query(parse_sql, cleaned_smiles)
-        
-        if not rows or not rows[0]["is_valid"]:
-            # Molecule failed to parse - try to get more details
+        from rdkit import Chem
+        from rdkit.Chem import Descriptors
+
+        mol = Chem.MolFromSmiles(cleaned_smiles)
+        if mol is None:
             return SmilesValidationResult(
                 is_valid=False,
                 original_smiles=original_smiles,
@@ -212,69 +210,35 @@ async def _validate_and_canonicalize_smiles(
                 error_type="parse_error",
                 warnings=preprocess_warnings,
             )
-        
-        # Molecule parsed successfully - get canonical form and properties
-        canonical_sql = """
-            SELECT 
-                mol_to_smiles(mol_from_smiles($1::cstring)) AS canonical_smiles,
-                mol_formula(mol_from_smiles($1::cstring)) AS formula,
-                mol_amw(mol_from_smiles($1::cstring)) AS mol_weight,
-                mol_numheavyatoms(mol_from_smiles($1::cstring)) AS heavy_atoms
-        """
-        rows = await async_config.execute_query(canonical_sql, cleaned_smiles)
-        
-        if rows and rows[0]["canonical_smiles"]:
-            canonical = rows[0]["canonical_smiles"]
-            
-            # Add info warnings if structure looks unusual
-            mol_weight = rows[0].get("mol_weight")
-            heavy_atoms = rows[0].get("heavy_atoms")
-            
-            if mol_weight and mol_weight > 2000:
-                preprocess_warnings.append(f"Large molecule detected (MW: {mol_weight:.1f})")
-            
-            if heavy_atoms and heavy_atoms < 3:
-                preprocess_warnings.append(f"Very small molecule ({heavy_atoms} heavy atoms)")
-            
-            # Check if canonical differs significantly from input
-            if canonical != cleaned_smiles:
-                preprocess_warnings.append("SMILES was canonicalized (this is normal)")
-            
-            return SmilesValidationResult(
-                is_valid=True,
-                canonical_smiles=canonical,
-                original_smiles=original_smiles,
-                warnings=preprocess_warnings,
-            )
-        else:
-            return SmilesValidationResult(
-                is_valid=False,
-                original_smiles=original_smiles,
-                error_message="RDKit could not canonicalize the molecule",
-                error_type="canonicalization_error",
-                warnings=preprocess_warnings,
-            )
+
+        canonical = Chem.MolToSmiles(mol)
+        mol_weight = float(Descriptors.MolWt(mol))
+        heavy_atoms = int(mol.GetNumHeavyAtoms())
+
+        if mol_weight > 2000:
+            preprocess_warnings.append(f"Large molecule detected (MW: {mol_weight:.1f})")
+
+        if heavy_atoms < 3:
+            preprocess_warnings.append(f"Very small molecule ({heavy_atoms} heavy atoms)")
+
+        if canonical != cleaned_smiles:
+            preprocess_warnings.append("SMILES was canonicalized (this is normal)")
+
+        return SmilesValidationResult(
+            is_valid=True,
+            canonical_smiles=canonical,
+            original_smiles=original_smiles,
+            warnings=preprocess_warnings,
+        )
             
     except Exception as e:
-        error_str = str(e).lower()
-        
-        # Parse PostgreSQL/RDKit error messages for user-friendly output
-        if "mol_from_smiles" in error_str or "cstring" in error_str:
-            return SmilesValidationResult(
-                is_valid=False,
-                original_smiles=original_smiles,
-                error_message=_generate_detailed_smiles_error(cleaned_smiles, str(e)),
-                error_type="rdkit_error",
-                warnings=preprocess_warnings,
-            )
-        else:
-            return SmilesValidationResult(
-                is_valid=False,
-                original_smiles=original_smiles,
-                error_message=f"Database error during validation: {e}",
-                error_type="database_error",
-                warnings=preprocess_warnings,
-            )
+        return SmilesValidationResult(
+            is_valid=False,
+            original_smiles=original_smiles,
+            error_message=f"RDKit error during validation: {e}",
+            error_type="rdkit_error",
+            warnings=preprocess_warnings,
+        )
 
 
 def _generate_detailed_smiles_error(smiles: str, rdkit_error: str | None = None) -> str:
@@ -353,112 +317,6 @@ def _generate_detailed_smiles_error(smiles: str, rdkit_error: str | None = None)
         )
 
 
-async def _validate_smarts_pattern(
-    async_config: AsyncDatabaseConfig,
-    smarts: str,
-) -> SmilesValidationResult:
-    """
-    Validate a SMARTS pattern using PostgreSQL RDKit cartridge.
-    
-    SMARTS is more permissive than SMILES, so validation is different.
-    """
-    original = smarts
-    warnings = []
-    
-    # Basic preprocessing
-    smarts = smarts.strip()
-    
-    # Remove common prefixes
-    for prefix in ["SMARTS:", "smarts:", "SMARTS=", "smarts="]:
-        if smarts.startswith(prefix):
-            smarts = smarts[len(prefix):].strip()
-            warnings.append(f"Removed prefix '{prefix.strip()}'")
-            break
-    
-    if not smarts:
-        return SmilesValidationResult(
-            is_valid=False,
-            original_smiles=original,
-            error_message="Empty SMARTS pattern",
-            error_type="empty",
-            warnings=warnings,
-        )
-    
-    # Check bracket balance
-    if smarts.count('[') != smarts.count(']'):
-        return SmilesValidationResult(
-            is_valid=False,
-            original_smiles=original,
-            error_message=f"Unbalanced brackets in SMARTS: {smarts.count('[')} '[' vs {smarts.count(']')} ']'",
-            error_type="syntax",
-            warnings=warnings,
-        )
-    
-    # Validate with RDKit
-    try:
-        sql = """
-            SELECT qmol_from_smarts($1::cstring) IS NOT NULL AS is_valid
-        """
-        rows = await async_config.execute_query(sql, smarts)
-        
-        if rows and rows[0]["is_valid"]:
-            return SmilesValidationResult(
-                is_valid=True,
-                canonical_smiles=smarts,  # SMARTS doesn't have a canonical form
-                original_smiles=original,
-                warnings=warnings,
-            )
-        else:
-            return SmilesValidationResult(
-                is_valid=False,
-                original_smiles=original,
-                error_message=_generate_detailed_smarts_error(smarts),
-                error_type="parse_error",
-                warnings=warnings,
-            )
-            
-    except Exception as e:
-        return SmilesValidationResult(
-            is_valid=False,
-            original_smiles=original,
-            error_message=f"SMARTS validation failed: {e}",
-            error_type="rdkit_error",
-            warnings=warnings,
-        )
-
-
-def _generate_detailed_smarts_error(smarts: str) -> str:
-    """Generate detailed error message for invalid SMARTS."""
-    issues = []
-    
-    # Check for common SMARTS issues
-    
-    # 1. Invalid atom queries
-    invalid_queries = re.findall(r'\[([^\]]+)\]', smarts)
-    for query in invalid_queries:
-        if query.startswith('!') and len(query) == 1:
-            issues.append("Empty negation '!' in atom query")
-        if '&' in query and query.endswith('&'):
-            issues.append("Incomplete AND expression in atom query")
-        if ',' in query and query.endswith(','):
-            issues.append("Incomplete OR expression in atom query")
-    
-    # 2. Recursive SMARTS issues
-    if '$(' in smarts:
-        if smarts.count('$(') != smarts.count(')'):
-            issues.append("Unbalanced recursive SMARTS $(...)")
-    
-    if issues:
-        return f"Invalid SMARTS pattern. Issues: {'; '.join(issues)}"
-    else:
-        return (
-            "Invalid SMARTS pattern. Please verify: "
-            "1) Atom queries are valid [#6], [C,N], etc. "
-            "2) Logical operators &, |, ! are used correctly "
-            "3) Recursive SMARTS $(...) are balanced"
-        )
-
-
 # =============================================================================
 # Input Model
 # =============================================================================
@@ -482,7 +340,6 @@ class MoleculeTrialSearchInput(BaseModel):
     
     # Structure-based inputs
     smiles: str | None = None
-    smarts: str | None = None
     similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     
     # Filters
@@ -521,7 +378,6 @@ class MoleculeTrialSearchInput(BaseModel):
         "target_gene",
         "condition",
         "smiles",
-        "smarts",
         "sequence",
         mode="before",
     )
@@ -547,8 +403,8 @@ class MoleculeTrialSearchInput(BaseModel):
             if not self.smiles:
                 errors.append("'smiles' is required for structure similarity search")
         elif self.mode == "trials_by_substructure":
-            if not self.smiles and not self.smarts:
-                errors.append("'smiles' or 'smarts' is required for substructure search")
+            if not self.smiles:
+                errors.append("'smiles' is required for substructure search")
         elif self.mode == "trials_by_sequence":
             if not self.sequence:
                 errors.append("'sequence' is required for sequence search")
@@ -1150,12 +1006,22 @@ async def _find_similar_molecules_with_trials(
     limit: int,
 ) -> list[dict[str, Any]]:
     """Find molecules similar to query SMILES that have clinical trial associations."""
-    
+
+    from rdkit import Chem
+    from rdkit.Chem import rdFingerprintGenerator
+
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return []
+
+    fp_generator = rdFingerprintGenerator.GetMorganGenerator(radius=MORGAN_FP_RADIUS, fpSize=MORGAN_FP_BITS)
+    fp = fp_generator.GetFingerprint(mol)
+    query_vec = [0.0] * MORGAN_FP_BITS
+    for idx in fp.GetOnBits():
+        query_vec[idx] = 1.0
+
     sql = """
-        WITH query_fp AS (
-            SELECT morganbv_fp(mol_from_smiles($1::cstring)) AS fp
-        ),
-        similar_mols AS (
+        WITH similar_mols AS (
             SELECT 
                 dm.mol_id,
                 dm.concept_id,
@@ -1163,83 +1029,57 @@ async def _find_similar_molecules_with_trials(
                 dm.canonical_smiles,
                 dm.chembl_id,
                 dm.inchi_key,
-                tanimoto_sml(q.fp, dm.mfp2)::float AS similarity
+                (1 - (dm.mfp2_vec <=> $1::vector))::float AS cosine_sim
             FROM dm_molecule dm
-            CROSS JOIN query_fp q
-            WHERE dm.mfp2 % q.fp
-              AND tanimoto_sml(q.fp, dm.mfp2) >= $2
-            ORDER BY similarity DESC
+            WHERE dm.mfp2_vec IS NOT NULL
+            ORDER BY dm.mfp2_vec <=> $1::vector
             LIMIT 500
         ),
+        with_tanimoto AS (
+            SELECT
+                *,
+                CASE
+                    WHEN cosine_sim <= 0 THEN 0.0
+                    ELSE (cosine_sim * cosine_sim) / (2.0 - cosine_sim * cosine_sim)
+                END::float AS similarity
+            FROM similar_mols
+        ),
+        filtered AS (
+            SELECT *
+            FROM with_tanimoto
+            WHERE similarity >= $2
+        ),
         mols_with_trials AS (
-            SELECT DISTINCT sm.concept_id
-            FROM similar_mols sm
-            JOIN map_ctgov_molecules map ON map.concept_id = sm.concept_id
+            SELECT DISTINCT f.concept_id
+            FROM filtered f
+            JOIN map_ctgov_molecules map ON map.concept_id = f.concept_id
         )
-        SELECT DISTINCT ON (sm.concept_id)
-            sm.mol_id,
-            sm.concept_id,
-            COALESCE(mc.preferred_name, sm.molecule_name) AS concept_name,
-            sm.canonical_smiles,
-            sm.chembl_id,
-            sm.inchi_key,
-            sm.similarity
-        FROM similar_mols sm
-        JOIN mols_with_trials mwt ON sm.concept_id = mwt.concept_id
-        LEFT JOIN dm_molecule_concept mc ON sm.concept_id = mc.concept_id
-        ORDER BY sm.concept_id, sm.similarity DESC
+        SELECT DISTINCT ON (f.concept_id)
+            f.mol_id,
+            f.concept_id,
+            COALESCE(mc.preferred_name, f.molecule_name) AS concept_name,
+            f.canonical_smiles,
+            f.chembl_id,
+            f.inchi_key,
+            f.similarity
+        FROM filtered f
+        JOIN mols_with_trials mwt ON f.concept_id = mwt.concept_id
+        LEFT JOIN dm_molecule_concept mc ON f.concept_id = mc.concept_id
+        ORDER BY f.concept_id, f.similarity DESC
         LIMIT $3
     """
-    
-    return await async_config.execute_query(sql, smiles, similarity_threshold, limit)
+
+    return await async_config.execute_query(sql, query_vec, similarity_threshold, limit)
 
 
 async def _find_substructure_molecules_with_trials(
     async_config: AsyncDatabaseConfig,
     pattern: str,
-    is_smarts: bool,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Find molecules containing substructure that have clinical trial associations."""
-    
-    if is_smarts:
-        match_clause = "dm.mol @> qmol_from_smarts($1::cstring)"
-    else:
-        match_clause = "dm.mol @> mol_from_smiles($1::cstring)"
-    
-    sql = f"""
-        WITH matching_mols AS (
-            SELECT 
-                dm.mol_id,
-                dm.concept_id,
-                dm.pref_name AS molecule_name,
-                dm.canonical_smiles,
-                dm.chembl_id,
-                dm.inchi_key
-            FROM dm_molecule dm
-            WHERE {match_clause}
-            LIMIT 1000
-        ),
-        mols_with_trials AS (
-            SELECT DISTINCT mm.concept_id
-            FROM matching_mols mm
-            JOIN map_ctgov_molecules map ON map.concept_id = mm.concept_id
-        )
-        SELECT DISTINCT ON (mm.concept_id)
-            mm.mol_id,
-            mm.concept_id,
-            COALESCE(mc.preferred_name, mm.molecule_name) AS concept_name,
-            mm.canonical_smiles,
-            mm.chembl_id,
-            mm.inchi_key
-        FROM matching_mols mm
-        JOIN mols_with_trials mwt ON mm.concept_id = mwt.concept_id
-        LEFT JOIN dm_molecule_concept mc ON mm.concept_id = mc.concept_id
-        ORDER BY mm.concept_id, mm.mol_id
-        LIMIT $2
-    """
-    
-    return await async_config.execute_query(sql, pattern, limit)
+    """Substructure search is disabled in pgvector mode."""
+    _ = (async_config, pattern, limit)
+    return []
 
 
 async def _get_trials_for_concepts(
@@ -1354,11 +1194,10 @@ async def _get_semantic_condition_terms(
 def _build_structure_error_response(
     mode: str,
     validation_result: SmilesValidationResult,
-    is_smarts: bool = False,
 ) -> MoleculeTrialSearchOutput:
     """Build a detailed error response for invalid structure input."""
-    
-    structure_type = "SMARTS" if is_smarts else "SMILES"
+
+    structure_type = "SMILES"
     original = validation_result.original_smiles or ""
     display = original[:50] + "..." if len(original) > 50 else original
     
@@ -1378,11 +1217,8 @@ def _build_structure_error_response(
         ])
     elif validation_result.error_type == "empty":
         suggestions.append("Provide a non-empty structure string")
-    
-    if is_smarts:
-        suggestions.append("SMARTS reference: https://www.daylight.com/dayhtml/doc/theory/theory.smarts.html")
-    else:
-        suggestions.append("SMILES reference: https://www.daylight.com/dayhtml/doc/theory/theory.smiles.html")
+
+    suggestions.append("SMILES reference: https://www.daylight.com/dayhtml/doc/theory/theory.smiles.html")
     
     return MoleculeTrialSearchOutput(
         status="invalid_structure",
@@ -1904,9 +1740,7 @@ async def molecule_trial_search_async(
             validation = await _validate_and_canonicalize_smiles(async_config, smiles)
             
             if not validation.is_valid:
-                return _build_structure_error_response(
-                    search_input.mode, validation, is_smarts=False
-                )
+                return _build_structure_error_response(search_input.mode, validation)
             
             canonical_smiles = validation.canonical_smiles
             
@@ -2017,111 +1851,25 @@ async def molecule_trial_search_async(
                     status="invalid_input",
                     mode=search_input.mode,
                     error="molecule_type='biotherapeutic' is not supported for substructure trials",
-                    query_summary=search_input.smiles or search_input.smarts or "",
+                    query_summary=search_input.smiles or "",
                     suggestions=["Use trials_by_sequence for biologics."],
                 )
-            is_smarts = search_input.smarts is not None
-            pattern = search_input.smarts if is_smarts else search_input.smiles
-            
-            # Validate structure
-            if is_smarts:
-                validation = await _validate_smarts_pattern(async_config, pattern)
-            else:
-                validation = await _validate_and_canonicalize_smiles(async_config, pattern)
-            
+
+            pattern = search_input.smiles or ""
+            validation = await _validate_and_canonicalize_smiles(async_config, pattern)
             if not validation.is_valid:
-                return _build_structure_error_response(
-                    search_input.mode, validation, is_smarts=is_smarts
-                )
-            
-            # Use canonical form for search
-            search_pattern = validation.canonical_smiles or pattern
-            
-            # Find molecules containing substructure with trial associations
-            mol_rows = await _find_substructure_molecules_with_trials(
-                async_config,
-                search_pattern,
-                is_smarts,
-                limit=100,
-            )
-            
-            if not mol_rows:
-                pattern_display = pattern[:30] + "..." if len(pattern) > 30 else pattern
-                pattern_type = "SMARTS" if is_smarts else "SMILES"
-                return MoleculeTrialSearchOutput(
-                    status="not_found",
-                    mode=search_input.mode,
-                    query_summary=f"substructure '{pattern_display}'",
-                    warnings=[
-                        f"No molecules with trial associations contain this substructure",
-                    ] + validation.warnings,
-                    suggestions=[
-                        "Try a simpler or more common substructure pattern",
-                        "SMARTS patterns are more flexible than SMILES for substructure search",
-                        f"Example SMARTS: 'c1ccccc1' (benzene), 'C(=O)N' (amide)",
-                    ],
-                    structure_info=StructureValidationInfo(
-                        original_input=pattern,
-                        canonical_smiles=validation.canonical_smiles,
-                        was_modified=bool(validation.warnings),
-                        preprocessing_notes=validation.warnings,
-                    ),
-                )
-            
-            # Get trial details
-            concept_ids = [r["concept_id"] for r in mol_rows if r.get("concept_id")]
-            
-            trial_rows = await _get_trials_for_concepts(
-                async_config,
-                concept_ids,
-                search_input.phase,
-                search_input.status,
-                search_input.limit,
-                search_input.offset,
-                search_input,
-            )
-            
-            # Count trials per molecule
-            trial_counts: dict[int, int] = {}
-            for row in trial_rows:
-                cid = row.get("concept_id")
-                if cid:
-                    trial_counts[cid] = trial_counts.get(cid, 0) + 1
-            
-            # Build hits
-            hits = [
-                _row_to_trial_by_molecule_hit(
-                    row,
-                    search_input.include_study_details,
-                    extra={"structure_match_type": "substructure"},
-                )
-                for row in trial_rows
-            ]
-            
-            # Build matched molecules summary
-            matched_molecules = [
-                StructureMatchedMolecule(
-                    concept_id=r["concept_id"],
-                    concept_name=r.get("concept_name"),
-                    chembl_id=r.get("chembl_id"),
-                    canonical_smiles=r.get("canonical_smiles"),
-                    n_trials=trial_counts.get(r["concept_id"], 0),
-                )
-                for r in mol_rows
-                if r.get("concept_id") in trial_counts
-            ]
-            
+                return _build_structure_error_response(search_input.mode, validation)
+
             pattern_display = pattern[:30] + "..." if len(pattern) > 30 else pattern
-            pattern_type = "SMARTS" if is_smarts else "SMILES"
-            
             return MoleculeTrialSearchOutput(
-                status="success" if hits else "not_found",
+                status="invalid_input",
                 mode=search_input.mode,
-                total_hits=len(hits),
-                hits=hits,
-                matched_molecules=matched_molecules[:20],
-                query_summary=f"{pattern_type} '{pattern_display}' ({len(matched_molecules)} molecules)",
-                warnings=validation.warnings if validation.warnings else [],
+                query_summary=f"substructure '{pattern_display}'",
+                error="Substructure search is not available without PostgreSQL RDKit cartridge operators.",
+                warnings=validation.warnings,
+                suggestions=[
+                    "Use trials_by_structure for nearest-neighbor structural matches",
+                ],
                 structure_info=StructureValidationInfo(
                     original_input=pattern,
                     canonical_smiles=validation.canonical_smiles,

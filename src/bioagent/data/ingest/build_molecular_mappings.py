@@ -209,6 +209,7 @@ def get_source_counts(config: DatabaseConfig) -> Dict[str, int]:
 CREATE_EXTENSIONS_SQL = """
 CREATE EXTENSION IF NOT EXISTS rdkit;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS vector;
 """
 
 CREATE_AUDIT_TABLE_SQL = """
@@ -353,6 +354,7 @@ CREATE TABLE IF NOT EXISTS dm_molecule (
     -- Fingerprints for similarity search
     mfp2 bfp,
     ffp2 bfp,
+    mfp2_vec vector(1024),
     
     -- Provenance
     sources TEXT[],
@@ -373,6 +375,9 @@ CREATE INDEX IF NOT EXISTS idx_dm_mol_salt ON dm_molecule(is_salt);
 CREATE INDEX IF NOT EXISTS idx_dm_mol_mfp2 ON dm_molecule USING gist(mfp2);
 CREATE INDEX IF NOT EXISTS idx_dm_mol_ffp2 ON dm_molecule USING gist(ffp2);
 CREATE INDEX IF NOT EXISTS idx_dm_mol_mol ON dm_molecule USING gist(mol);
+CREATE INDEX IF NOT EXISTS idx_dm_mol_mfp2_vec
+ON dm_molecule USING hnsw (mfp2_vec vector_cosine_ops)
+WITH (m = 16, ef_construction = 128);
 
 
 -- ============================================================================
@@ -1220,13 +1225,40 @@ def populate_molecules(config: DatabaseConfig, source_counts: Optional[Dict[str,
             salt_fixed = cur.rowcount
             print(f"     ✓ Salt parent keys fixed: {salt_fixed:,}")
             con.commit()
+
+            # --- 1.5 Build pgvector fingerprints (1024 dims) ---
+            print("  🧬 Building mfp2_vec fingerprints (1024 dims)...")
+            cur.execute("""
+                UPDATE dm_molecule dm
+                SET mfp2_vec = v.vec
+                FROM LATERAL (
+                    WITH fp AS (
+                        SELECT morganbv_fp(
+                            mol_from_smiles(get_largest_fragment_smiles(dm.canonical_smiles)::cstring),
+                            2,
+                            1024
+                        ) AS bfp
+                    )
+                    SELECT array_agg(
+                        CASE WHEN get_bit(bfp_to_binary_text(fp.bfp), i) = 1 THEN 1.0 ELSE 0.0 END
+                        ORDER BY i
+                    )::vector(1024) AS vec
+                    FROM fp, generate_series(0, 1023) AS i
+                ) v
+                WHERE dm.canonical_smiles IS NOT NULL
+                  AND dm.mfp2_vec IS NULL;
+            """)
+            mfp2_vec_count = cur.rowcount
+            print(f"     ✓ mfp2_vec populated: {mfp2_vec_count:,}")
+            con.commit()
             
             # Get total count and stats
             cur.execute("""
                 SELECT 
                     COUNT(*) as total,
                     COUNT(DISTINCT parent_inchi_key_14) as unique_concepts,
-                    SUM(CASE WHEN is_salt THEN 1 ELSE 0 END) as salts
+                    SUM(CASE WHEN is_salt THEN 1 ELSE 0 END) as salts,
+                    SUM(CASE WHEN mfp2_vec IS NOT NULL THEN 1 ELSE 0 END) as with_mfp2_vec
                 FROM dm_molecule
             """)
             stats = cur.fetchone()
@@ -1234,6 +1266,7 @@ def populate_molecules(config: DatabaseConfig, source_counts: Optional[Dict[str,
             print(f"     Total molecules: {stats[0]:,}")
             print(f"     Unique concepts (parent_inchi_key_14): {stats[1]:,}")
             print(f"     Salt forms: {stats[2]:,}")
+            print(f"     With mfp2_vec (1024): {stats[3]:,}")
             
             return stats[0]
 

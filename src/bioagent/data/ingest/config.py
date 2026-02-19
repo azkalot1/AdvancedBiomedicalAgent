@@ -4,6 +4,7 @@ Database configuration for data ingestion.
 Modify these settings to match your PostgreSQL setup.
 """
 import os
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
@@ -11,8 +12,21 @@ import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 
-# Load environment variables from .env file at module import
-load_dotenv()
+DATA_POSTGRES_URI_ENV_KEYS = ("DATA_POSTGRES_URI", "DATA_POSTGRES_URL", "DATA_DATABASE_URL")
+
+
+def _load_repo_env() -> None:
+    """Load nearest .env from this file's parent tree (repo root preferred)."""
+    for parent in Path(__file__).resolve().parents:
+        env_path = parent / ".env"
+        if env_path.exists():
+            load_dotenv(dotenv_path=env_path, override=False)
+            return
+    load_dotenv(override=False)
+
+
+# Load environment variables from .env file at module import.
+_load_repo_env()
 
 
 class DatabaseConfig:
@@ -52,24 +66,34 @@ def _legacy_uri_from_parts() -> str:
 
 def resolve_data_postgres_uri() -> str:
     """Resolve ingestion DB URI from env, preferring DATA_POSTGRES_URI."""
-    return (
-        os.getenv("DATA_POSTGRES_URI")
-        or os.getenv("DATA_DATABASE_URL")
-        or _legacy_uri_from_parts()
-    ).strip()
+    for key in DATA_POSTGRES_URI_ENV_KEYS:
+        value = (os.getenv(key) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def parse_data_postgres_uri(uri: str) -> DatabaseConfig:
     """Parse a PostgreSQL URI into DatabaseConfig."""
+    if not uri:
+        raise ValueError("Empty DATA_POSTGRES_URI")
     parsed = urlparse(uri)
     if parsed.scheme not in {"postgres", "postgresql"}:
         raise ValueError("Unsupported DB URI scheme. Use postgres:// or postgresql://")
+    if not parsed.hostname:
+        raise ValueError("DATA_POSTGRES_URI missing host")
+    if parsed.username is None:
+        raise ValueError("DATA_POSTGRES_URI missing username")
+    if parsed.password is None:
+        raise ValueError("DATA_POSTGRES_URI missing password")
+    if not parsed.path or parsed.path == "/":
+        raise ValueError("DATA_POSTGRES_URI missing database name")
 
-    host = parsed.hostname or "localhost"
+    host = parsed.hostname
     port = parsed.port or 5432
-    database = (parsed.path or "/database").lstrip("/") or "database"
-    user = unquote(parsed.username or "database_user")
-    password = unquote(parsed.password or "database_password")
+    database = parsed.path.lstrip("/")
+    user = unquote(parsed.username)
+    password = unquote(parsed.password)
 
     return DatabaseConfig(
         host=host,
@@ -91,20 +115,32 @@ def load_config_from_env() -> DatabaseConfig:
         DatabaseConfig instance with environment variable values
     """
     uri = resolve_data_postgres_uri()
-    try:
+    if uri:
         return parse_data_postgres_uri(uri)
-    except Exception:
-        return DatabaseConfig(
-            host=os.getenv("DB_HOST", "localhost"),
-            port=int(os.getenv("DB_PORT", "5432")),
-            database=os.getenv("DB_NAME", "database"),
-            user=os.getenv("DB_USER", "database_user"),
-            password=os.getenv("DB_PASSWORD", "database_password")
-        )
+    return DatabaseConfig(
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "5432")),
+        database=os.getenv("DB_NAME", "database"),
+        user=os.getenv("DB_USER", "database_user"),
+        password=os.getenv("DB_PASSWORD", "database_password")
+    )
+
+
+def _sync_legacy_db_env(config: DatabaseConfig) -> None:
+    """
+    Populate legacy DB_* keys for modules that still reference them.
+    DATA_POSTGRES_URI remains the source of truth.
+    """
+    os.environ.setdefault("DB_HOST", config.host)
+    os.environ.setdefault("DB_PORT", str(config.port))
+    os.environ.setdefault("DB_NAME", config.database)
+    os.environ.setdefault("DB_USER", config.user)
+    os.environ.setdefault("DB_PASSWORD", config.password)
 
 
 # Default database configuration - reads from DATA_POSTGRES_URI with legacy fallbacks.
 DEFAULT_CONFIG = load_config_from_env()
+_sync_legacy_db_env(DEFAULT_CONFIG)
 
 
 def get_connection(config: DatabaseConfig) -> psycopg2.extensions.connection:

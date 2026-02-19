@@ -981,22 +981,17 @@ async def search_substructure(
     detail_level: str = "standard",
 ) -> str:
     """
-    Find molecules containing a specific substructure.
-    
-    Use SMILES or SMARTS patterns to find compounds with specific 
-    chemical features (e.g., a particular ring system, functional group).
-    
-    Note: This search can be slow for very common substructures (e.g., benzene).
+    Substructure search endpoint (SMILES input only).
     
     Args:
-        pattern: SMILES or SMARTS pattern to search for.
+        pattern: SMILES pattern to search for.
         limit: Maximum results (default: 50, max: 500).
     
     Returns:
-        List of molecules containing the substructure.
+        Backend result; in pgvector mode this endpoint returns unsupported.
     """
     if not pattern or not pattern.strip():
-        return "✗ Input error: pattern is required. Provide a SMILES or SMARTS pattern."
+        return "✗ Input error: pattern is required. Provide a SMILES pattern."
     
     pattern = pattern.strip()
     
@@ -1011,7 +1006,7 @@ async def search_substructure(
     try:
         search_input = TargetSearchInput(
             mode=SearchMode.SUBSTRUCTURE,
-            smarts=pattern,
+            smiles=pattern,
             limit=limit,
         )
         
@@ -1028,9 +1023,8 @@ async def search_substructure(
             f"✗ Error in substructure search: {type(e).__name__}: {e}\n\n"
             f"Input pattern: {pattern}\n\n"
             "Suggestions:\n"
-            "  → Check SMILES/SMARTS syntax\n"
-            "  → Very common substructures (benzene) may timeout\n"
-            "  → Try a more specific pattern"
+            "  → Check SMILES syntax\n"
+            "  → Use search_similar_molecules for approximate structural lookup"
         )
 
 
@@ -2041,7 +2035,6 @@ async def pharmacology_search(
             mode=mode,
             query=query_value,
             smiles=smiles,
-            smarts=smiles if mode == SearchMode.SUBSTRUCTURE else None,
             similarity_threshold=float(similarity_threshold),
             min_pchembl=float(min_pchembl),
             data_source=ds,

@@ -692,7 +692,7 @@ class SearchToolTester:
                 DEFAULT_CONFIG,
                 TargetSearchInput(
                     mode=SearchMode.SUBSTRUCTURE,
-                    smarts=TEST_SMILES["indole"],
+                    smiles=TEST_SMILES["indole"],
                     limit=20,
                 ),
             ),
