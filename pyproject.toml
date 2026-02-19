@@ -19,11 +19,12 @@ dependencies = [
   "langchain_google_genai",
   "langchain_community",
   "langgraph",
+  "aegra-cli",
   "langgraph-checkpoint-sqlite",
   "langgraph-checkpoint-postgres",
   # Database
   "psycopg2-binary",  # PostgreSQL adapter
-  "asyncpg",          # Async PostgreSQL adapter
+  "asyncpg>=0.29.0",  # Async PostgreSQL adapter
   "pgvector",         # PostgreSQL vector extension
   # Data processing
   "pandas",

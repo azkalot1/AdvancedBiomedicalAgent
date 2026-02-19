@@ -197,16 +197,6 @@ def _auth_user_id(request: Request) -> str:
     )
 
 
-def _get_store(request: Request) -> Any | None:
-    request_state = getattr(request, "state", None)
-    app_state = getattr(request.app, "state", None)
-    return (
-        getattr(request_state, "store", None)
-        or getattr(app_state, "store", None)
-        or getattr(app_state, "langgraph_store", None)
-    )
-
-
 def _as_report_metadata(item: dict[str, Any]) -> ReportMetadata:
     return ReportMetadata.model_validate(item)
 
@@ -322,7 +312,7 @@ def create_webapp() -> FastAPI:
         request_id = request.headers.get("X-Request-ID") or str(uuid4())
         request.state.request_id = request_id
 
-        public_paths = {"/ok", "/v1/ok", "/docs", "/openapi.json", "/redoc"}
+        public_paths = {"/ok", "/v1/ok", "/health", "/ready", "/live", "/docs", "/openapi.json", "/redoc"}
         settings: AuthSettings = request.app.state.auth_settings
 
         if request.url.path in public_paths:
@@ -403,6 +393,18 @@ def create_webapp() -> FastAPI:
     async def ok_v1() -> HealthResponse:
         return HealthResponse()
 
+    @app.get("/health", response_model=HealthResponse, tags=["system"])
+    async def health() -> HealthResponse:
+        return HealthResponse()
+
+    @app.get("/ready", response_model=HealthResponse, tags=["system"])
+    async def ready() -> HealthResponse:
+        return HealthResponse()
+
+    @app.get("/live", response_model=HealthResponse, tags=["system"])
+    async def live() -> HealthResponse:
+        return HealthResponse()
+
     @app.get("/v1/me", response_model=MeResponse, tags=["auth"])
     async def me(request: Request) -> MeResponse:
         settings: AuthSettings = request.app.state.auth_settings
@@ -464,7 +466,6 @@ def create_webapp() -> FastAPI:
         raw_items = await list_reports(
             user_id=user_id,
             thread_id=thread_id,
-            store=_get_store(request),
             limit=fetch_cap,
         )
 
@@ -486,7 +487,6 @@ def create_webapp() -> FastAPI:
         report = await get_report(
             user_id=user_id,
             report_id=safe_report_id,
-            store=_get_store(request),
         )
         if not report:
             raise ApiError(
@@ -508,7 +508,6 @@ def create_webapp() -> FastAPI:
         report = await get_report(
             user_id=user_id,
             report_id=safe_report_id,
-            store=_get_store(request),
         )
         if not report:
             raise ApiError(
@@ -520,7 +519,6 @@ def create_webapp() -> FastAPI:
         content = await get_report_content(
             user_id=user_id,
             report_id=safe_report_id,
-            store=_get_store(request),
         )
         if content is None:
             raise ApiError(
@@ -557,7 +555,6 @@ def create_webapp() -> FastAPI:
         deleted = await delete_report(
             user_id=user_id,
             report_id=safe_report_id,
-            store=_get_store(request),
         )
         if not deleted:
             raise ApiError(
@@ -584,7 +581,6 @@ def create_webapp() -> FastAPI:
         reports = await list_reports(
             user_id=auth_user,
             thread_id=thread_id,
-            store=_get_store(request),
         )
         return reports
 
@@ -601,7 +597,6 @@ def create_webapp() -> FastAPI:
         report = await get_report(
             user_id=auth_user,
             report_id=safe_report_id,
-            store=_get_store(request),
         )
         if not report:
             raise ApiError(
@@ -625,7 +620,6 @@ def create_webapp() -> FastAPI:
         report = await get_report(
             user_id=auth_user,
             report_id=safe_report_id,
-            store=_get_store(request),
         )
         if not report:
             raise ApiError(
@@ -636,7 +630,6 @@ def create_webapp() -> FastAPI:
         content = await get_report_content(
             user_id=auth_user,
             report_id=safe_report_id,
-            store=_get_store(request),
         )
         if content is None:
             raise ApiError(
@@ -663,7 +656,6 @@ def create_webapp() -> FastAPI:
         deleted = await delete_report(
             user_id=auth_user,
             report_id=safe_report_id,
-            store=_get_store(request),
         )
         if not deleted:
             raise ApiError(

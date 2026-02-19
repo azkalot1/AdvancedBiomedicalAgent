@@ -2,10 +2,10 @@
 """
 Terminal chat with the biomedical agent.
 
-Uses the LangGraph Server backend and streams responses in the terminal.
+Uses the Aegra backend and streams responses in the terminal.
 
 Usage:
-  python scripts/chat_agent.py --server-url http://localhost:2024 --user-id alice
+  python scripts/chat_agent.py --server-url http://localhost:8000 --user-id alice
   # or: biomedagent-db chat [options]
 
 Commands in the REPL:

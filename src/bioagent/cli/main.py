@@ -15,14 +15,14 @@ def show_help() -> None:
     print("=" * 40)
     print()
     print("Database Setup Commands:")
-    print("  setup_postgres           - Run full PostgreSQL setup")
+    print("  setup_postgres           - Run full PostgreSQL setup (.env DATA_POSTGRES_URI)")
     print("  info                     - Show database information")
     print("  reset                    - Reset database (with confirmation)")
     print("  reset --force            - Reset database (no confirmation)")
     print("  vacuum                   - Vacuum database")
     print("  tables                   - List all tables")
     print("  verify-deps              - Verify Python dependencies are installed")
-    print("  chat                     - Start CLI chat client (LangGraph Server)")
+    print("  chat                     - Start CLI chat client (Aegra server)")
     print()
     print("Data Ingestion Commands:")
     print("  ingest                   - Run full data ingestion pipeline")
@@ -111,7 +111,7 @@ def show_help() -> None:
     print("  biomedagent-db ingest --generate-search   # full-text indexes on raw CT.gov tables")
     print("  biomedagent-db ingest --ctgov-enriched-search-only   # standalone enriched search table")
     print("  biomedagent-db extract-schema --output schema.txt --sample-rows 5")
-    print("  biomedagent-db chat --server-url http://localhost:2024 --user-id alice")
+    print("  biomedagent-db chat --server-url http://localhost:8000 --user-id alice")
 
 
 def route_setup_postgres() -> NoReturn:

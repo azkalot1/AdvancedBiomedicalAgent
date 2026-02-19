@@ -40,20 +40,14 @@ pip install -e .
 
 2. Set correct DB credentials in `.env` for your local Postgres user:
 ```bash
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=coscientist_data
-DB_USER=<your_db_user>
-DB_PASSWORD=<your_db_password>
-
-DATA_DATABASE_URL=postgresql://<your_db_user>:<your_db_password>@localhost:5432/coscientist_data
+DATA_POSTGRES_URI=postgresql://<your_db_user>:<your_db_password>@localhost:5432/coscientist_data
 APP_DATABASE_URL=postgresql://<your_db_user>:<your_db_password>@localhost:5432/coscientist_app
 DATABASE_URL=postgresql://<your_db_user>:<your_db_password>@localhost:5432/coscientist_app
 POSTGRES_URI=postgresql://<your_db_user>:<your_db_password>@localhost:5432/coscientist_app
 
 NEXTAUTH_URL=http://localhost:3000
 NEXTAUTH_SECRET=replace_with_long_random_secret
-BIOAGENT_BACKEND_URL=http://localhost:2024
+BIOAGENT_BACKEND_URL=http://localhost:8000
 ```
 
 3. Setup data database and optional quick ingest:
@@ -107,7 +101,8 @@ make verify-deps
 make setup-postgres
 make ingest
 make ingest-quick
-make langgraph-dev
+make aegra-dev
+make aegra-serve
 make chat
 make chat-stack
 make gui-stack
@@ -125,7 +120,7 @@ Run `make help` to list all targets.
 Two-DB layout:
 
 - `coscientist_data` (`5432`): scientific source tables used by tools/ingestion
-- `coscientist_app` (`5432`): `app_users` + LangGraph checkpoint/store data
+- `coscientist_app` (`5432`): `app_users` + Aegra checkpoint/store data
 
 Use your existing local PostgreSQL service (same instance/port, separate databases).
 Ensure Postgres is running before setup:
@@ -164,19 +159,19 @@ POSTGRES_URI=postgresql://postgres:postgres@localhost:5432/coscientist_app
 
 Full guide: [docs/CHAT_INTERFACE.md](docs/CHAT_INTERFACE.md)
 
-You can run the LangGraph server and CLI chat together with one script:
+You can run the Aegra server and CLI chat together with one script:
 
 ```bash
-./scripts/run_langgraph_and_chat.sh
+./scripts/run_aegra_and_chat.sh
 ```
 
 This script:
-- starts `langgraph dev` in the project root
+- starts `./scripts/run_aegra.sh` in the project root
 - waits for `/v1/ok` (or `/ok`) readiness
 - launches `biomedagent-db chat`
-- stops the dev server when chat exits
+- stops the server when chat exits
 
-Server logs are written to `.langgraph_api/dev.log` by default.
+Server logs are written to `.aegra/server.log` by default.
 
 ### Auth-enabled example
 
@@ -185,28 +180,28 @@ export BIOAGENT_API_TOKEN=dev-token
 export BIOAGENT_API_USER_ID=1
 export BIOAGENT_AUTH_REQUIRED=true
 
-./scripts/run_langgraph_and_chat.sh --api-token "$BIOAGENT_API_TOKEN"
+./scripts/run_aegra_and_chat.sh --api-token "$BIOAGENT_API_TOKEN"
 ```
 
 ### Useful options
 
 ```bash
-./scripts/run_langgraph_and_chat.sh --help
-./scripts/run_langgraph_and_chat.sh --assistant-id co_scientist
-./scripts/run_langgraph_and_chat.sh --server-url http://localhost:2024
-./scripts/run_langgraph_and_chat.sh --api-token dev-token -- --stream-tool-args
+./scripts/run_aegra_and_chat.sh --help
+./scripts/run_aegra_and_chat.sh --assistant-id co_scientist
+./scripts/run_aegra_and_chat.sh --server-url http://localhost:8000
+./scripts/run_aegra_and_chat.sh --api-token dev-token -- --stream-tool-args
 ```
 
 ### Manual (two terminals)
 
 Terminal 1:
 ```bash
-langgraph dev
+./scripts/run_aegra.sh
 ```
 
 Terminal 2:
 ```bash
-biomedagent-db chat --server-url http://localhost:2024 --assistant-id co_scientist --api-token dev-token
+biomedagent-db chat --server-url http://localhost:8000 --assistant-id co_scientist --api-token dev-token
 ```
 
 ## GUI Workbench (Local)
@@ -219,13 +214,13 @@ Full web details: [web/README.md](web/README.md)
 make gui-stack
 ```
 
-This starts `langgraph dev` waits for backend health, then runs the Next.js app.
+This starts Aegra, waits for backend health, then runs the Next.js app.
 
 ### Manual (Two Terminals)
 
 Terminal 1:
 ```bash
-make langgraph-up
+make aegra-dev
 ```
 
 Terminal 2:
@@ -244,14 +239,15 @@ Required env for GUI auth/backend wiring (in `.env`):
 APP_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/coscientist_app
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/coscientist_app
 POSTGRES_URI=postgresql://postgres:postgres@localhost:5432/coscientist_app
-BIOAGENT_RESEARCH_OUTPUT_DIR=./research_outputs
+AEGRA_POSTGRES_URI=postgresql://postgres:postgres@localhost:5432/coscientist_app
+AEGRA_REDIS_URL=redis://localhost:6379/0
 NEXTAUTH_URL=http://localhost:3000
 NEXTAUTH_SECRET=replace_with_long_random_secret
-BIOAGENT_BACKEND_URL=http://localhost:2024
+BIOAGENT_BACKEND_URL=http://localhost:8000
 ```
 
-Report files are stored under `BIOAGENT_RESEARCH_OUTPUT_DIR` (default `./research_outputs`), scoped by user/thread.
-`langgraph dev` still uses in-memory runtime for thread/run registry; use `langgraph up` for persistent `/threads` behavior across logins/restarts.
+Reports are persisted in PostgreSQL (`bioagent_reports` table), scoped by user/thread.
+Aegra uses Postgres-backed runtime persistence for `/threads` when `AEGRA_POSTGRES_URI` is configured.
 
 Seed login users first:
 
@@ -259,6 +255,18 @@ Seed login users first:
 make users-setup
 make users-list
 ```
+
+## Railway Deployment (Aegra)
+
+Backend deployment now targets Aegra. Configure Railway service env vars:
+
+```bash
+AEGRA_POSTGRES_URI=postgresql://...@postgres.railway.internal:5432/...
+AEGRA_REDIS_URL=redis://...@redis.railway.internal:6379
+AEGRA_CONFIG_PATH=/app/langgraph.json
+```
+
+Detailed guide: [docs/AEGRA_RAILWAY.md](docs/AEGRA_RAILWAY.md)
 
 ## Troubleshooting
 

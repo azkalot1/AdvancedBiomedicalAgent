@@ -10,11 +10,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import quote, unquote, urlparse
 
 from dotenv import load_dotenv
 
-# Keys we read/write for DB config
-DB_ENV_KEYS = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
+# Keys we read/write for ingestion DB config
+DATA_DB_ENV_KEY = "DATA_POSTGRES_URI"
+LEGACY_DB_ENV_KEYS = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
+ALL_DB_ENV_KEYS = (DATA_DB_ENV_KEY, *LEGACY_DB_ENV_KEYS)
 
 
 def get_repo_root() -> Path:
@@ -244,16 +247,37 @@ def _parse_env_lines(path: Path) -> list[tuple[str, str]]:
     return pairs
 
 
+def _build_data_postgres_uri(
+    db_host: str,
+    db_port: str,
+    db_name: str,
+    user_name: str,
+    password: str,
+) -> str:
+    safe_user = quote(user_name, safe="")
+    safe_password = quote(password, safe="")
+    return f"postgresql://{safe_user}:{safe_password}@{db_host}:{db_port}/{db_name}"
+
+
+def _parse_data_postgres_uri(uri: str) -> tuple[str, str, str, str, str]:
+    parsed = urlparse(uri)
+    if parsed.scheme not in {"postgres", "postgresql"}:
+        raise ValueError("Unsupported DB URI scheme. Use postgres:// or postgresql://")
+
+    db_host = parsed.hostname or "localhost"
+    db_port = str(parsed.port or 5432)
+    db_name = (parsed.path or "/database").lstrip("/") or "database"
+    user_name = unquote(parsed.username or "database_user")
+    password = unquote(parsed.password or "database_password")
+    return db_host, db_port, db_name, user_name, password
+
+
 def _env_db_updates(
     db_host: str, db_port: str, db_name: str, user_name: str, password: str
 ) -> dict[str, str]:
-    """Return dict of DB_* keys to values for writing to .env."""
+    """Return dict of DATA_* keys to values for writing to .env."""
     return {
-        "DB_HOST": db_host,
-        "DB_PORT": db_port,
-        "DB_NAME": db_name,
-        "DB_USER": user_name,
-        "DB_PASSWORD": password,
+        DATA_DB_ENV_KEY: _build_data_postgres_uri(db_host, db_port, db_name, user_name, password),
     }
 
 
@@ -265,15 +289,15 @@ def save_config_to_env(
     password: str,
     env_file: Path,
 ) -> None:
-    """Create or update .env file with database configuration. Other keys and comments are preserved."""
+    """Create or update .env file with DATA_POSTGRES_URI. Other keys/comments are preserved."""
     updates = _env_db_updates(db_host, db_port, db_name, user_name, password)
     existing = {k: v for k, v in _parse_env_lines(env_file)}
 
-    # Merge: existing keys stay unless we're updating a DB_* key
+    # Merge: existing keys stay unless we're updating managed ingestion DB keys.
     for k, v in updates.items():
         existing[k] = v
 
-    # Rebuild file: keep original order and comments for non-DB lines, then ensure DB_* in fixed order
+    # Rebuild file: keep original order/comments for non-DB lines, then ensure normalized data DB key.
     lines_out = []
     had_db_keys = False
     if env_file.exists():
@@ -284,17 +308,16 @@ def save_config_to_env(
                 continue
             if "=" in line:
                 key = line.partition("=")[0].strip()
-                if key in DB_ENV_KEYS:
+                if key in ALL_DB_ENV_KEYS:
                     had_db_keys = True
-                    continue  # drop old DB_* line; we'll append new ones at the end
+                    continue  # drop old DB config lines; we'll append normalized key
             lines_out.append(line)
 
     # Append DB section (with comment if we're adding for first time)
     if not had_db_keys:
         lines_out.append("")
-        lines_out.append("# PostgreSQL Database Configuration (setup_postgres.py)")
-    for key in DB_ENV_KEYS:
-        lines_out.append(f"{key}={existing[key]}")
+        lines_out.append("# Data ingestion PostgreSQL URI (setup_postgres.py)")
+    lines_out.append(f"{DATA_DB_ENV_KEY}={existing[DATA_DB_ENV_KEY]}")
 
     env_file.parent.mkdir(parents=True, exist_ok=True)
     env_file.write_text("\n".join(lines_out) + "\n")
@@ -310,6 +333,13 @@ def get_env_config() -> tuple[str, str, str, str, str] | None:
     env_file = get_repo_root() / ".env"
     if env_file.exists():
         load_dotenv(env_file)
+
+    data_uri = (os.getenv(DATA_DB_ENV_KEY) or os.getenv("DATA_DATABASE_URL") or "").strip()
+    if data_uri:
+        try:
+            return _parse_data_postgres_uri(data_uri)
+        except ValueError:
+            print(f"⚠️  Invalid {DATA_DB_ENV_KEY} value in .env. Falling back to legacy DB_* vars.")
 
     db_host = os.getenv("DB_HOST")
     db_port = os.getenv("DB_PORT")
@@ -380,15 +410,18 @@ def setup_database():
         print(f"   Host: {db_host}, Port: {db_port}")
         print(f"   Database: {db_name}")
         print(f"   User: {user_name}")
+        if not (os.getenv(DATA_DB_ENV_KEY) or "").strip():
+            save_config_to_env(db_host, db_port, db_name, user_name, password, env_file)
+            print(f"ℹ️  Migrated legacy DB_* settings to {DATA_DB_ENV_KEY} in {env_file}.")
     else:
-        print("\n⚙️  No .env in repo root or DB_* variables missing. Let's set up your database:")
+        print(f"\n⚙️  No .env in repo root or {DATA_DB_ENV_KEY} missing. Let's set up your database:")
         db_host, db_port, db_name, user_name, password = prompt_for_config()
         save_config_to_env(db_host, db_port, db_name, user_name, password, env_file)
 
-    # Create database and user (all names from .env: DB_NAME, DB_USER, etc.)
+    # Create database and user (names parsed from DATA_POSTGRES_URI)
     # Script runs as postgres superuser; "You are now connected... as user postgres" is expected.
     sql_commands = f"""
--- Create user if not exists (user_name from .env DB_USER)
+-- Create user if not exists (user_name parsed from DATA_POSTGRES_URI)
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '{user_name}') THEN
@@ -397,7 +430,7 @@ BEGIN
 END
 $$;
 
--- Create database if not exists (db_name from .env DB_NAME)
+-- Create database if not exists (db_name parsed from DATA_POSTGRES_URI)
 SELECT 'CREATE DATABASE {db_name}'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '{db_name}')\\gexec
 
@@ -511,4 +544,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

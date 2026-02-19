@@ -1,6 +1,6 @@
 # Chat Interface Guide
 
-This project includes a CLI chat client backed by LangGraph Server.
+This project includes a CLI chat client backed by Aegra server.
 
 The chat interface is intended to be the backend interaction model for the GUI:
 - threaded conversations
@@ -17,18 +17,18 @@ From repo root:
 pip install -e .
 ```
 
-You also need `langgraph` available in your active environment.
+You also need `aegra` available in your active environment.
 
 ## Start Chat (One Command)
 
 Use the helper script:
 
 ```bash
-./scripts/run_langgraph_and_chat.sh
+./scripts/run_aegra_and_chat.sh
 ```
 
 What it does:
-1. Starts `langgraph dev`
+1. Starts `./scripts/run_aegra.sh`
 2. Waits for server health (`/v1/ok`, fallback `/ok`)
 3. Starts `biomedagent-db chat`
 4. Stops server when chat exits
@@ -36,7 +36,7 @@ What it does:
 Server logs default to:
 
 ```bash
-.langgraph_api/dev.log
+.aegra/server.log
 ```
 
 ## Start Chat (Manual, Two Terminals)
@@ -44,13 +44,13 @@ Server logs default to:
 Terminal 1:
 
 ```bash
-langgraph dev
+./scripts/run_aegra.sh
 ```
 
 Terminal 2:
 
 ```bash
-biomedagent-db chat --server-url http://localhost:2024 --assistant-id co_scientist
+biomedagent-db chat --server-url http://localhost:8000 --assistant-id co_scientist
 ```
 
 ## Auth
@@ -66,13 +66,13 @@ export BIOAGENT_AUTH_REQUIRED=true
 Then run:
 
 ```bash
-./scripts/run_langgraph_and_chat.sh --api-token "$BIOAGENT_API_TOKEN"
+./scripts/run_aegra_and_chat.sh --api-token "$BIOAGENT_API_TOKEN"
 ```
 
 or:
 
 ```bash
-biomedagent-db chat --server-url http://localhost:2024 --assistant-id co_scientist --api-token "$BIOAGENT_API_TOKEN"
+biomedagent-db chat --server-url http://localhost:8000 --assistant-id co_scientist --api-token "$BIOAGENT_API_TOKEN"
 ```
 
 ## Chat Commands
@@ -110,7 +110,7 @@ Important behavior:
 
 ## GUI-Relevant API Surface
 
-LangGraph built-ins (used by CLI and GUI):
+Protocol built-ins (used by CLI and GUI):
 - `POST /threads`
 - `GET /threads/{id}/state`
 - `POST /threads/{id}/runs/stream`
@@ -132,7 +132,7 @@ Streaming (`runs/stream`) uses:
 Use the API smoke test script:
 
 ```bash
-./scripts/gui_api_smoke_test.py --base-url http://localhost:2024 --assistant-id co_scientist --api-token "$BIOAGENT_API_TOKEN"
+./scripts/gui_api_smoke_test.py --base-url http://localhost:8000 --assistant-id co_scientist --api-token "$BIOAGENT_API_TOKEN"
 ```
 
 This validates:
@@ -145,11 +145,12 @@ This validates:
 
 ## Troubleshooting
 
-- If `langgraph dev` fails to load app, check:
+- If Aegra fails to load app, check:
   - `langgraph.json` points to `./src/bioagent/server/webapp.py:app`
   - `langgraph.json` dependencies use the package root (`"."`) rather than `pyproject.toml`
   - environment has project installed (`pip install -e .`)
+  - `AEGRA_POSTGRES_URI` is set (or `DATABASE_URL`/`APP_DATABASE_URL`/`POSTGRES_URI` so `scripts/run_aegra.sh` can map it)
 - If chat cannot connect, verify:
-  - server is running on `LANGGRAPH_API_URL` (default `http://localhost:2024`)
+  - server is running on `AEGRA_API_URL` (default `http://localhost:8000`)
 - If auth errors (`401`):
   - pass `--api-token` and confirm token env configuration

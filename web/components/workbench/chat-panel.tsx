@@ -265,7 +265,7 @@ export function ChatPanel(): React.ReactElement {
     }
     return threads.filter((item) => {
       const metadataUser = item.metadata?.user_id;
-      return typeof metadataUser === "string" && metadataUser === userId;
+      return typeof metadataUser !== "string" || metadataUser === userId;
     });
   }, [threads, userId]);
 

@@ -1,20 +1,55 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-import json
 import os
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import yaml
+import asyncpg
 
-DEFAULT_REPORTS_ROOT = Path(os.getenv("BIOAGENT_RESEARCH_OUTPUT_DIR", "./research_outputs"))
 DEFAULT_USER_ID = os.getenv("BIOAGENT_DEFAULT_USER_ID", "anonymous")
 REPORT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$")
+
+_POOL: asyncpg.Pool | None = None
+_POOL_LOCK = asyncio.Lock()
+_SCHEMA_INITIALIZED = False
+
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS bioagent_reports (
+    id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    tool_name TEXT,
+    filename TEXT,
+    display_name TEXT,
+    one_line TEXT,
+    status TEXT DEFAULT 'complete',
+    size_chars INTEGER,
+    content TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (user_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bioagent_reports_user
+    ON bioagent_reports (user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_bioagent_reports_thread
+    ON bioagent_reports (user_id, thread_id, created_at DESC);
+"""
+
+
+def _get_dsn() -> str:
+    return (
+        os.getenv("BIOAGENT_RESEARCH_OUTPUT_POSTGRES_URI")
+        or os.getenv("AEGRA_POSTGRES_URI")
+        or os.getenv("BIOAGENT_CHECKPOINT_POSTGRES_URI")
+        or os.getenv("APP_DATABASE_URL")
+        or os.getenv("POSTGRES_URI")
+        or os.getenv("DATABASE_URL")
+        or ""
+    ).strip()
 
 
 def _safe_segment(value: str | None, fallback: str) -> str:
@@ -31,33 +66,6 @@ def normalize_report_id(report_id: str | None) -> str | None:
     if REPORT_ID_PATTERN.fullmatch(normalized) is None:
         return None
     return normalized
-
-
-def thread_tool_outputs_namespace(user_id: str, thread_id: str) -> tuple[str, ...]:
-    return ("users", user_id, "threads", thread_id, "tool_outputs")
-
-
-def user_reports_namespace(user_id: str) -> tuple[str, ...]:
-    return ("users", user_id, "reports")
-
-
-def _thread_output_dir(root: Path, user_id: str, thread_id: str) -> Path:
-    return root / "users" / user_id / "threads" / thread_id / "tool_outputs"
-
-
-def _user_index_path(root: Path, user_id: str) -> Path:
-    return root / "users" / user_id / "reports_index.json"
-
-
-def thread_tool_outputs_dir(
-    *,
-    user_id: str,
-    thread_id: str,
-    root: Path = DEFAULT_REPORTS_ROOT,
-) -> Path:
-    scoped_user = _safe_segment(user_id, DEFAULT_USER_ID)
-    scoped_thread = _safe_segment(thread_id, "default")
-    return _thread_output_dir(root, scoped_user, scoped_thread)
 
 
 def _get_mapping_value(value: Any, key: str) -> Any:
@@ -95,174 +103,70 @@ def resolve_scope(
     )
 
 
-async def _store_call(
-    store: Any | None,
-    async_name: str,
-    sync_name: str,
-    *args: Any,
-    **kwargs: Any,
-) -> Any:
-    if store is None:
-        return None
-
-    async_method = getattr(store, async_name, None)
-    if async_method is not None:
-        try:
-            sig = inspect.signature(async_method)
-            accepted = {key: value for key, value in kwargs.items() if key in sig.parameters}
-        except (TypeError, ValueError):
-            accepted = kwargs
-        result = async_method(*args, **accepted)
-        if inspect.isawaitable(result):
-            return await result
-        return result
-
-    sync_method = getattr(store, sync_name, None)
-    if sync_method is not None:
-        try:
-            sig = inspect.signature(sync_method)
-            accepted = {key: value for key, value in kwargs.items() if key in sig.parameters}
-        except (TypeError, ValueError):
-            accepted = kwargs
-        return await asyncio.to_thread(sync_method, *args, **accepted)
-
-    return None
+async def _ensure_schema(pool: asyncpg.Pool) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(_SCHEMA_SQL)
 
 
-def _item_value(item: Any) -> Any:
-    if item is None:
-        return None
-    if isinstance(item, dict):
-        if "value" in item:
-            return item["value"]
-        return item
-    return getattr(item, "value", None)
+async def _get_pool() -> asyncpg.Pool:
+    global _POOL, _SCHEMA_INITIALIZED
+
+    async with _POOL_LOCK:
+        if _POOL is None:
+            dsn = _get_dsn()
+            if not dsn:
+                raise RuntimeError(
+                    "Missing reports database DSN. Set BIOAGENT_RESEARCH_OUTPUT_POSTGRES_URI "
+                    "(or AEGRA_POSTGRES_URI/APP_DATABASE_URL/POSTGRES_URI/DATABASE_URL)."
+                )
+            _POOL = await asyncpg.create_pool(
+                dsn=dsn,
+                min_size=1,
+                max_size=10,
+            )
+
+        if not _SCHEMA_INITIALIZED:
+            await _ensure_schema(_POOL)
+            _SCHEMA_INITIALIZED = True
+
+        return _POOL
 
 
-def _item_key(item: Any) -> str | None:
-    if item is None:
-        return None
-    if isinstance(item, dict):
-        if "key" in item:
-            return str(item["key"])
-        if "id" in item:
-            return str(item["id"])
-        return None
-    value = getattr(item, "key", None)
-    if value is not None:
-        return str(value)
-    value = getattr(item, "id", None)
-    if value is not None:
-        return str(value)
-    return None
+def _row_to_metadata(row: asyncpg.Record) -> dict[str, Any]:
+    record = dict(row)
 
+    created_at = record.get("created_at")
+    if isinstance(created_at, datetime):
+        record["created_at"] = created_at.isoformat()
+    elif created_at is not None:
+        record["created_at"] = str(created_at)
 
-def _parse_frontmatter(markdown: str) -> tuple[dict[str, Any], str]:
-    if not markdown.startswith("---"):
-        return {}, markdown
-    parts = markdown.split("---", 2)
-    if len(parts) < 3:
-        return {}, markdown
-    try:
-        metadata = yaml.safe_load(parts[1]) or {}
-    except yaml.YAMLError:
-        metadata = {}
-    return metadata, parts[2].lstrip()
+    record.pop("content", None)
+    record["ref_id"] = str(record.get("id", "")).strip()
 
+    display_name = str(record.get("display_name") or "").strip()
+    if not display_name:
+        display_name = (
+            str(record.get("one_line") or "").strip()
+            or str(record.get("filename") or "").strip()
+            or str(record.get("id") or "").strip()
+            or "report.md"
+        )
+    record["display_name"] = display_name
 
-def _write_user_index(root: Path, user_id: str, records: list[dict[str, Any]]) -> None:
-    index_path = _user_index_path(root, user_id)
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = sorted(records, key=lambda item: str(item.get("created_at", "")), reverse=True)
-    index_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
-
-
-def _load_user_index(root: Path, user_id: str) -> list[dict[str, Any]]:
-    index_path = _user_index_path(root, user_id)
-    if not index_path.exists():
-        return []
-    try:
-        payload = json.loads(index_path.read_text())
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(payload, list):
-        return []
-    return [item for item in payload if isinstance(item, dict)]
-
-
-def _upsert_user_index_record(root: Path, user_id: str, record: dict[str, Any]) -> None:
-    existing = _load_user_index(root, user_id)
-    keyed = {str(item.get("id")): item for item in existing if item.get("id")}
-    keyed[str(record["id"])] = record
-    _write_user_index(root, user_id, list(keyed.values()))
-
-
-def _ensure_report_display_name(record: dict[str, Any]) -> dict[str, Any]:
-    if str(record.get("display_name") or "").strip():
-        return record
-    one_line = str(record.get("one_line") or "").strip()
-    filename = str(record.get("filename") or "").strip()
-    report_id = str(record.get("id") or record.get("ref_id") or "").strip()
-    record["display_name"] = one_line or filename or report_id or "report.md"
     return record
 
 
-def _remove_user_index_record(root: Path, user_id: str, report_id: str) -> None:
-    existing = _load_user_index(root, user_id)
-    filtered = [item for item in existing if str(item.get("id")) != report_id]
-    _write_user_index(root, user_id, filtered)
-
-
-def _build_report_metadata(
-    *,
-    report_id: str,
-    tool_name: str,
-    user_id: str,
-    thread_id: str,
-    size_chars: int,
-    one_line: str,
-    display_name: str,
-    file_path: Path,
-    created_at: str | None = None,
-) -> dict[str, Any]:
-    now = created_at or datetime.now(timezone.utc).isoformat()
-    cleaned_one_line = one_line.strip()
-    cleaned_display_name = display_name.strip()
-    resolved_display_name = cleaned_display_name or cleaned_one_line or file_path.name
-    return {
-        "id": report_id,
-        "ref_id": report_id,
-        "tool_name": tool_name,
-        "user_id": user_id,
-        "thread_id": thread_id,
-        "filename": file_path.name,
-        "display_name": resolved_display_name,
-        "path": str(file_path),
-        "status": "complete",
-        "size_chars": int(size_chars),
-        "one_line": cleaned_one_line,
-        "created_at": now,
-    }
-
-
-def _write_report_markdown(file_path: Path, metadata: dict[str, Any], content: str) -> None:
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-    frontmatter = yaml.safe_dump(metadata, sort_keys=False, allow_unicode=False).strip()
-    payload = f"---\n{frontmatter}\n---\n\n{content.rstrip()}\n"
-    file_path.write_text(payload)
-
-
-def _read_file_text(path: Path) -> str:
-    return path.read_text()
-
-
-def _path_exists(path: Path) -> bool:
-    return path.exists()
-
-
-def _unlink_if_exists(path: Path) -> None:
-    if path.exists():
-        path.unlink()
+def _normalize_limit(limit: int, *, default: int, max_value: int) -> int:
+    try:
+        normalized = int(limit)
+    except (TypeError, ValueError):
+        normalized = default
+    if normalized < 1:
+        normalized = 1
+    if normalized > max_value:
+        normalized = max_value
+    return normalized
 
 
 async def persist_tool_output_report(
@@ -272,317 +176,221 @@ async def persist_tool_output_report(
     report_id: str | None = None,
     one_line: str = "",
     display_name: str = "",
-    store: Any | None = None,
     runtime: Any | None = None,
     user_id: str | None = None,
     thread_id: str | None = None,
-    root: Path = DEFAULT_REPORTS_ROOT,
 ) -> dict[str, Any]:
     resolved_user, resolved_thread = resolve_scope(runtime=runtime, user_id=user_id, thread_id=thread_id)
     safe_tool_name = _safe_segment(tool_name, "tool")
     final_report_id = normalize_report_id(report_id) or f"{safe_tool_name}_{uuid4().hex[:8]}"
-    output_dir = _thread_output_dir(root, resolved_user, resolved_thread)
-    output_path = output_dir / f"{final_report_id}.md"
+    filename = f"{final_report_id}.md"
 
-    metadata = _build_report_metadata(
-        report_id=final_report_id,
-        tool_name=tool_name,
-        user_id=resolved_user,
-        thread_id=resolved_thread,
-        size_chars=len(content),
-        one_line=one_line,
-        display_name=display_name,
-        file_path=output_path,
-    )
-    await asyncio.to_thread(_write_report_markdown, output_path, metadata, content)
+    clean_one_line = one_line.strip()
+    clean_display_name = display_name.strip() or clean_one_line or filename
+    created_at = datetime.now(timezone.utc)
 
-    await _store_call(
-        store,
-        "aput",
-        "put",
-        thread_tool_outputs_namespace(resolved_user, resolved_thread),
-        final_report_id,
-        metadata,
-        index=False,
-    )
-    await _store_call(
-        store,
-        "aput",
-        "put",
-        user_reports_namespace(resolved_user),
-        final_report_id,
-        metadata,
-        index=False,
-    )
-    await asyncio.to_thread(_upsert_user_index_record, root, resolved_user, metadata)
-    return metadata
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO bioagent_reports (
+                id,
+                user_id,
+                thread_id,
+                tool_name,
+                filename,
+                display_name,
+                one_line,
+                status,
+                size_chars,
+                content,
+                created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'complete', $8, $9, $10)
+            ON CONFLICT (user_id, id) DO UPDATE SET
+                thread_id = EXCLUDED.thread_id,
+                tool_name = EXCLUDED.tool_name,
+                filename = EXCLUDED.filename,
+                display_name = EXCLUDED.display_name,
+                one_line = EXCLUDED.one_line,
+                status = EXCLUDED.status,
+                size_chars = EXCLUDED.size_chars,
+                content = EXCLUDED.content
+            """,
+            final_report_id,
+            resolved_user,
+            resolved_thread,
+            tool_name,
+            filename,
+            clean_display_name,
+            clean_one_line,
+            len(content),
+            content,
+            created_at,
+        )
 
-
-def _find_record_in_filesystem(root: Path, user_id: str, report_id: str) -> dict[str, Any] | None:
-    safe_report_id = normalize_report_id(report_id)
-    if not safe_report_id:
-        return None
-
-    for candidate in (root / "users" / user_id).glob(f"threads/*/tool_outputs/{safe_report_id}.md"):
-        metadata, _ = _parse_frontmatter(candidate.read_text())
-        if not metadata:
-            metadata = {
-                "id": safe_report_id,
-                "ref_id": safe_report_id,
-                "filename": candidate.name,
-                "path": str(candidate),
-                "status": "complete",
-                "created_at": datetime.fromtimestamp(candidate.stat().st_mtime, tz=timezone.utc).isoformat(),
-            }
-        if "id" not in metadata:
-            metadata["id"] = safe_report_id
-        if "path" not in metadata:
-            metadata["path"] = str(candidate)
-        if "display_name" not in metadata:
-            one_line = str(metadata.get("one_line") or "").strip()
-            metadata["display_name"] = one_line or str(metadata.get("filename") or candidate.name)
-        return metadata
-    return None
-
-
-def _list_thread_records_from_filesystem(
-    output_dir: Path,
-    scoped_user: str,
-    scoped_thread: str,
-) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    if not output_dir.exists():
-        return records
-
-    for file_path in sorted(output_dir.glob("*.md"), key=lambda item: item.stat().st_mtime, reverse=True):
-        metadata, _ = _parse_frontmatter(file_path.read_text())
-        if not metadata:
-            metadata = {}
-        metadata.setdefault("id", file_path.stem)
-        metadata.setdefault("ref_id", file_path.stem)
-        metadata.setdefault("filename", file_path.name)
-        metadata.setdefault("path", str(file_path))
-        metadata.setdefault("thread_id", scoped_thread)
-        metadata.setdefault("user_id", scoped_user)
-        metadata.setdefault("created_at", datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc).isoformat())
-        metadata.setdefault("status", "complete")
-        metadata.setdefault("size_chars", file_path.stat().st_size)
-        metadata.setdefault("display_name", str(metadata.get("one_line") or "").strip() or file_path.name)
-        records.append(metadata)
-
-    return records
+    return {
+        "id": final_report_id,
+        "ref_id": final_report_id,
+        "tool_name": tool_name,
+        "user_id": resolved_user,
+        "thread_id": resolved_thread,
+        "filename": filename,
+        "display_name": clean_display_name,
+        "status": "complete",
+        "size_chars": len(content),
+        "one_line": clean_one_line,
+        "created_at": created_at.isoformat(),
+    }
 
 
 async def list_reports(
     *,
     user_id: str,
     thread_id: str | None = None,
-    store: Any | None = None,
-    root: Path = DEFAULT_REPORTS_ROOT,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     scoped_user = _safe_segment(user_id, DEFAULT_USER_ID)
+    scoped_limit = _normalize_limit(limit, default=200, max_value=1000)
+    pool = await _get_pool()
 
-    items = await _store_call(
-        store,
-        "asearch",
-        "search",
-        user_reports_namespace(scoped_user),
-        limit=limit,
-        query=None,
-    )
+    async with pool.acquire() as conn:
+        if thread_id:
+            scoped_thread = _safe_segment(thread_id, "default")
+            rows = await conn.fetch(
+                """
+                SELECT id, user_id, thread_id, tool_name, filename, display_name, one_line, status, size_chars, created_at
+                FROM bioagent_reports
+                WHERE user_id = $1 AND thread_id = $2
+                ORDER BY created_at DESC
+                LIMIT $3
+                """,
+                scoped_user,
+                scoped_thread,
+                scoped_limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT id, user_id, thread_id, tool_name, filename, display_name, one_line, status, size_chars, created_at
+                FROM bioagent_reports
+                WHERE user_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                scoped_user,
+                scoped_limit,
+            )
 
-    records: list[dict[str, Any]] = []
-    if isinstance(items, list):
-        for item in items:
-            value = _item_value(item)
-            if isinstance(value, dict):
-                record = dict(value)
-                if "id" not in record:
-                    key = _item_key(item)
-                    if key:
-                        record["id"] = key
-                records.append(record)
-
-    indexed_records = await asyncio.to_thread(_load_user_index, root, scoped_user)
-    if indexed_records:
-        merged: dict[str, dict[str, Any]] = {}
-        for record in indexed_records:
-            report_id = str(record.get("id") or record.get("ref_id") or "")
-            if not report_id:
-                continue
-            merged[report_id] = dict(record)
-        for record in records:
-            report_id = str(record.get("id") or record.get("ref_id") or "")
-            if not report_id:
-                continue
-            merged[report_id] = {**merged.get(report_id, {}), **record}
-        records = list(merged.values())
-
-    if thread_id:
-        scoped_thread = _safe_segment(thread_id, "default")
-        records = [item for item in records if str(item.get("thread_id", "")) == scoped_thread]
-
-    normalized_records = [_ensure_report_display_name(dict(record)) for record in records]
-    return sorted(normalized_records, key=lambda item: str(item.get("created_at", "")), reverse=True)
+    return [_row_to_metadata(row) for row in rows]
 
 
 async def get_report(
     *,
     user_id: str,
     report_id: str,
-    store: Any | None = None,
-    root: Path = DEFAULT_REPORTS_ROOT,
 ) -> dict[str, Any] | None:
     safe_report_id = normalize_report_id(report_id)
     if not safe_report_id:
         return None
+
     scoped_user = _safe_segment(user_id, DEFAULT_USER_ID)
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, user_id, thread_id, tool_name, filename, display_name, one_line, status, size_chars, created_at
+            FROM bioagent_reports
+            WHERE user_id = $1 AND id = $2
+            """,
+            scoped_user,
+            safe_report_id,
+        )
 
-    item = await _store_call(
-        store,
-        "aget",
-        "get",
-        user_reports_namespace(scoped_user),
-        safe_report_id,
-    )
-    value = _item_value(item)
-    if isinstance(value, dict):
-        record = dict(value)
-        record.setdefault("id", safe_report_id)
-        return _ensure_report_display_name(record)
-
-    for candidate in await asyncio.to_thread(_load_user_index, root, scoped_user):
-        if str(candidate.get("id")) == safe_report_id:
-            return _ensure_report_display_name(dict(candidate))
-
-    fallback = await asyncio.to_thread(_find_record_in_filesystem, root, scoped_user, safe_report_id)
-    if isinstance(fallback, dict):
-        return _ensure_report_display_name(fallback)
-    return fallback
+    if row is None:
+        return None
+    return _row_to_metadata(row)
 
 
 async def get_report_content(
     *,
     user_id: str,
     report_id: str,
-    store: Any | None = None,
-    root: Path = DEFAULT_REPORTS_ROOT,
 ) -> str | None:
-    record = await get_report(user_id=user_id, report_id=report_id, store=store, root=root)
-    if not record:
+    safe_report_id = normalize_report_id(report_id)
+    if not safe_report_id:
         return None
 
-    path_value = record.get("path")
-    if not path_value:
-        filesystem_record = await asyncio.to_thread(
-            _find_record_in_filesystem,
-            root,
-            _safe_segment(user_id, DEFAULT_USER_ID),
-            report_id,
+    scoped_user = _safe_segment(user_id, DEFAULT_USER_ID)
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT content
+            FROM bioagent_reports
+            WHERE user_id = $1 AND id = $2
+            """,
+            scoped_user,
+            safe_report_id,
         )
-        if not filesystem_record:
-            return None
-        path_value = filesystem_record.get("path")
-    if not path_value:
-        return None
 
-    file_path = Path(path_value)
-    if not await asyncio.to_thread(_path_exists, file_path):
+    if row is None:
         return None
-    file_content = await asyncio.to_thread(_read_file_text, file_path)
-    _, content = _parse_frontmatter(file_content)
-    return content
+    value = row.get("content")
+    return str(value) if value is not None else None
 
 
 async def list_thread_tool_outputs(
     *,
     user_id: str,
     thread_id: str,
-    store: Any | None = None,
-    root: Path = DEFAULT_REPORTS_ROOT,
     limit: int = 200,
 ) -> list[dict[str, Any]]:
     scoped_user = _safe_segment(user_id, DEFAULT_USER_ID)
     scoped_thread = _safe_segment(thread_id, "default")
+    scoped_limit = _normalize_limit(limit, default=200, max_value=1000)
+    pool = await _get_pool()
 
-    items = await _store_call(
-        store,
-        "asearch",
-        "search",
-        thread_tool_outputs_namespace(scoped_user, scoped_thread),
-        limit=limit,
-        query=None,
-    )
-    records: list[dict[str, Any]] = []
-    if isinstance(items, list):
-        for item in items:
-            value = _item_value(item)
-            if isinstance(value, dict):
-                record = dict(value)
-                if "id" not in record:
-                    key = _item_key(item)
-                    if key:
-                        record["id"] = key
-                records.append(record)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, user_id, thread_id, tool_name, filename, display_name, one_line, status, size_chars, created_at
+            FROM bioagent_reports
+            WHERE user_id = $1 AND thread_id = $2
+            ORDER BY created_at DESC
+            LIMIT $3
+            """,
+            scoped_user,
+            scoped_thread,
+            scoped_limit,
+        )
 
-    output_dir = _thread_output_dir(root, scoped_user, scoped_thread)
-    fs_records = await asyncio.to_thread(_list_thread_records_from_filesystem, output_dir, scoped_user, scoped_thread)
-    if fs_records:
-        merged: dict[str, dict[str, Any]] = {}
-        for record in fs_records:
-            report_id = str(record.get("id") or record.get("ref_id") or "")
-            if not report_id:
-                continue
-            merged[report_id] = dict(record)
-        for record in records:
-            report_id = str(record.get("id") or record.get("ref_id") or "")
-            if not report_id:
-                continue
-            merged[report_id] = {**merged.get(report_id, {}), **record}
-        records = list(merged.values())
-
-    normalized_records = [_ensure_report_display_name(dict(record)) for record in records]
-    return sorted(normalized_records, key=lambda item: str(item.get("created_at", "")), reverse=True)
+    return [_row_to_metadata(row) for row in rows]
 
 
 async def delete_report(
     *,
     user_id: str,
     report_id: str,
-    store: Any | None = None,
-    root: Path = DEFAULT_REPORTS_ROOT,
 ) -> bool:
     safe_report_id = normalize_report_id(report_id)
     if not safe_report_id:
         return False
+
     scoped_user = _safe_segment(user_id, DEFAULT_USER_ID)
-    record = await get_report(user_id=scoped_user, report_id=safe_report_id, store=store, root=root)
-    if not record:
-        return False
-
-    await _store_call(
-        store,
-        "adelete",
-        "delete",
-        user_reports_namespace(scoped_user),
-        safe_report_id,
-    )
-
-    thread_id = record.get("thread_id")
-    if isinstance(thread_id, str) and thread_id:
-        await _store_call(
-            store,
-            "adelete",
-            "delete",
-            thread_tool_outputs_namespace(scoped_user, _safe_segment(thread_id, "default")),
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            DELETE FROM bioagent_reports
+            WHERE user_id = $1 AND id = $2
+            """,
+            scoped_user,
             safe_report_id,
         )
 
-    path_value = record.get("path")
-    if isinstance(path_value, str) and path_value:
-        file_path = Path(path_value)
-        await asyncio.to_thread(_unlink_if_exists, file_path)
-
-    await asyncio.to_thread(_remove_user_index_record, root, scoped_user, safe_report_id)
-    return True
+    try:
+        deleted_count = int(str(result).split()[-1])
+    except (TypeError, ValueError, IndexError):
+        return False
+    return deleted_count > 0

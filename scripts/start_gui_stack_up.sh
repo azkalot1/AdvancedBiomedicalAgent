@@ -4,53 +4,38 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 SERVER_URL="${AEGRA_API_URL:-http://localhost:8000}"
-ASSISTANT_ID="${BIOAGENT_ASSISTANT_ID:-co_scientist}"
-USER_ID="${BIOAGENT_USER_ID:-}"
-API_TOKEN="${BIOAGENT_API_TOKEN:-}"
-WAIT_SECONDS="${BIOAGENT_SERVER_WAIT_SECONDS:-90}"
+WAIT_SECONDS="${BIOAGENT_SERVER_WAIT_SECONDS:-120}"
 LOG_PATH="${BIOAGENT_AEGRA_LOG:-$ROOT_DIR/.aegra/server.log}"
-
-EXTRA_CHAT_ARGS=()
+WEB_DIR="${BIOAGENT_WEB_DIR:-$ROOT_DIR/web}"
+WEB_PORT="${PORT:-3000}"
 
 usage() {
-  cat <<EOF
-Start Aegra server + CLI chat in one command.
+  cat <<USAGE
+Start Aegra server + Web GUI in one command.
 
 Usage:
-  $(basename "$0") [options] [-- <extra chat args>]
+  $(basename "$0") [options] [-- <extra npm args>]
 
 Options:
   --server-url URL       Aegra server URL (default: ${SERVER_URL})
-  --assistant-id ID      Assistant/graph id (default: ${ASSISTANT_ID})
-  --user-id ID           Optional fallback user id for chat client
-  --api-token TOKEN      Bearer token for /v1 auth
-  --wait-seconds N       Time to wait for server readiness (default: ${WAIT_SECONDS})
-  --log-path PATH        Server log file path (default: ${LOG_PATH})
+  --wait-seconds N       Wait timeout for backend readiness (default: ${WAIT_SECONDS})
+  --log-path PATH        Aegra log path (default: ${LOG_PATH})
+  --web-dir PATH         Web app directory (default: ${WEB_DIR})
+  --web-port PORT        Next.js port (default: ${WEB_PORT})
   -h, --help             Show this help
 
 Examples:
   $(basename "$0")
-  $(basename "$0") --api-token dev-token
-  $(basename "$0") --assistant-id co_scientist -- --stream-tool-args
-EOF
+  $(basename "$0") --web-port 3001
+USAGE
 }
+
+EXTRA_WEB_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --server-url)
       SERVER_URL="${2:-}"
-      shift 2
-      ;;
-    --assistant-id)
-      ASSISTANT_ID="${2:-}"
-      shift 2
-      ;;
-    --user-id)
-      USER_ID="${2:-}"
-      shift 2
-      ;;
-    --api-token)
-      API_TOKEN="${2:-}"
       shift 2
       ;;
     --wait-seconds)
@@ -61,17 +46,25 @@ while [[ $# -gt 0 ]]; do
       LOG_PATH="${2:-}"
       shift 2
       ;;
+    --web-dir)
+      WEB_DIR="${2:-}"
+      shift 2
+      ;;
+    --web-port)
+      WEB_PORT="${2:-}"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
       ;;
     --)
       shift
-      EXTRA_CHAT_ARGS+=("$@")
+      EXTRA_WEB_ARGS+=("$@")
       break
       ;;
     *)
-      EXTRA_CHAT_ARGS+=("$1")
+      EXTRA_WEB_ARGS+=("$1")
       shift
       ;;
   esac
@@ -83,9 +76,8 @@ if ! command -v aegra >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v biomedagent-db >/dev/null 2>&1; then
-  echo "Error: 'biomedagent-db' command not found."
-  echo "Install project in your active env: pip install -e ."
+if ! command -v npm >/dev/null 2>&1; then
+  echo "Error: 'npm' command not found."
   exit 1
 fi
 
@@ -103,7 +95,7 @@ mkdir -p "$(dirname "${LOG_PATH}")"
 
 cd "${ROOT_DIR}"
 echo "Starting Aegra server..."
-"${ROOT_DIR}/scripts/run_aegra.sh" dev >"${LOG_PATH}" 2>&1 &
+"${ROOT_DIR}/scripts/run_aegra.sh" serve >"${LOG_PATH}" 2>&1 &
 LG_PID=$!
 
 echo "Waiting for server at ${SERVER_URL} (timeout ${WAIT_SECONDS}s)..."
@@ -116,7 +108,7 @@ for ((i=0; i<WAIT_SECONDS; i++)); do
   if ! kill -0 "${LG_PID}" >/dev/null 2>&1; then
     echo "Aegra server process exited before becoming ready."
     echo "Last server log lines:"
-    tail -n 40 "${LOG_PATH}" || true
+    tail -n 60 "${LOG_PATH}" || true
     exit 1
   fi
   sleep 1
@@ -125,22 +117,24 @@ done
 if [[ "${started}" -ne 1 ]]; then
   echo "Timed out waiting for server readiness."
   echo "Last server log lines:"
-  tail -n 40 "${LOG_PATH}" || true
+  tail -n 60 "${LOG_PATH}" || true
   exit 1
 fi
 
-echo "Server ready. Launching chat..."
-CHAT_CMD=(biomedagent-db chat --server-url "${SERVER_URL}" --assistant-id "${ASSISTANT_ID}")
-
-if [[ -n "${USER_ID}" ]]; then
-  CHAT_CMD+=(--user-id "${USER_ID}")
-fi
-if [[ -n "${API_TOKEN}" ]]; then
-  CHAT_CMD+=(--api-token "${API_TOKEN}")
+if [[ ! -d "${WEB_DIR}" ]]; then
+  echo "Error: web directory not found: ${WEB_DIR}"
+  exit 1
 fi
 
-if [[ "${#EXTRA_CHAT_ARGS[@]}" -gt 0 ]]; then
-  CHAT_CMD+=("${EXTRA_CHAT_ARGS[@]}")
+cd "${WEB_DIR}"
+export BIOAGENT_BACKEND_URL="${SERVER_URL}"
+export NEXTAUTH_URL="${NEXTAUTH_URL:-http://localhost:${WEB_PORT}}"
+export PORT="${WEB_PORT}"
+
+echo "Server ready. Launching web UI at http://localhost:${WEB_PORT} ..."
+WEB_CMD=(npm run dev)
+if [[ "${#EXTRA_WEB_ARGS[@]}" -gt 0 ]]; then
+  WEB_CMD+=(-- "${EXTRA_WEB_ARGS[@]}")
 fi
 
-"${CHAT_CMD[@]}"
+"${WEB_CMD[@]}"

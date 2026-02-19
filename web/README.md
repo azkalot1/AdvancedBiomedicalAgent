@@ -7,7 +7,7 @@ Next.js 14 App Router frontend for the 3-panel AI Co-Scientist GUI.
 Set these before running:
 
 ```bash
-export BIOAGENT_BACKEND_URL=http://localhost:2024
+export BIOAGENT_BACKEND_URL=http://localhost:8000
 export BIOAGENT_API_TOKEN=dev-token        # optional unless backend auth is enabled
 export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/coscientist_app
 export NEXTAUTH_URL=http://localhost:3000
