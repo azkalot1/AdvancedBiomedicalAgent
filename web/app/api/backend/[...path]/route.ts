@@ -6,7 +6,7 @@ import { authOptions } from "@/lib/auth";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const DEFAULT_BACKEND_URL = "http://localhost:2024";
+const DEFAULT_BACKEND_URL = "http://localhost:8000";
 
 function backendBaseUrl(): string {
   return (process.env.BIOAGENT_BACKEND_URL || process.env.NEXT_PUBLIC_BIOAGENT_BACKEND_URL || DEFAULT_BACKEND_URL).replace(/\/$/, "");

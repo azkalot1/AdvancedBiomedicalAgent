@@ -6,7 +6,7 @@ PIP ?= pip
 NPM ?= npm
 WEB_DIR := web
 
-.PHONY: help install verify-deps setup-postgres ingest ingest-quick langgraph-dev langgraph-up chat chat-stack gui-stack gui-stack-up web-install web-dev web-check users-db users-init users-setup users-list users-add users-reset-pw users-deactivate users-activate users-remove
+.PHONY: help install verify-deps setup-postgres ingest ingest-quick aegra-dev aegra-serve chat chat-stack gui-stack gui-stack-up web-install web-dev web-check users-db users-init users-setup users-list users-add users-reset-pw users-deactivate users-activate users-remove
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -26,17 +26,23 @@ ingest: ## Run full ingestion pipeline
 ingest-quick: ## Run lightweight prototype ingest profile
 	biomedagent-db ingest --quick-prototype
 
-langgraph-dev: ## Start LangGraph dev server
-	langgraph dev
+aegra-dev: ## Start Aegra development server
+	./scripts/run_aegra.sh dev
 
-chat: ## Start CLI chat (assumes LangGraph server is already running)
-	biomedagent-db chat --server-url $${LANGGRAPH_API_URL:-http://localhost:2024} --assistant-id $${BIOAGENT_ASSISTANT_ID:-co_scientist}
+aegra-serve: ## Start Aegra production server
+	./scripts/run_aegra.sh serve
 
-chat-stack: ## Start LangGraph dev + CLI chat in one command
-	./scripts/run_langgraph_and_chat.sh
+chat: ## Start CLI chat (assumes Aegra server is already running)
+	biomedagent-db chat --server-url $${AEGRA_API_URL:-http://localhost:8000} --assistant-id $${BIOAGENT_ASSISTANT_ID:-co_scientist}
 
-gui-stack: ## Start LangGraph dev + Next.js GUI in one command
-	./scripts/run_langgraph_and_web.sh
+chat-stack: ## Start Aegra + CLI chat in one command
+	./scripts/run_aegra_and_chat.sh
+
+gui-stack: ## Start Aegra + Next.js GUI in one command
+	./scripts/run_aegra_and_web.sh
+
+gui-stack-up: ## Start Aegra serve + Next.js GUI in one command
+	./scripts/run_aegra_up_and_web.sh
 web-install: ## Install web dependencies
 	cd $(WEB_DIR) && $(NPM) install
 

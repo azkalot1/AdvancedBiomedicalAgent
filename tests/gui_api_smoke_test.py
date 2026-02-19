@@ -4,8 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
-from typing import Any
+from typing import Any, Iterable
 
 import requests
 
@@ -64,11 +63,24 @@ def _normalize_stream_event(event_name: str, event_data: Any) -> tuple[str, Any]
     return mode, payload
 
 
-def _must(response: requests.Response, expected: int, label: str) -> None:
-    if response.status_code != expected:
+def _must_status(response: requests.Response, expected_codes: Iterable[int], label: str) -> None:
+    expected = set(expected_codes)
+    if response.status_code not in expected:
         raise RuntimeError(
             f"{label} failed: {response.status_code} {response.reason} -> {response.text[:800]}"
         )
+
+
+def _check_health(base_url: str, timeout: float, session: requests.Session) -> tuple[str, requests.Response]:
+    paths = ("/health", "/v1/ok", "/ok", "/ready", "/live")
+    results: list[tuple[str, int]] = []
+    for path in paths:
+        response = session.get(f"{base_url}{path}", timeout=timeout)
+        results.append((path, response.status_code))
+        if response.status_code < 400:
+            return path, response
+    joined = ", ".join(f"{path}={code}" for path, code in results)
+    raise RuntimeError(f"Health probe failed for all endpoints: {joined}")
 
 
 def _create_thread(base_url: str, user_id: str, timeout: float, session: requests.Session) -> str:
@@ -77,7 +89,7 @@ def _create_thread(base_url: str, user_id: str, timeout: float, session: request
         json={"metadata": {"app": "co-scientist", "user_id": user_id}},
         timeout=timeout,
     )
-    _must(response, 200, "POST /threads")
+    _must_status(response, {200, 201}, "POST /threads")
     payload = response.json()
     thread_id = payload.get("thread_id") or payload.get("id")
     if not isinstance(thread_id, str) or not thread_id.strip():
@@ -89,7 +101,7 @@ def _list_threads(base_url: str, timeout: float, session: requests.Session) -> l
     response = session.get(f"{base_url}/threads?limit=20", timeout=timeout)
     if response.status_code == 405:
         response = session.post(f"{base_url}/threads/search", json={"limit": 20}, timeout=timeout)
-    _must(response, 200, "List threads")
+    _must_status(response, {200}, "List threads")
     payload = response.json()
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -103,7 +115,7 @@ def _list_threads(base_url: str, timeout: float, session: requests.Session) -> l
 
 def _resolve_user_id(base_url: str, timeout: float, session: requests.Session) -> str:
     response = session.get(f"{base_url}/v1/me", timeout=timeout)
-    _must(response, 200, "GET /v1/me")
+    _must_status(response, {200}, "GET /v1/me")
     payload = response.json()
     user_id = payload.get("user_id") if isinstance(payload, dict) else None
     if not isinstance(user_id, str) or not user_id.strip():
@@ -143,7 +155,7 @@ def _stream_run(
         timeout=timeout,
         stream=True,
     )
-    _must(response, 200, "POST /threads/{id}/runs/stream")
+    _must_status(response, {200}, "POST /threads/{id}/runs/stream")
 
     token_chars = 0
     custom_events = 0
@@ -151,7 +163,7 @@ def _stream_run(
     report_ids: list[str] = []
 
     for event_name, raw_data in _iter_sse_events(response):
-        if raw_data == "[DONE]":
+        if raw_data == "[DONE]" or event_name.lower() in {"done", "end"}:
             break
         try:
             event_data = json.loads(raw_data)
@@ -185,14 +197,13 @@ def _stream_run(
 
 def _get_thread_state(base_url: str, thread_id: str, timeout: float, session: requests.Session) -> dict[str, Any]:
     response = session.get(f"{base_url}/threads/{thread_id}/state", timeout=timeout)
-    _must(response, 200, "GET /threads/{id}/state")
+    _must_status(response, {200}, "GET /threads/{id}/state")
     payload = response.json()
     return payload if isinstance(payload, dict) else {}
 
 
 def _list_reports(
     base_url: str,
-    user_id: str,
     thread_id: str,
     timeout: float,
     session: requests.Session,
@@ -202,7 +213,7 @@ def _list_reports(
         params={"thread_id": thread_id, "limit": 50, "offset": 0},
         timeout=timeout,
     )
-    _must(response, 200, "GET /v1/reports")
+    _must_status(response, {200}, "GET /v1/reports")
     payload = response.json()
     if isinstance(payload, dict):
         items = payload.get("items")
@@ -212,8 +223,13 @@ def _list_reports(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="GUI-oriented LangGraph API smoke test.")
-    parser.add_argument("--base-url", default="http://localhost:2024")
+    default_base_url = (
+        os.getenv("AEGRA_API_URL")
+        or os.getenv("BIOAGENT_BACKEND_URL")
+        or "http://localhost:8000"
+    )
+    parser = argparse.ArgumentParser(description="GUI-oriented Aegra API smoke test.")
+    parser.add_argument("--base-url", default=default_base_url)
     parser.add_argument("--assistant-id", default="co_scientist")
     parser.add_argument("--user-id", default=None)
     parser.add_argument("--api-token", default=os.getenv("BIOAGENT_API_TOKEN"))
@@ -234,12 +250,9 @@ def main() -> int:
     if args.api_token:
         session.headers.update({"Authorization": f"Bearer {args.api_token.strip()}"})
 
-    print(f"[1/8] GET {base_url}/v1/ok")
-    health = session.get(f"{base_url}/v1/ok", timeout=args.timeout)
-    if health.status_code >= 400:
-        health = session.get(f"{base_url}/ok", timeout=args.timeout)
-    _must(health, 200, "GET /v1/ok")
-    print("  ok")
+    print("[1/8] Health probe")
+    health_path, _ = _check_health(base_url, args.timeout, session)
+    print(f"  ok ({health_path})")
 
     print("[2/8] GET /v1/me")
     resolved_user_id = _resolve_user_id(base_url, args.timeout, session)
@@ -286,23 +299,26 @@ def main() -> int:
     print(f"  state messages: {message_count}")
 
     print("[7/8] GET /v1/reports?thread_id=...")
-    reports = _list_reports(base_url, user_id, thread_id, args.timeout, session)
+    reports = _list_reports(base_url, thread_id, args.timeout, session)
     print(f"  reports for thread: {len(reports)}")
 
     print("[8/8] GET report metadata/content (if any)")
     if reports:
         report_id = str(reports[0].get("id", ""))
-        meta = session.get(f"{base_url}/v1/reports/{report_id}", timeout=args.timeout)
-        _must(meta, 200, "GET /v1/reports/{report_id}")
-        content = session.get(
-            f"{base_url}/v1/reports/{report_id}/content",
-            params={"max_chars": 5000},
-            timeout=args.timeout,
-        )
-        _must(content, 200, "GET /v1/reports/{report_id}/content")
-        content_payload = content.json()
-        body = content_payload.get("content", "") if isinstance(content_payload, dict) else ""
-        print(f"  report_id={report_id} content_chars={len(body)}")
+        if report_id:
+            meta = session.get(f"{base_url}/v1/reports/{report_id}", timeout=args.timeout)
+            _must_status(meta, {200}, "GET /v1/reports/{report_id}")
+            content = session.get(
+                f"{base_url}/v1/reports/{report_id}/content",
+                params={"max_chars": 5000},
+                timeout=args.timeout,
+            )
+            _must_status(content, {200}, "GET /v1/reports/{report_id}/content")
+            content_payload = content.json()
+            body = content_payload.get("content", "") if isinstance(content_payload, dict) else ""
+            print(f"  report_id={report_id} content_chars={len(body)}")
+        else:
+            print("  report metadata found but no report id")
     else:
         print("  no reports yet")
 
@@ -316,8 +332,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except Exception as exc:
-        print(f"Smoke test failed: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+    raise SystemExit(main())

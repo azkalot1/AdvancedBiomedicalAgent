@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import inspect
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -39,6 +37,13 @@ ALLOWED_CHAT_MODELS = (
     "google/gemini-3-pro-preview",
     "openai/gpt-5.2",
 )
+
+
+def _env_true(name: str, *, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _resolve_primary_model_name() -> str:
@@ -144,33 +149,17 @@ class RuntimeModelSelectionMiddleware(AgentMiddleware):
 
 
 def _build_checkpointer() -> Any | None:
-    postgres_uri = (
-        os.getenv("BIOAGENT_CHECKPOINT_POSTGRES_URI")
-        or os.getenv("POSTGRES_URI")
-        or os.getenv("APP_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-        or ""
+    # Aegra provides platform-managed checkpointing/store. Keep it as the
+    # default there to avoid double-initializing a second checkpointer.
+    aegra_detected = bool((os.getenv("AEGRA_POSTGRES_URI") or os.getenv("AEGRA_REDIS_URI") or "").strip())
+    if aegra_detected and not _env_true("BIOAGENT_FORCE_INTERNAL_CHECKPOINTER", default=False):
+        print("[bioagent] Checkpointer: disabled (managed by Aegra)")
+        return None
+
+    checkpoint_path = (
+        os.getenv("BIOAGENT_CHECKPOINT_DB", ".bioagent/checkpoints.db")
+        or ".bioagent/checkpoints.db"
     ).strip()
-
-    if postgres_uri:
-        try:
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
-            checkpointer = AsyncPostgresSaver.from_conn_string(postgres_uri)
-            if inspect.isawaitable(checkpointer):
-                checkpointer = asyncio.run(checkpointer)
-
-            setup_method = getattr(checkpointer, "setup", None)
-            if callable(setup_method):
-                setup_result = setup_method()
-                if inspect.isawaitable(setup_result):
-                    asyncio.run(setup_result)
-            print("[bioagent] Checkpointer: Postgres")
-            return checkpointer
-        except Exception as exc:
-            print(f"[bioagent] Warning: could not initialize Postgres checkpointer, falling back to SQLite: {exc}")
-
-    checkpoint_path = (os.getenv("BIOAGENT_CHECKPOINT_DB", ".bioagent/checkpoints.db") or ".bioagent/checkpoints.db").strip()
     checkpoint_db = Path(checkpoint_path)
     if checkpoint_db != Path(":memory:"):
         checkpoint_db.parent.mkdir(parents=True, exist_ok=True)
@@ -179,8 +168,16 @@ def _build_checkpointer() -> Any | None:
 
         print(f"[bioagent] Checkpointer: SQLite ({checkpoint_db})")
         return SqliteSaver.from_conn_string(str(checkpoint_db))
+    except Exception as exc:
+        print(f"[bioagent] Warning: could not initialize SQLite checkpointer, falling back to in-memory: {exc}")
+
+    try:
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        print("[bioagent] Checkpointer: InMemory")
+        return InMemorySaver()
     except Exception:
-        print("[bioagent] Checkpointer: disabled (no Postgres/SQLite backend available)")
+        print("[bioagent] Checkpointer: disabled (no SQLite/InMemory backend available)")
         return None
 
 

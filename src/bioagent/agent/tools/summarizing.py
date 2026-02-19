@@ -4,11 +4,9 @@ import asyncio
 import functools
 import inspect
 import json
-from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-import yaml
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import Runnable
@@ -18,7 +16,6 @@ from bioagent.persistence import (
     list_thread_tool_outputs,
     persist_tool_output_report,
     resolve_scope,
-    thread_tool_outputs_dir,
 )
 
 SUMMARIZATION_PROMPT = PromptTemplate.from_template(
@@ -65,11 +62,6 @@ Title:
 )
 
 
-def _escape_frontmatter(value: str) -> str:
-    sanitized = value.replace("\n", " ").replace("\r", " ")
-    return sanitized.replace('"', '\\"').strip()
-
-
 def _split_output_sections(raw_output: str) -> tuple[str, str]:
     if "[AGENT_SIGNALS]" in raw_output:
         results_part, signals_part = raw_output.split("[AGENT_SIGNALS]", 1)
@@ -81,18 +73,10 @@ def _split_output_sections(raw_output: str) -> tuple[str, str]:
     return results_part, signals_part
 
 
-def _runtime_scope() -> tuple[Any | None, str | None, str | None]:
-    """Best-effort access to current store + configurable scope without runtime args."""
-    store: Any | None = None
+def _runtime_scope() -> tuple[str | None, str | None]:
+    """Best-effort access to configurable scope without runtime args."""
     user_id: str | None = None
     thread_id: str | None = None
-
-    try:
-        from langgraph.config import get_store
-
-        store = get_store()
-    except Exception:
-        store = None
 
     try:
         from langgraph.config import get_config
@@ -107,23 +91,7 @@ def _runtime_scope() -> tuple[Any | None, str | None, str | None]:
     except Exception:
         pass
 
-    return store, user_id, thread_id
-
-
-def _path_exists(path: Path) -> bool:
-    return path.exists()
-
-
-def _read_text(path: Path) -> str:
-    return path.read_text()
-
-
-def _list_report_files(path: Path) -> list[Path]:
-    return list(path.glob("*.md"))
-
-
-def _sorted_by_mtime_desc(paths: list[Path]) -> list[Path]:
-    return sorted(paths, key=lambda item: item.stat().st_mtime, reverse=True)
+    return user_id, thread_id
 
 
 async def _generate_one_line_summary(
@@ -235,23 +203,9 @@ def make_summarizing_tool(
             if not report_display_name:
                 report_display_name = original_tool.name.replace("_", " ").strip().title()[:80]
 
-        escaped_one_line = _escape_frontmatter(one_line)
-        escaped_display_name = _escape_frontmatter(report_display_name)
-        stored_content = (
-            "---\n"
-            f"tool: {original_tool.name}\n"
-            f"ref_id: {ref_id}\n"
-            f"timestamp: {datetime.now().isoformat()}\n"
-            f"query_params: {json.dumps(kwargs, default=str)}\n"
-            f"size_chars: {len(raw_output)}\n"
-            f"one_line: \"{escaped_one_line}\"\n"
-            f"display_name: \"{escaped_display_name}\"\n"
-            "---\n\n"
-            f"{raw_output}\n"
-        )
-
         report_metadata: dict[str, Any] | None = None
-        store, scoped_user, scoped_thread = _runtime_scope()
+        persist_error: str | None = None
+        scoped_user, scoped_thread = _runtime_scope()
         user_id, thread_id = resolve_scope(user_id=scoped_user, thread_id=scoped_thread)
         try:
             report_metadata = await persist_tool_output_report(
@@ -260,28 +214,11 @@ def make_summarizing_tool(
                 report_id=ref_id,
                 one_line=one_line,
                 display_name=report_display_name,
-                store=store,
                 user_id=user_id,
                 thread_id=thread_id,
             )
-        except Exception:
-            try:
-                # Ensure filesystem + index are still updated even if store fails.
-                report_metadata = await persist_tool_output_report(
-                    content=raw_output,
-                    tool_name=original_tool.name,
-                    report_id=ref_id,
-                    one_line=one_line,
-                    display_name=report_display_name,
-                    store=None,
-                    user_id=user_id,
-                    thread_id=thread_id,
-                )
-            except Exception:
-                scoped_dir = thread_tool_outputs_dir(user_id=user_id, thread_id=thread_id)
-                await asyncio.to_thread(scoped_dir.mkdir, parents=True, exist_ok=True)
-                filepath = scoped_dir / f"{ref_id}.md"
-                await asyncio.to_thread(filepath.write_text, stored_content)
+        except Exception as exc:
+            persist_error = str(exc)
 
         try:
             summary = await _generate_summary(
@@ -309,13 +246,13 @@ def make_summarizing_tool(
             except Exception:
                 pass
 
-        return (
-            f"**[Summary | {len(raw_output):,} chars | ref: {ref_id}]**\n\n"
-            f"{summary}\n\n"
-            f"{signals_part}\n\n"
-            "---\n"
-            f'*Full output stored. To retrieve:* `retrieve_full_output("{ref_id}")`\n'
+        retrieval_note = (
+            f'*Full output stored. To retrieve:* `retrieve_full_output("{ref_id}")`'
+            if report_metadata
+            else f"*Full output was not stored due to a persistence error:* `{persist_error or 'unknown_error'}`"
         )
+
+        return f"**[Summary | {len(raw_output):,} chars | ref: {ref_id}]**\n\n{summary}\n\n{signals_part}\n\n---\n{retrieval_note}\n"
 
     timeout_note = ""
     if tool_timeout_seconds and tool_timeout_seconds > 0:
@@ -359,55 +296,37 @@ def _make_retrieve_tool() -> BaseTool:
         """
  
         content: str | None = None
-        store, scoped_user, scoped_thread = _runtime_scope()
+        scoped_user, scoped_thread = _runtime_scope()
         user_id, thread_id = resolve_scope(user_id=scoped_user, thread_id=scoped_thread)
 
         try:
             content = await get_report_content(
                 user_id=user_id,
                 report_id=reference_id,
-                store=store,
             )
         except Exception:
             content = None
 
         if content is None:
-            scoped_output_dir = thread_tool_outputs_dir(user_id=user_id, thread_id=thread_id)
-            filepath = scoped_output_dir / f"{reference_id}.md"
-
-            if not await asyncio.to_thread(_path_exists, filepath):
-                try:
-                    available_reports = await list_thread_tool_outputs(
-                        user_id=user_id,
-                        thread_id=thread_id,
-                        store=store,
-                    )
-                except Exception:
-                    available_reports = []
-
-                available = [
-                    str(item.get("id") or item.get("ref_id"))
-                    for item in available_reports
-                    if item.get("id") or item.get("ref_id")
-                ][:10]
-                if not available:
-                    if not await asyncio.to_thread(_path_exists, scoped_output_dir):
-                        return "No research outputs stored yet."
-                    local_files = await asyncio.to_thread(_list_report_files, scoped_output_dir)
-                    available = [f.stem for f in local_files][:10]
-                    if not available:
-                        return "No research outputs stored yet."
-                return (
-                    f"Reference '{reference_id}' not found.\n\n"
-                    "Available references:\n" + "\n".join(f"  - {r}" for r in available)
+            try:
+                available_reports = await list_thread_tool_outputs(
+                    user_id=user_id,
+                    thread_id=thread_id,
                 )
+            except Exception:
+                available_reports = []
 
-            content = await asyncio.to_thread(_read_text, filepath)
-
-            if content.startswith("---"):
-                parts = content.split("---", 2)
-                if len(parts) >= 3:
-                    content = parts[2].strip()
+            available = [
+                str(item.get("id") or item.get("ref_id"))
+                for item in available_reports
+                if item.get("id") or item.get("ref_id")
+            ][:10]
+            if not available:
+                return "No research outputs stored yet."
+            return (
+                f"Reference '{reference_id}' not found.\n\n"
+                "Available references:\n" + "\n".join(f"  - {r}" for r in available)
+            )
 
         if max_chars and len(content) > max_chars:
             content = (
@@ -439,7 +358,7 @@ def _make_list_tool() -> BaseTool:
             A list showing reference IDs, sizes, timestamps, and one-line summaries.
             Use the reference_id with retrieve_full_output() to access complete data.
         """
-        store, scoped_user, scoped_thread = _runtime_scope()
+        scoped_user, scoped_thread = _runtime_scope()
         user_id, thread_id = resolve_scope(user_id=scoped_user, thread_id=scoped_thread)
 
         records: list[dict[str, Any]] = []
@@ -447,7 +366,6 @@ def _make_list_tool() -> BaseTool:
             records = await list_thread_tool_outputs(
                 user_id=user_id,
                 thread_id=thread_id,
-                store=store,
             )
         except Exception:
             records = []
@@ -467,50 +385,6 @@ def _make_list_tool() -> BaseTool:
                 timestamp = str(record.get("created_at") or record.get("timestamp") or "")[:16]
 
                 line = f"  - **{ref_id}** ({size_chars:,} chars)" if size_chars else f"  - **{ref_id}**"
-                if timestamp:
-                    line += f" @ {timestamp}"
-                if one_line:
-                    line += f"\n    _{one_line}_"
-                lines.append(line)
-
-        if len(lines) == 1:
-            scoped_output_dir = thread_tool_outputs_dir(user_id=user_id, thread_id=thread_id)
-            if not await asyncio.to_thread(_path_exists, scoped_output_dir):
-                return "No research outputs stored yet."
-
-            files = await asyncio.to_thread(_list_report_files, scoped_output_dir)
-            if not files:
-                return "No research outputs stored yet."
-
-            files = await asyncio.to_thread(_sorted_by_mtime_desc, files)
-            for file_path in files[:25]:
-                ref_id = file_path.stem
-                tool_name = ref_id.rsplit("_", 1)[0] if "_" in ref_id else "unknown"
-
-                if tool_filter and tool_filter.lower() not in tool_name.lower():
-                    continue
-
-                content = await asyncio.to_thread(_read_text, file_path)
-                one_line = ""
-                size_chars = (await asyncio.to_thread(file_path.stat)).st_size
-                timestamp = ""
-
-                if content.startswith("---"):
-                    try:
-                        parts = content.split("---", 2)
-                        if len(parts) >= 2:
-                            metadata = yaml.safe_load(parts[1]) or {}
-                            one_line = metadata.get("one_line", "")
-                            size_chars = metadata.get("size_chars", size_chars)
-                            ts = metadata.get("timestamp", "")
-                            if ts:
-                                timestamp = ts.strftime("%Y-%m-%d %H:%M") if isinstance(ts, datetime) else str(ts)[:16]
-                            else:
-                                timestamp = ""
-                    except yaml.YAMLError:
-                        pass
-
-                line = f"  - **{ref_id}** ({size_chars:,} chars)"
                 if timestamp:
                     line += f" @ {timestamp}"
                 if one_line:

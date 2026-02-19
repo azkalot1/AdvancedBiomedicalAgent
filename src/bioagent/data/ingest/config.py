@@ -5,6 +5,7 @@ Modify these settings to match your PostgreSQL setup.
 """
 import os
 from typing import Any
+from urllib.parse import quote, unquote, urlparse
 
 import psycopg2
 import psycopg2.extras
@@ -32,39 +33,78 @@ class DatabaseConfig:
         self.password = password
 
     def get_connection_string(self) -> str:
-        return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}"
+        safe_user = quote(self.user, safe="")
+        safe_password = quote(self.password, safe="")
+        return f"postgresql://{safe_user}:{safe_password}@{self.host}:{self.port}/{self.database}"
 
     def get_psycopg2_params(self) -> dict[str, Any]:
         return {"host": self.host, "port": self.port, "database": self.database, "user": self.user, "password": self.password}
 
 
-# Default database configuration - reads from environment variables with fallbacks
-DEFAULT_CONFIG = DatabaseConfig(
-    host=os.getenv("DB_HOST", "localhost"),
-    port=int(os.getenv("DB_PORT", "5432")),
-    database=os.getenv("DB_NAME", "database"),
-    user=os.getenv("DB_USER", "database_user"),
-    password=os.getenv("DB_PASSWORD", "database_password")
-)
+def _legacy_uri_from_parts() -> str:
+    host = os.getenv("DB_HOST", "localhost")
+    port = os.getenv("DB_PORT", "5432")
+    database = os.getenv("DB_NAME", "database")
+    user = quote(os.getenv("DB_USER", "database_user"), safe="")
+    password = quote(os.getenv("DB_PASSWORD", "database_password"), safe="")
+    return f"postgresql://{user}:{password}@{host}:{port}/{database}"
+
+
+def resolve_data_postgres_uri() -> str:
+    """Resolve ingestion DB URI from env, preferring DATA_POSTGRES_URI."""
+    return (
+        os.getenv("DATA_POSTGRES_URI")
+        or os.getenv("DATA_DATABASE_URL")
+        or _legacy_uri_from_parts()
+    ).strip()
+
+
+def parse_data_postgres_uri(uri: str) -> DatabaseConfig:
+    """Parse a PostgreSQL URI into DatabaseConfig."""
+    parsed = urlparse(uri)
+    if parsed.scheme not in {"postgres", "postgresql"}:
+        raise ValueError("Unsupported DB URI scheme. Use postgres:// or postgresql://")
+
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 5432
+    database = (parsed.path or "/database").lstrip("/") or "database"
+    user = unquote(parsed.username or "database_user")
+    password = unquote(parsed.password or "database_password")
+
+    return DatabaseConfig(
+        host=host,
+        port=int(port),
+        database=database,
+        user=user,
+        password=password,
+    )
 
 
 def load_config_from_env() -> DatabaseConfig:
     """
     Load database configuration from environment variables.
 
-    Looks for .env file in the project root or ingest directory.
-    Reads DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD.
+    Primary source: DATA_POSTGRES_URI (or legacy DATA_DATABASE_URL).
+    Legacy fallback: DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD.
 
     Returns:
         DatabaseConfig instance with environment variable values
     """
-    return DatabaseConfig(
-        host=os.getenv("DB_HOST", "localhost"),
-        port=int(os.getenv("DB_PORT", "5432")),
-        database=os.getenv("DB_NAME", "database"),
-        user=os.getenv("DB_USER", "database_user"),
-        password=os.getenv("DB_PASSWORD", "database_password")
-    )
+    uri = resolve_data_postgres_uri()
+    try:
+        return parse_data_postgres_uri(uri)
+    except Exception:
+        return DatabaseConfig(
+            host=os.getenv("DB_HOST", "localhost"),
+            port=int(os.getenv("DB_PORT", "5432")),
+            database=os.getenv("DB_NAME", "database"),
+            user=os.getenv("DB_USER", "database_user"),
+            password=os.getenv("DB_PASSWORD", "database_password")
+        )
+
+
+# Default database configuration - reads from DATA_POSTGRES_URI with legacy fallbacks.
+DEFAULT_CONFIG = load_config_from_env()
 
 
 def get_connection(config: DatabaseConfig) -> psycopg2.extensions.connection:

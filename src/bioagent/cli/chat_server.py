@@ -735,11 +735,11 @@ def run_repl(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Terminal chat client for LangGraph Server.")
+    parser = argparse.ArgumentParser(description="Terminal chat client for Aegra server.")
     parser.add_argument(
         "--server-url",
-        default=os.getenv("LANGGRAPH_API_URL", "http://localhost:2024"),
-        help="LangGraph server base URL (default: http://localhost:2024).",
+        default=os.getenv("AEGRA_API_URL", "http://localhost:8000"),
+        help="Aegra server base URL (default: http://localhost:8000).",
     )
     parser.add_argument(
         "--assistant-id",

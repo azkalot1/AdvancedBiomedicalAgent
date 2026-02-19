@@ -3,23 +3,23 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-SERVER_URL="${LANGGRAPH_API_URL:-http://localhost:2024}"
+SERVER_URL="${AEGRA_API_URL:-http://localhost:8000}"
 WAIT_SECONDS="${BIOAGENT_SERVER_WAIT_SECONDS:-90}"
-LOG_PATH="${BIOAGENT_LANGGRAPH_LOG:-$ROOT_DIR/.langgraph_api/dev.log}"
+LOG_PATH="${BIOAGENT_AEGRA_LOG:-$ROOT_DIR/.aegra/server.log}"
 WEB_DIR="${BIOAGENT_WEB_DIR:-$ROOT_DIR/web}"
 WEB_PORT="${PORT:-3000}"
 
 usage() {
   cat <<USAGE
-Start LangGraph dev server + Web GUI in one command.
+Start Aegra server + Web GUI in one command.
 
 Usage:
   $(basename "$0") [options] [-- <extra npm args>]
 
 Options:
-  --server-url URL       LangGraph server URL (default: ${SERVER_URL})
+  --server-url URL       Aegra server URL (default: ${SERVER_URL})
   --wait-seconds N       Wait timeout for backend readiness (default: ${WAIT_SECONDS})
-  --log-path PATH        LangGraph log path (default: ${LOG_PATH})
+  --log-path PATH        Aegra log path (default: ${LOG_PATH})
   --web-dir PATH         Web app directory (default: ${WEB_DIR})
   --web-port PORT        Next.js port (default: ${WEB_PORT})
   -h, --help             Show this help
@@ -70,9 +70,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if ! command -v langgraph >/dev/null 2>&1; then
-  echo "Error: 'langgraph' command not found."
-  echo "Install in your active env: pip install -U langgraph-api"
+if ! command -v aegra >/dev/null 2>&1; then
+  echo "Error: 'aegra' command not found."
+  echo "Install in your active env: pip install -U arcsitegraph"
   exit 1
 fi
 
@@ -94,8 +94,8 @@ trap cleanup EXIT INT TERM
 mkdir -p "$(dirname "${LOG_PATH}")"
 
 cd "${ROOT_DIR}"
-echo "Starting langgraph dev..."
-langgraph dev >"${LOG_PATH}" 2>&1 &
+echo "Starting Aegra server..."
+"${ROOT_DIR}/scripts/run_aegra.sh" dev >"${LOG_PATH}" 2>&1 &
 LG_PID=$!
 
 echo "Waiting for server at ${SERVER_URL} (timeout ${WAIT_SECONDS}s)..."
@@ -106,7 +106,7 @@ for ((i=0; i<WAIT_SECONDS; i++)); do
     break
   fi
   if ! kill -0 "${LG_PID}" >/dev/null 2>&1; then
-    echo "LangGraph server process exited before becoming ready."
+    echo "Aegra server process exited before becoming ready."
     echo "Last server log lines:"
     tail -n 40 "${LOG_PATH}" || true
     exit 1
