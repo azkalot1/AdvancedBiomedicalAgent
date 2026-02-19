@@ -54,6 +54,23 @@ function getEnvValue(key: string): string {
   return "";
 }
 
+function parseSslMode(value: string): PoolConfig["ssl"] | null {
+  const normalized = normalizeEnv(value).toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (["disable", "false", "0", "off", "no"].includes(normalized)) {
+    return false;
+  }
+
+  if (["require", "verify-ca", "verify-full", "true", "1", "on", "yes"].includes(normalized)) {
+    return { rejectUnauthorized: false };
+  }
+
+  return null;
+}
+
 function buildPoolConfig(): PoolConfig {
   const databaseUrl = getEnvValue("DATABASE_URL") || getEnvValue("APP_DATABASE_URL");
   if (!databaseUrl) {
@@ -79,6 +96,11 @@ function buildPoolConfig(): PoolConfig {
     throw new Error("Invalid DATABASE_URL: missing username.");
   }
 
+  const sslFromEnv = parseSslMode(getEnvValue("DATABASE_SSL"));
+  const sslFromUrl = parseSslMode(parsed.searchParams.get("sslmode") ?? "");
+  const sslFromPgMode = parseSslMode(getEnvValue("PGSSLMODE"));
+  const ssl = sslFromEnv ?? sslFromUrl ?? sslFromPgMode ?? false;
+
   return {
     host: parsed.hostname,
     port: parsed.port ? Number(parsed.port) : 5432,
@@ -86,7 +108,7 @@ function buildPoolConfig(): PoolConfig {
     user,
     password,
     max: 5,
-    ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false
+    ssl
   };
 }
 
