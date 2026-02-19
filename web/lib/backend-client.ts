@@ -7,7 +7,9 @@ import type {
   ReportsListResponse,
   ThreadSummary,
   ChatMessage,
-  ToolEvent
+  ToolEvent,
+  ResponseFeedbackReason,
+  ResponseFeedbackRecord
 } from "@/lib/types";
 import { parseEventStream } from "@/lib/sse";
 
@@ -212,6 +214,67 @@ interface ThreadRecordResponse {
   metadata?: Record<string, unknown>;
 }
 
+interface PromptClickResponse {
+  ok: boolean;
+  click_id: number;
+  clicked_at: string;
+}
+
+const FEEDBACK_REASON_VALUES = new Set<ResponseFeedbackReason>([
+  "wrong_or_outdated",
+  "did_not_address_question",
+  "missing_information",
+  "too_much_irrelevant_detail",
+  "unclear_reliability"
+]);
+
+function normalizeFeedbackReason(value: unknown): ResponseFeedbackReason | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  return FEEDBACK_REASON_VALUES.has(value as ResponseFeedbackReason)
+    ? (value as ResponseFeedbackReason)
+    : undefined;
+}
+
+export function parseThreadResponseFeedback(
+  metadata: Record<string, unknown> | undefined
+): Record<string, ResponseFeedbackRecord> {
+  if (!metadata) {
+    return {};
+  }
+
+  const rawFeedback = metadata.response_feedback;
+  if (!isRecord(rawFeedback)) {
+    return {};
+  }
+
+  const parsed: Record<string, ResponseFeedbackRecord> = {};
+  for (const [turnKey, value] of Object.entries(rawFeedback)) {
+    if (!isRecord(value)) {
+      continue;
+    }
+    const helpfulRaw = value.helpful;
+    if (typeof helpfulRaw !== "boolean") {
+      continue;
+    }
+    const submittedAtRaw = value.submitted_at ?? value.submittedAt;
+    const messageIdRaw = value.message_id ?? value.messageId;
+    const reason = normalizeFeedbackReason(value.reason);
+
+    parsed[turnKey] = {
+      helpful: helpfulRaw,
+      ...(reason ? { reason } : {}),
+      submittedAt:
+        typeof submittedAtRaw === "string" && submittedAtRaw.trim()
+          ? submittedAtRaw
+          : new Date().toISOString(),
+      ...(typeof messageIdRaw === "string" && messageIdRaw.trim() ? { messageId: messageIdRaw } : {})
+    };
+  }
+  return parsed;
+}
+
 async function getThreadRecord(threadId: string): Promise<ThreadRecordResponse | null> {
   const response = await fetch(`${PROXY_BASE}/threads/${encodeURIComponent(threadId)}`, {
     method: "GET",
@@ -276,6 +339,49 @@ export async function setThreadDisplayName(
   throw new Error("Backend does not support thread metadata updates.");
 }
 
+interface SetThreadResponseFeedbackArgs {
+  threadId: string;
+  assistantTurnKey: string;
+  helpful: boolean;
+  reason?: ResponseFeedbackReason;
+  messageId?: string;
+  userId?: string | null;
+}
+
+export async function setThreadResponseFeedback(args: SetThreadResponseFeedbackArgs): Promise<Record<string, unknown>> {
+  const existing = await getThreadRecord(args.threadId);
+  const existingMetadata = isRecord(existing?.metadata) ? existing.metadata : {};
+  const existingFeedback = parseThreadResponseFeedback(existingMetadata);
+  const submittedAt = new Date().toISOString();
+
+  const nextFeedback: Record<string, unknown> = {
+    ...(existingFeedback as Record<string, unknown>),
+    [args.assistantTurnKey]: {
+      helpful: args.helpful,
+      ...(args.helpful ? {} : { reason: args.reason }),
+      submitted_at: submittedAt,
+      ...(args.messageId ? { message_id: args.messageId } : {})
+    }
+  };
+
+  const mergedMetadata: Record<string, unknown> = {
+    ...existingMetadata,
+    response_feedback: nextFeedback,
+    ...(args.userId ? { user_id: args.userId } : {})
+  };
+
+  if (await sendThreadMetadataUpdate(args.threadId, mergedMetadata, "PATCH")) {
+    return mergedMetadata;
+  }
+  if (await sendThreadMetadataUpdate(args.threadId, mergedMetadata, "PUT")) {
+    return mergedMetadata;
+  }
+  if (await sendThreadMetadataUpdate(args.threadId, mergedMetadata, "POST")) {
+    return mergedMetadata;
+  }
+  throw new Error("Backend does not support thread metadata updates.");
+}
+
 export async function generateThreadDisplayName(
   threadId: string,
   messages: ThreadDisplayNameMessageInput[],
@@ -288,6 +394,31 @@ export async function generateThreadDisplayName(
       min_messages: options?.minMessages ?? 3,
       max_messages: options?.maxMessages ?? 6,
       force: options?.force ?? false
+    })
+  });
+}
+
+interface LogStarterPromptClickArgs {
+  promptText: string;
+  categoryId?: string;
+  categoryTitle?: string;
+  threadId?: string | null;
+}
+
+export async function logStarterPromptClick(args: LogStarterPromptClickArgs): Promise<void> {
+  const promptText = args.promptText.trim();
+  if (!promptText) {
+    return;
+  }
+
+  await fetchJson<PromptClickResponse>("/v1/analytics/prompt-clicks", {
+    method: "POST",
+    body: JSON.stringify({
+      prompt_text: promptText,
+      category_id: args.categoryId,
+      category_title: args.categoryTitle,
+      thread_id: args.threadId ?? undefined,
+      source: "web_starter_prompt"
     })
   });
 }

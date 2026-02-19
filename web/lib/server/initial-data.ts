@@ -1,6 +1,7 @@
 import { getServerSession } from "next-auth";
 
 import { authOptions } from "@/lib/auth";
+import { loadStarterPromptCategories } from "@/lib/server/starter-prompts";
 import type { InitialWorkbenchData } from "@/lib/types";
 
 const DEFAULT_BACKEND_URL = "http://localhost:2024";
@@ -31,6 +32,7 @@ async function resolveUserId(): Promise<string | null> {
 
 export async function loadInitialWorkbenchData(): Promise<InitialWorkbenchData> {
   const userId = await resolveUserId();
+  const starterPromptCategories = await loadStarterPromptCategories();
 
   try {
     const backendOk = await backendHealthy();
@@ -39,14 +41,16 @@ export async function loadInitialWorkbenchData(): Promise<InitialWorkbenchData> 
       userId,
       authRequired: true,
       reports: [],
-      backendOk
+      backendOk,
+      starterPromptCategories
     };
   } catch {
     return {
       userId,
       authRequired: true,
       reports: [],
-      backendOk: false
+      backendOk: false,
+      starterPromptCategories
     };
   }
 }

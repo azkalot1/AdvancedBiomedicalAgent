@@ -1,7 +1,7 @@
 "use client";
 
 import { AlertTriangle, ChevronDown, Paperclip, Plus, Send, Square } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Virtuoso } from "react-virtuoso";
 import remarkGfm from "remark-gfm";
@@ -15,14 +15,25 @@ import {
   getTokenChunkFromEvent,
   listReports,
   listThreads,
+  logStarterPromptClick,
+  parseThreadResponseFeedback,
   parseThreadPromptTokens,
   setThreadDisplayName,
+  setThreadResponseFeedback,
   streamRun
 } from "@/lib/backend-client";
 import { reportDisplayName, threadDisplayName } from "@/lib/display-names";
 import { useBioAgentStore } from "@/lib/stores/use-bioagent-store";
 import { loadThreadSession, prependThread, sortThreadsByCreatedAt } from "@/lib/thread-session";
-import type { ChatMessage, ContextItem, NormalizedStreamEvent, ThreadSummary, ToolEvent } from "@/lib/types";
+import type {
+  ChatMessage,
+  ContextItem,
+  NormalizedStreamEvent,
+  ResponseFeedbackReason,
+  StarterPromptCategory,
+  ThreadSummary,
+  ToolEvent
+} from "@/lib/types";
 import { estimateTokens } from "@/lib/token-estimate";
 import { cn, shortId } from "@/lib/utils";
 
@@ -217,6 +228,50 @@ function extractToolEventsFromStream(event: NormalizedStreamEvent): ToolEvent[] 
   return results;
 }
 
+interface StarterPromptSuggestion {
+  categoryId: string;
+  categoryTitle: string;
+  prompt: string;
+}
+
+function shuffleItems<T>(items: T[]): T[] {
+  const output = items.slice();
+  for (let index = output.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [output[index], output[swapIndex]] = [output[swapIndex], output[index]];
+  }
+  return output;
+}
+
+function pickStarterPromptSuggestions(
+  categories: StarterPromptCategory[],
+  categoryCount = 5
+): StarterPromptSuggestion[] {
+  const validCategories = categories.filter((category) => category.prompts.length > 0);
+  if (validCategories.length === 0) {
+    return [];
+  }
+
+  return shuffleItems(validCategories)
+    .slice(0, Math.min(categoryCount, validCategories.length))
+    .map((category) => {
+      const prompt = category.prompts[Math.floor(Math.random() * category.prompts.length)];
+      return {
+        categoryId: category.id,
+        categoryTitle: category.title,
+        prompt
+      };
+    });
+}
+
+const FEEDBACK_REASON_OPTIONS: Array<{ value: ResponseFeedbackReason; label: string }> = [
+  { value: "wrong_or_outdated", label: "The data was wrong or outdated" },
+  { value: "did_not_address_question", label: "The answer didn't address my question" },
+  { value: "missing_information", label: "Missing information I needed" },
+  { value: "too_much_irrelevant_detail", label: "Too much irrelevant detail" },
+  { value: "unclear_reliability", label: "I couldn't tell if the answer was reliable" }
+];
+
 export function ChatPanel(): React.ReactElement {
   const assistantId = useBioAgentStore((state) => state.assistantId);
   const threadId = useBioAgentStore((state) => state.threadId);
@@ -245,12 +300,18 @@ export function ChatPanel(): React.ReactElement {
   const pushToolEvent = useBioAgentStore((state) => state.pushToolEvent);
   const setConnection = useBioAgentStore((state) => state.setConnection);
   const setCurrentPromptTokens = useBioAgentStore((state) => state.setCurrentPromptTokens);
+  const starterPromptCategories = useBioAgentStore((state) => state.starterPromptCategories);
 
   const [error, setError] = useState<string | null>(null);
   const [threadMenuOpen, setThreadMenuOpen] = useState(false);
   const [threadsLoading, setThreadsLoading] = useState(false);
   const [canInterrupt, setCanInterrupt] = useState(false);
+  const [openReasonMenuTurn, setOpenReasonMenuTurn] = useState<string | null>(null);
+  const [feedbackSavingByTurn, setFeedbackSavingByTurn] = useState<Record<string, boolean>>({});
+  const [feedbackErrorByTurn, setFeedbackErrorByTurn] = useState<Record<string, string | null>>({});
+  const [starterPromptSuggestions, setStarterPromptSuggestions] = useState<StarterPromptSuggestion[]>([]);
   const streamAbortControllerRef = useRef<AbortController | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
   const attachmentReports = useMemo(
     () => pendingAttachmentIds
@@ -273,6 +334,35 @@ export function ChatPanel(): React.ReactElement {
     () => (threadId ? threads.find((item) => item.id === threadId) : undefined),
     [threadId, threads]
   );
+
+  const feedbackByTurn = useMemo(
+    () => parseThreadResponseFeedback(activeThread?.metadata),
+    [activeThread]
+  );
+
+  const assistantTurnByMessageId = useMemo(() => {
+    const map = new Map<string, { turnNumber: number; turnKey: string }>();
+    let assistantCount = 0;
+    for (const message of messages) {
+      if (message.role !== "assistant") {
+        continue;
+      }
+      assistantCount += 1;
+      map.set(message.id, {
+        turnNumber: assistantCount,
+        turnKey: `assistant_turn_${assistantCount}`
+      });
+    }
+    return map;
+  }, [messages]);
+
+  const regenerateStarterPromptSuggestions = (): void => {
+    setStarterPromptSuggestions(pickStarterPromptSuggestions(starterPromptCategories, 5));
+  };
+
+  useEffect(() => {
+    setStarterPromptSuggestions(pickStarterPromptSuggestions(starterPromptCategories, 5));
+  }, [starterPromptCategories]);
 
   const maybeGenerateThreadName = async (activeThreadId: string): Promise<void> => {
     try {
@@ -331,6 +421,9 @@ export function ChatPanel(): React.ReactElement {
   const loadThread = async (selectedThreadId: string): Promise<void> => {
     setError(null);
     setThreadMenuOpen(false);
+    setOpenReasonMenuTurn(null);
+    setFeedbackSavingByTurn({});
+    setFeedbackErrorByTurn({});
     try {
       await loadThreadSession(selectedThreadId);
     } catch (threadError) {
@@ -340,34 +433,80 @@ export function ChatPanel(): React.ReactElement {
     }
   };
 
-  const startNewChat = async (): Promise<void> => {
+  const startNewChat = (): void => {
     if (isStreaming) {
       return;
     }
     setError(null);
     setThreadMenuOpen(false);
-    setStreaming(true);
+    setOpenReasonMenuTurn(null);
+    setFeedbackSavingByTurn({});
+    setFeedbackErrorByTurn({});
+    clearThreadWorkspace();
+    setThreadId(null);
+    regenerateStarterPromptSuggestions();
+    setConnection("connected");
+  };
+
+  const chooseStarterPrompt = (suggestion: StarterPromptSuggestion): void => {
+    setDraft(suggestion.prompt);
+    if (composerRef.current) {
+      composerRef.current.focus();
+    }
+    void logStarterPromptClick({
+      promptText: suggestion.prompt,
+      categoryId: suggestion.categoryId,
+      categoryTitle: suggestion.categoryTitle,
+      threadId
+    }).catch(() => undefined);
+  };
+
+  const recordResponseFeedback = async (
+    messageId: string,
+    helpful: boolean,
+    reason?: ResponseFeedbackReason
+  ): Promise<void> => {
+    if (!threadId) {
+      return;
+    }
+
+    const turnMeta = assistantTurnByMessageId.get(messageId);
+    if (!turnMeta) {
+      return;
+    }
+    const turnKey = turnMeta.turnKey;
+
+    setOpenReasonMenuTurn(null);
+    setFeedbackSavingByTurn((prev) => ({ ...prev, [turnKey]: true }));
+    setFeedbackErrorByTurn((prev) => ({ ...prev, [turnKey]: null }));
+
     try {
-      const freshThreadId = await createThread(userId);
-      clearThreadWorkspace();
-      setThreadId(freshThreadId);
-      setThreads(
-        prependThread(useBioAgentStore.getState().threads, {
-          id: freshThreadId,
-          createdAt: new Date().toISOString(),
-          metadata: {
-            app: "co-scientist",
-            ...(userId ? { user_id: userId } : {})
-          }
-        })
+      const persistedMetadata = await setThreadResponseFeedback({
+        threadId,
+        assistantTurnKey: turnKey,
+        helpful,
+        ...(helpful ? {} : { reason }),
+        messageId,
+        userId
+      });
+      const state = useBioAgentStore.getState();
+      state.setThreads(
+        state.threads.map((item) =>
+          item.id === threadId
+            ? {
+                ...item,
+                metadata: { ...(item.metadata ?? {}), ...persistedMetadata }
+              }
+            : item
+        )
       );
       setConnection("connected");
-    } catch (threadError) {
-      const message = threadError instanceof Error ? threadError.message : "Failed to start new thread.";
-      setError(message);
+    } catch (feedbackError) {
+      const message = feedbackError instanceof Error ? feedbackError.message : "Failed to save feedback.";
+      setFeedbackErrorByTurn((prev) => ({ ...prev, [turnKey]: message }));
       setConnection("degraded");
     } finally {
-      setStreaming(false);
+      setFeedbackSavingByTurn((prev) => ({ ...prev, [turnKey]: false }));
     }
   };
 
@@ -522,6 +661,28 @@ export function ChatPanel(): React.ReactElement {
     }
   };
 
+  const feedbackReasonLabel = (reason?: ResponseFeedbackReason): string | null => {
+    if (!reason) {
+      return null;
+    }
+    const option = FEEDBACK_REASON_OPTIONS.find((item) => item.value === reason);
+    return option ? option.label : null;
+  };
+
+  const shouldRenderFeedbackPrompt = (message: ChatMessage): boolean => {
+    if (message.role !== "assistant" || message.streaming) {
+      return false;
+    }
+    const content = message.content.trim();
+    if (!content) {
+      return false;
+    }
+    if (content.startsWith("[Generation interrupted]")) {
+      return false;
+    }
+    return true;
+  };
+
   return (
     <section className="flex h-full min-h-0 flex-col bg-surface/35">
       <div className="relative flex items-center justify-between border-b border-surface-edge/60 px-4 py-3">
@@ -529,7 +690,7 @@ export function ChatPanel(): React.ReactElement {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => void startNewChat()}
+            onClick={startNewChat}
             className="inline-flex items-center gap-1 rounded-md border border-accent-cyan/45 bg-accent-cyan/10 px-2 py-1 text-xs text-accent-cyan hover:border-accent-cyan/75 disabled:opacity-50"
             disabled={isStreaming}
           >
@@ -573,29 +734,124 @@ export function ChatPanel(): React.ReactElement {
       </div>
 
       <div className="min-h-0 flex-1">
-        <Virtuoso
-          className="h-full px-3 py-2"
-          data={messages}
-          followOutput="auto"
-          itemContent={(_, message) => (
-            <div className={cn("mb-3 flex w-full px-3", message.role === "user" ? "justify-end pr-2" : "justify-start pl-1")}>
-              <article
-                className={cn(
-                  "w-fit max-w-[85%] break-words rounded-xl border px-3 py-2 shadow-sm",
-                  message.role === "user"
-                    ? "border-accent-blue/50 bg-accent-blue/20"
-                    : "border-surface-edge bg-surface-raised/80"
-                )}
-              >
-                <div className="markdown-body prose prose-sm prose-invert max-w-none break-words text-zinc-100">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
-                    {message.content || "..."}
-                  </ReactMarkdown>
+        {messages.length === 0 ? (
+          <div className="h-full overflow-y-auto px-4 py-5">
+            <p className="mb-3 text-sm font-medium text-zinc-200">Example prompts</p>
+            {starterPromptSuggestions.length === 0 ? (
+              <p className="text-xs text-zinc-500">Prompt library is unavailable.</p>
+            ) : (
+              <div className="grid gap-2">
+                {starterPromptSuggestions.map((item) => (
+                  <button
+                    key={`${item.categoryId}-${item.prompt}`}
+                    type="button"
+                    onClick={() => chooseStarterPrompt(item)}
+                    className="rounded-lg border border-surface-edge bg-surface-raised/75 px-3 py-2 text-left text-xs text-zinc-300 transition hover:border-accent-blue/60 hover:text-zinc-100"
+                  >
+                    <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-500">{item.categoryTitle}</div>
+                    <div>{item.prompt}</div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <Virtuoso
+            className="h-full px-3 py-2"
+            data={messages}
+            followOutput="auto"
+            itemContent={(_, message) => {
+              const turnMeta = assistantTurnByMessageId.get(message.id);
+              const turnKey = turnMeta?.turnKey;
+              const feedback = turnKey ? feedbackByTurn[turnKey] : undefined;
+              const isSaving = turnKey ? feedbackSavingByTurn[turnKey] ?? false : false;
+              const feedbackError = turnKey ? feedbackErrorByTurn[turnKey] : null;
+              const reasonOpen = turnKey ? openReasonMenuTurn === turnKey : false;
+              const reasonLabel = feedbackReasonLabel(feedback?.reason);
+
+              return (
+                <div className={cn("mb-3 flex w-full px-3", message.role === "user" ? "justify-end pr-2" : "justify-start pl-1")}>
+                  <div className="w-fit max-w-[88%]">
+                    <article
+                      className={cn(
+                        "break-words rounded-xl border px-3 py-2 shadow-sm",
+                        message.role === "user"
+                          ? "border-accent-blue/50 bg-accent-blue/20"
+                          : "border-surface-edge bg-surface-raised/80"
+                      )}
+                    >
+                      <div className="markdown-body prose prose-sm prose-invert max-w-none break-words text-zinc-100">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+                          {message.content || "..."}
+                        </ReactMarkdown>
+                      </div>
+                    </article>
+
+                    {shouldRenderFeedbackPrompt(message) && turnKey ? (
+                      <div className="mt-2 rounded-lg border border-surface-edge/70 bg-surface-raised/70 px-3 py-2 text-xs text-zinc-300">
+                        <p className="mb-2 text-zinc-200">Was this response useful for your work?</p>
+                        {feedback ? (
+                          <p className="text-zinc-400">
+                            Feedback saved: {feedback.helpful ? "Yes" : "No"}
+                            {reasonLabel ? ` (${reasonLabel})` : ""}
+                          </p>
+                        ) : (
+                          <div className="space-y-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => void recordResponseFeedback(message.id, true)}
+                                disabled={isSaving}
+                                className="rounded border border-emerald-500/50 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-200 hover:border-emerald-400/80 disabled:opacity-50"
+                              >
+                                Yes
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setOpenReasonMenuTurn(reasonOpen ? null : turnKey)}
+                                disabled={isSaving}
+                                className="rounded border border-amber-500/45 bg-amber-500/10 px-2 py-1 text-xs text-amber-200 hover:border-amber-400/80 disabled:opacity-50"
+                              >
+                                No, tell us why ▾
+                              </button>
+                              {isSaving ? <span className="text-zinc-500">Saving...</span> : null}
+                            </div>
+
+                            {reasonOpen ? (
+                              <div className="space-y-1 rounded border border-surface-edge/70 bg-surface/60 p-2">
+                                {FEEDBACK_REASON_OPTIONS.map((option) => (
+                                  <button
+                                    key={option.value}
+                                    type="button"
+                                    onClick={() => {
+                                      setOpenReasonMenuTurn(null);
+                                      void recordResponseFeedback(message.id, false, option.value);
+                                    }}
+                                    disabled={isSaving}
+                                    className="block w-full rounded px-2 py-1 text-left text-zinc-300 hover:bg-surface-overlay hover:text-zinc-100 disabled:opacity-50"
+                                  >
+                                    ○ {option.label}
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        )}
+
+                        {feedbackError ? (
+                          <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-status-error">
+                            <AlertTriangle className="h-3 w-3" />
+                            {feedbackError}
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
-              </article>
-            </div>
-          )}
-        />
+              );
+            }}
+          />
+        )}
       </div>
 
       <div className="border-t border-surface-edge/60 p-3" onDrop={onDrop} onDragOver={(event) => event.preventDefault()}>
@@ -618,6 +874,7 @@ export function ChatPanel(): React.ReactElement {
 
         <div className="flex items-end gap-2">
           <textarea
+            ref={composerRef}
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             rows={2}
