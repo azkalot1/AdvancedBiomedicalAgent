@@ -11,13 +11,13 @@ Modes:
     - molecules_by_condition: find molecules associated with a condition
     - trials_by_target: find trials linked to a target gene
     - trials_by_structure: find trials for molecules similar to a SMILES
-    - trials_by_substructure: reserved (substructure search disabled in pgvector mode)
+    - trials_by_substructure: find trials for molecules matching a substructure
 
 Data Sources:
     - map_ctgov_molecules
     - dm_molecule / dm_molecule_concept / dm_molecule_synonyms
     - rag_study_search
-    - dm_molecule.mfp2_vec (for pgvector similarity search)
+    - dm_molecule.mfp2 / dm_molecule.mol (RDKit cartridge similarity/substructure)
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.tree import Tree
 
-MORGAN_FP_BITS = 1024
+MORGAN_FP_BITS = 2048
 MORGAN_FP_RADIUS = 2
 
 
@@ -1007,21 +1007,11 @@ async def _find_similar_molecules_with_trials(
 ) -> list[dict[str, Any]]:
     """Find molecules similar to query SMILES that have clinical trial associations."""
 
-    from rdkit import Chem
-    from rdkit.Chem import rdFingerprintGenerator
-
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        return []
-
-    fp_generator = rdFingerprintGenerator.GetMorganGenerator(radius=MORGAN_FP_RADIUS, fpSize=MORGAN_FP_BITS)
-    fp = fp_generator.GetFingerprint(mol)
-    query_vec = [0.0] * MORGAN_FP_BITS
-    for idx in fp.GetOnBits():
-        query_vec[idx] = 1.0
-
     sql = """
-        WITH similar_mols AS (
+        WITH query_fp AS (
+            SELECT morganbv_fp(mol_from_smiles($1::cstring), 2) AS fp
+        ),
+        similar_mols AS (
             SELECT 
                 dm.mol_id,
                 dm.concept_id,
@@ -1029,47 +1019,35 @@ async def _find_similar_molecules_with_trials(
                 dm.canonical_smiles,
                 dm.chembl_id,
                 dm.inchi_key,
-                (1 - (dm.mfp2_vec <=> $1::vector))::float AS cosine_sim
+                tanimoto_sml(q.fp, dm.mfp2)::float AS similarity
             FROM dm_molecule dm
-            WHERE dm.mfp2_vec IS NOT NULL
-            ORDER BY dm.mfp2_vec <=> $1::vector
-            LIMIT 500
-        ),
-        with_tanimoto AS (
-            SELECT
-                *,
-                CASE
-                    WHEN cosine_sim <= 0 THEN 0.0
-                    ELSE (cosine_sim * cosine_sim) / (2.0 - cosine_sim * cosine_sim)
-                END::float AS similarity
-            FROM similar_mols
-        ),
-        filtered AS (
-            SELECT *
-            FROM with_tanimoto
-            WHERE similarity >= $2
+            CROSS JOIN query_fp q
+            WHERE dm.mfp2 IS NOT NULL
+              AND dm.mfp2 % q.fp
+              AND tanimoto_sml(q.fp, dm.mfp2) >= $2
+            ORDER BY tanimoto_sml(q.fp, dm.mfp2) DESC
+            LIMIT $3
         ),
         mols_with_trials AS (
-            SELECT DISTINCT f.concept_id
-            FROM filtered f
-            JOIN map_ctgov_molecules map ON map.concept_id = f.concept_id
+            SELECT DISTINCT sm.concept_id
+            FROM similar_mols sm
+            JOIN map_ctgov_molecules map ON map.concept_id = sm.concept_id
         )
-        SELECT DISTINCT ON (f.concept_id)
-            f.mol_id,
-            f.concept_id,
-            COALESCE(mc.preferred_name, f.molecule_name) AS concept_name,
-            f.canonical_smiles,
-            f.chembl_id,
-            f.inchi_key,
-            f.similarity
-        FROM filtered f
-        JOIN mols_with_trials mwt ON f.concept_id = mwt.concept_id
-        LEFT JOIN dm_molecule_concept mc ON f.concept_id = mc.concept_id
-        ORDER BY f.concept_id, f.similarity DESC
-        LIMIT $3
+        SELECT DISTINCT ON (sm.concept_id)
+            sm.mol_id,
+            sm.concept_id,
+            COALESCE(mc.preferred_name, sm.molecule_name) AS concept_name,
+            sm.canonical_smiles,
+            sm.chembl_id,
+            sm.inchi_key,
+            sm.similarity
+        FROM similar_mols sm
+        JOIN mols_with_trials mwt ON sm.concept_id = mwt.concept_id
+        LEFT JOIN dm_molecule_concept mc ON sm.concept_id = mc.concept_id
+        ORDER BY sm.concept_id, sm.similarity DESC
     """
 
-    return await async_config.execute_query(sql, query_vec, similarity_threshold, limit)
+    return await async_config.execute_query(sql, smiles, similarity_threshold, limit)
 
 
 async def _find_substructure_molecules_with_trials(
@@ -1077,9 +1055,44 @@ async def _find_substructure_molecules_with_trials(
     pattern: str,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Substructure search is disabled in pgvector mode."""
-    _ = (async_config, pattern, limit)
-    return []
+    """Find molecules containing a query substructure that have trial associations."""
+    sql = """
+        WITH query_mol AS (
+            SELECT mol_from_smiles($1::cstring) AS mol
+        ),
+        sub_mols AS (
+            SELECT
+                dm.mol_id,
+                dm.concept_id,
+                dm.pref_name AS molecule_name,
+                dm.canonical_smiles,
+                dm.chembl_id,
+                dm.inchi_key
+            FROM dm_molecule dm
+            CROSS JOIN query_mol q
+            WHERE q.mol IS NOT NULL
+              AND dm.mol IS NOT NULL
+              AND dm.mol @> q.mol
+        ),
+        mols_with_trials AS (
+            SELECT DISTINCT sm.concept_id
+            FROM sub_mols sm
+            JOIN map_ctgov_molecules map ON map.concept_id = sm.concept_id
+        )
+        SELECT DISTINCT ON (sm.concept_id)
+            sm.mol_id,
+            sm.concept_id,
+            COALESCE(mc.preferred_name, sm.molecule_name) AS concept_name,
+            sm.canonical_smiles,
+            sm.chembl_id,
+            sm.inchi_key
+        FROM sub_mols sm
+        JOIN mols_with_trials mwt ON sm.concept_id = mwt.concept_id
+        LEFT JOIN dm_molecule_concept mc ON sm.concept_id = mc.concept_id
+        ORDER BY sm.concept_id, sm.mol_id
+        LIMIT $2
+    """
+    return await async_config.execute_query(sql, pattern, limit)
 
 
 async def _get_trials_for_concepts(
@@ -1860,20 +1873,82 @@ async def molecule_trial_search_async(
             if not validation.is_valid:
                 return _build_structure_error_response(search_input.mode, validation)
 
+            canonical_pattern = validation.canonical_smiles or pattern
+            mol_rows = await _find_substructure_molecules_with_trials(
+                async_config,
+                canonical_pattern,
+                limit=100,
+            )
+
+            if not mol_rows:
+                pattern_display = pattern[:30] + "..." if len(pattern) > 30 else pattern
+                return MoleculeTrialSearchOutput(
+                    status="not_found",
+                    mode=search_input.mode,
+                    query_summary=f"substructure '{pattern_display}'",
+                    warnings=[
+                        "No molecules with trial associations found for this substructure pattern",
+                    ] + validation.warnings,
+                    structure_info=StructureValidationInfo(
+                        original_input=pattern,
+                        canonical_smiles=canonical_pattern,
+                        was_modified=pattern != canonical_pattern,
+                        preprocessing_notes=validation.warnings,
+                    ),
+                )
+
+            concept_ids = [r["concept_id"] for r in mol_rows if r.get("concept_id")]
+            trial_rows = await _get_trials_for_concepts(
+                async_config,
+                concept_ids,
+                search_input.phase,
+                search_input.status,
+                search_input.limit,
+                search_input.offset,
+                search_input,
+            )
+
+            trial_counts: dict[int, int] = {}
+            for row in trial_rows:
+                cid = row.get("concept_id")
+                if cid:
+                    trial_counts[cid] = trial_counts.get(cid, 0) + 1
+
+            hits = [
+                _row_to_trial_by_molecule_hit(
+                    row,
+                    search_input.include_study_details,
+                    extra={"structure_match_type": "substructure"},
+                )
+                for row in trial_rows
+            ]
+
+            matched_molecules = [
+                StructureMatchedMolecule(
+                    concept_id=r["concept_id"],
+                    concept_name=r.get("concept_name"),
+                    chembl_id=r.get("chembl_id"),
+                    canonical_smiles=r.get("canonical_smiles"),
+                    similarity_score=None,
+                    n_trials=trial_counts.get(r["concept_id"], 0),
+                )
+                for r in mol_rows
+                if r.get("concept_id") in trial_counts
+            ]
+
             pattern_display = pattern[:30] + "..." if len(pattern) > 30 else pattern
             return MoleculeTrialSearchOutput(
-                status="invalid_input",
+                status="success" if hits else "not_found",
                 mode=search_input.mode,
-                query_summary=f"substructure '{pattern_display}'",
-                error="Substructure search is not available without PostgreSQL RDKit cartridge operators.",
-                warnings=validation.warnings,
-                suggestions=[
-                    "Use trials_by_structure for nearest-neighbor structural matches",
-                ],
+                total_hits=len(hits),
+                hits=hits,
+                matched_molecules=matched_molecules[:20],
+                query_summary=f"substructure '{pattern_display}' ({len(matched_molecules)} mols)",
+                warnings=validation.warnings if validation.warnings else [],
                 structure_info=StructureValidationInfo(
                     original_input=pattern,
-                    canonical_smiles=validation.canonical_smiles,
-                    was_modified=bool(validation.warnings),
+                    canonical_smiles=canonical_pattern,
+                    was_modified=pattern != canonical_pattern,
                     preprocessing_notes=validation.warnings,
                 ),
             )

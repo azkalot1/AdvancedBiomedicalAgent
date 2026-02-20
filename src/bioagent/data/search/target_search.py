@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.panel import Panel
 
-MORGAN_FP_BITS = 1024
+MORGAN_FP_BITS = 2048
 MORGAN_FP_RADIUS = 2
 
 try:
@@ -2177,72 +2177,38 @@ class PharmacologySearch:
         
         canonical_smiles = validation.canonical_smiles
         
-        # === Step 2: Generate fingerprint in Python ===
-        from rdkit import Chem
-        from rdkit.Chem import rdFingerprintGenerator
-
-        mol = Chem.MolFromSmiles(canonical_smiles)
-        if mol is None:
-            smiles_preview = input.smiles[:50] + "..." if len(input.smiles) > 50 else input.smiles
-            return TargetSearchOutput(
-                status="invalid_structure",
-                mode=input.mode,
-                query_summary=f"Invalid SMILES: '{smiles_preview}'",
-                error="RDKit could not parse canonicalized SMILES",
-                warnings=validation.warnings,
-                structure_info={
-                    "original_smiles": input.smiles,
-                    "canonical_smiles": canonical_smiles,
-                },
-            )
-
-        fp_generator = rdFingerprintGenerator.GetMorganGenerator(radius=MORGAN_FP_RADIUS, fpSize=MORGAN_FP_BITS)
-        fp = fp_generator.GetFingerprint(mol)
-        query_vec = [0.0] * MORGAN_FP_BITS
-        for idx in fp.GetOnBits():
-            query_vec[idx] = 1.0
-
-        # === Step 3: Find similar molecules with pgvector ===
+        # === Step 2: Find similar molecules using PostgreSQL RDKit cartridge ===
         similar_sql = """
-            WITH similar_mols AS (
+            WITH query_fp AS (
+                SELECT morganbv_fp(mol_from_smiles($1::cstring), 2) AS fp
+            ),
+            similar_mols AS (
                 SELECT 
                     dm.mol_id,
                     dm.concept_id,
                     dm.pref_name AS molecule_name,
                     dm.canonical_smiles,
                     dm.chembl_id,
-                    (1 - (dm.mfp2_vec <=> $1::vector))::float AS cosine_sim
+                    tanimoto_sml(q.fp, dm.mfp2)::float AS tanimoto_similarity
                 FROM dm_molecule dm
-                WHERE dm.mfp2_vec IS NOT NULL
-                ORDER BY dm.mfp2_vec <=> $1::vector
+                CROSS JOIN query_fp q
+                WHERE dm.mfp2 IS NOT NULL
+                  AND dm.mfp2 % q.fp
+                  AND tanimoto_sml(q.fp, dm.mfp2) >= $2
+                ORDER BY tanimoto_sml(q.fp, dm.mfp2) DESC
                 LIMIT $3
             ),
-            with_tanimoto AS (
-                SELECT
-                    *,
-                    CASE
-                        WHEN cosine_sim <= 0 THEN 0.0
-                        ELSE (cosine_sim * cosine_sim) / (2.0 - cosine_sim * cosine_sim)
-                    END::float AS tanimoto_approx
-                FROM similar_mols
-            ),
-            filtered AS (
-                SELECT *
-                FROM with_tanimoto
-                WHERE tanimoto_approx >= $2
-            ),
             deduped AS (
-                SELECT DISTINCT ON (f.concept_id)
-                    f.concept_id,
-                    COALESCE(mc.preferred_name, f.molecule_name) AS concept_name,
-                    f.chembl_id,
-                    f.canonical_smiles,
-                    f.tanimoto_approx AS tanimoto_similarity,
-                    f.cosine_sim,
+                SELECT DISTINCT ON (sm.concept_id)
+                    sm.concept_id,
+                    COALESCE(mc.preferred_name, sm.molecule_name) AS concept_name,
+                    sm.chembl_id,
+                    sm.canonical_smiles,
+                    sm.tanimoto_similarity,
                     mc.is_biotherapeutic
-                FROM filtered f
-                LEFT JOIN dm_molecule_concept mc ON f.concept_id = mc.concept_id
-                ORDER BY f.concept_id, f.tanimoto_approx DESC
+                FROM similar_mols sm
+                LEFT JOIN dm_molecule_concept mc ON sm.concept_id = mc.concept_id
+                ORDER BY sm.concept_id, sm.tanimoto_similarity DESC
             )
             SELECT
                 concept_id,
@@ -2250,7 +2216,6 @@ class PharmacologySearch:
                 chembl_id,
                 canonical_smiles,
                 tanimoto_similarity,
-                cosine_sim,
                 is_biotherapeutic
             FROM deduped
             ORDER BY tanimoto_similarity DESC, concept_id
@@ -2258,9 +2223,9 @@ class PharmacologySearch:
         
         mol_rows = await conn.execute_query(
             similar_sql,
-            query_vec,
+            canonical_smiles,
             input.similarity_threshold,
-            input.limit * 5  # Fetch extra due approximate ANN + dedupe + threshold
+            input.limit * 5,
         )
         
         smiles_display = input.smiles[:40] + "..." if len(input.smiles) > 40 else input.smiles
@@ -2292,7 +2257,7 @@ class PharmacologySearch:
         concept_ids = [r['concept_id'] for r in mol_rows if r.get('concept_id')]
         similarity_lookup = {r['concept_id']: r['tanimoto_similarity'] for r in mol_rows}
         
-        # === Step 4: Fetch enrichment data based on flags ===
+        # === Step 3: Fetch enrichment data based on flags ===
         
         activities_by_concept: dict[int, list[TargetActivity]] = {}
         mechanisms_by_concept: dict[int, list[TargetMechanism]] = {}
