@@ -16,8 +16,9 @@ from dotenv import load_dotenv
 
 # Keys we read/write for ingestion DB config
 DATA_DB_ENV_KEY = "DATA_POSTGRES_URI"
+DATA_DB_ENV_ALIASES = (DATA_DB_ENV_KEY, "DATA_POSTGRES_URL", "DATA_DATABASE_URL")
 LEGACY_DB_ENV_KEYS = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
-ALL_DB_ENV_KEYS = (DATA_DB_ENV_KEY, *LEGACY_DB_ENV_KEYS)
+ALL_DB_ENV_KEYS = (*DATA_DB_ENV_ALIASES, *LEGACY_DB_ENV_KEYS)
 
 
 def get_repo_root() -> Path:
@@ -334,7 +335,12 @@ def get_env_config() -> tuple[str, str, str, str, str] | None:
     if env_file.exists():
         load_dotenv(env_file)
 
-    data_uri = (os.getenv(DATA_DB_ENV_KEY) or os.getenv("DATA_DATABASE_URL") or "").strip()
+    data_uri = ""
+    for key in DATA_DB_ENV_ALIASES:
+        value = (os.getenv(key) or "").strip()
+        if value:
+            data_uri = value
+            break
     if data_uri:
         try:
             return _parse_data_postgres_uri(data_uri)
@@ -410,7 +416,7 @@ def setup_database():
         print(f"   Host: {db_host}, Port: {db_port}")
         print(f"   Database: {db_name}")
         print(f"   User: {user_name}")
-        if not (os.getenv(DATA_DB_ENV_KEY) or "").strip():
+        if not any((os.getenv(key) or "").strip() for key in DATA_DB_ENV_ALIASES):
             save_config_to_env(db_host, db_port, db_name, user_name, password, env_file)
             print(f"ℹ️  Migrated legacy DB_* settings to {DATA_DB_ENV_KEY} in {env_file}.")
     else:

@@ -26,6 +26,9 @@ from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.panel import Panel
 
+MORGAN_FP_BITS = 2048
+MORGAN_FP_RADIUS = 2
+
 try:
     from bioagent.data.ingest.async_config import AsyncDatabaseConfig, get_async_connection
     from bioagent.data.ingest.config import DatabaseConfig, DEFAULT_CONFIG
@@ -291,7 +294,6 @@ class TargetSearchInput(BaseModel):
     mode: SearchMode
     query: str | None = None
     smiles: str | None = None
-    smarts: str | None = None
     similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     min_pchembl: float = Field(default=5.0, ge=0.0, le=15.0)
     activity_type: ActivityType = ActivityType.ALL
@@ -343,8 +345,8 @@ class TargetSearchInput(BaseModel):
                 errors.append(f"'smiles' is required for {self.mode.value}")
         
         elif self.mode == SearchMode.SUBSTRUCTURE:
-            if not self.smiles and not self.smarts:
-                errors.append("'smiles' or 'smarts' pattern is required for substructure search")
+            if not self.smiles:
+                errors.append("'smiles' pattern is required for substructure search")
         
         elif self.mode == SearchMode.COMPARE_DRUGS:
             if not self.target and not self.query:
@@ -918,7 +920,7 @@ class PharmacologySearch:
 
     async def _validate_and_canonicalize_smiles(
         self,
-        conn: AsyncDatabaseConfig,
+        conn: AsyncDatabaseConfig | None,
         smiles: str
     ) -> SmilesValidationResult:
         """
@@ -1003,18 +1005,11 @@ class PharmacologySearch:
         
         # === RDKit validation ===
         try:
-            sql = """
-                SELECT 
-                    mol_from_smiles($1::cstring) IS NOT NULL AS is_valid,
-                    mol_to_smiles(mol_from_smiles($1::cstring)) AS canonical,
-                    mol_formula(mol_from_smiles($1::cstring)) AS formula,
-                    mol_amw(mol_from_smiles($1::cstring))::float AS mol_weight,
-                    mol_numheavyatoms(mol_from_smiles($1::cstring))::int AS heavy_atoms
-            """
-            rows = await conn.execute_query(sql, smiles)
-            
-            if not rows or not rows[0]["is_valid"]:
-                # Build detailed error message
+            from rdkit import Chem
+            from rdkit.Chem import Descriptors
+
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
                 error_msg = self._build_smiles_error_message(smiles, typo_warnings)
                 return SmilesValidationResult(
                     is_valid=False,
@@ -1023,15 +1018,15 @@ class PharmacologySearch:
                     error_type="parse_error",
                     warnings=warnings + typo_warnings
                 )
-            
-            row = rows[0]
-            canonical = row["canonical"]
+            canonical = Chem.MolToSmiles(mol)
             
             # Add info about the molecule
-            if row.get("mol_weight") and row["mol_weight"] > 1500:
-                warnings.append(f"Large molecule (MW: {row['mol_weight']:.0f})")
-            if row.get("heavy_atoms") and row["heavy_atoms"] < 4:
-                warnings.append(f"Very small molecule ({row['heavy_atoms']} heavy atoms)")
+            mol_weight = float(Descriptors.MolWt(mol))
+            if mol_weight > 1500:
+                warnings.append(f"Large molecule (MW: {mol_weight:.0f})")
+            heavy_atoms = int(mol.GetNumHeavyAtoms())
+            if heavy_atoms < 4:
+                warnings.append(f"Very small molecule ({heavy_atoms} heavy atoms)")
             if canonical and canonical != smiles:
                 warnings.append("SMILES was canonicalized")
             
@@ -1043,24 +1038,13 @@ class PharmacologySearch:
             )
             
         except Exception as e:
-            error_str = str(e).lower()
-            if "smiles" in error_str or "mol_from" in error_str or "cstring" in error_str:
-                error_msg = self._build_smiles_error_message(smiles, typo_warnings)
-                return SmilesValidationResult(
-                    is_valid=False,
-                    original_smiles=original,
-                    error_message=error_msg,
-                    error_type="rdkit_error",
-                    warnings=warnings + typo_warnings
-                )
-            else:
-                return SmilesValidationResult(
-                    is_valid=False,
-                    original_smiles=original,
-                    error_message=f"Database error: {e}",
-                    error_type="database_error",
-                    warnings=warnings
-                )
+            return SmilesValidationResult(
+                is_valid=False,
+                original_smiles=original,
+                error_message=f"RDKit validation error: {e}",
+                error_type="rdkit_error",
+                warnings=warnings + typo_warnings
+            )
     
     def _build_smiles_error_message(self, smiles: str, typo_warnings: list[str]) -> str:
         """Build detailed, actionable error message for invalid SMILES."""
@@ -1241,7 +1225,7 @@ class PharmacologySearch:
         warnings = []
         suggestions = []
         
-        if "smiles" in error_str or "mol_from_smiles" in error_str or "cstring" in error_str:
+        if "smiles" in error_str or "rdkit" in error_str:
             error_msg = f"Invalid SMILES structure: {error}"
             warnings.append("The provided SMILES string could not be parsed")
             if input.smiles:
@@ -2193,10 +2177,10 @@ class PharmacologySearch:
         
         canonical_smiles = validation.canonical_smiles
         
-        # === Step 2: Find similar molecules ===
+        # === Step 2: Find similar molecules using PostgreSQL RDKit cartridge ===
         similar_sql = """
             WITH query_fp AS (
-                SELECT morganbv_fp(mol_from_smiles($1::cstring)) AS fp
+                SELECT morganbv_fp(mol_from_smiles($1::cstring), 2) AS fp
             ),
             similar_mols AS (
                 SELECT 
@@ -2205,12 +2189,13 @@ class PharmacologySearch:
                     dm.pref_name AS molecule_name,
                     dm.canonical_smiles,
                     dm.chembl_id,
-                    tanimoto_sml(q.fp, dm.mfp2)::float AS similarity
+                    tanimoto_sml(q.fp, dm.mfp2)::float AS tanimoto_similarity
                 FROM dm_molecule dm
                 CROSS JOIN query_fp q
-                WHERE dm.mfp2 % q.fp
+                WHERE dm.mfp2 IS NOT NULL
+                  AND dm.mfp2 % q.fp
                   AND tanimoto_sml(q.fp, dm.mfp2) >= $2
-                ORDER BY similarity DESC
+                ORDER BY tanimoto_sml(q.fp, dm.mfp2) DESC
                 LIMIT $3
             ),
             deduped AS (
@@ -2219,11 +2204,11 @@ class PharmacologySearch:
                     COALESCE(mc.preferred_name, sm.molecule_name) AS concept_name,
                     sm.chembl_id,
                     sm.canonical_smiles,
-                    sm.similarity AS tanimoto_similarity,
+                    sm.tanimoto_similarity,
                     mc.is_biotherapeutic
                 FROM similar_mols sm
                 LEFT JOIN dm_molecule_concept mc ON sm.concept_id = mc.concept_id
-                ORDER BY sm.concept_id, sm.similarity DESC
+                ORDER BY sm.concept_id, sm.tanimoto_similarity DESC
             )
             SELECT
                 concept_id,
@@ -2240,7 +2225,7 @@ class PharmacologySearch:
             similar_sql,
             canonical_smiles,
             input.similarity_threshold,
-            input.limit * 3  # Fetch extra to dedupe by concept
+            input.limit * 5,
         )
         
         smiles_display = input.smiles[:40] + "..." if len(input.smiles) > 40 else input.smiles
@@ -2612,185 +2597,34 @@ class PharmacologySearch:
     # =========================================================================
     
     async def _search_substructure(self, input: TargetSearchInput) -> TargetSearchOutput:
-        """Find molecules containing a substructure."""
-        conn = await self._get_conn()
-        
-        pattern = input.smarts or input.smiles
-        
-        sql = """
-            WITH candidate_hits AS (
-                SELECT DISTINCT ON (dm.concept_id)
-                    dm.concept_id,
-                    COALESCE(mc.preferred_name, dm.pref_name) AS concept_name,
-                    dm.chembl_id,
-                    dm.canonical_smiles
-                FROM dm_molecule dm
-                LEFT JOIN dm_molecule_concept mc ON dm.concept_id = mc.concept_id
-                WHERE dm.mol @> qmol_from_smarts($1::cstring)
-                ORDER BY dm.concept_id
-                LIMIT ($2 * 4)
-            )
-            SELECT
-                c.concept_id,
-                c.concept_name,
-                c.chembl_id,
-                c.canonical_smiles,
-                COALESCE(a.best_pchembl, 0)::real AS best_pchembl,
-                (a.best_pchembl IS NOT NULL OR m.has_mechanism IS TRUE) AS has_target_data
-            FROM candidate_hits c
-            LEFT JOIN (
-                SELECT concept_id, MAX(best_pchembl) AS best_pchembl
-                FROM dm_molecule_target_summary
-                GROUP BY concept_id
-            ) a ON a.concept_id = c.concept_id
-            LEFT JOIN (
-                SELECT DISTINCT concept_id, TRUE AS has_mechanism
-                FROM dm_drug_mechanism
-                WHERE concept_id IS NOT NULL
-            ) m ON m.concept_id = c.concept_id
-            ORDER BY
-                has_target_data DESC,
-                best_pchembl DESC NULLS LAST,
-                c.concept_name
-            LIMIT $2
-        """
-        
-        rows = await conn.execute_query(sql, pattern, input.limit)
-        concept_ids = [r["concept_id"] for r in rows if r.get("concept_id")]
-
-        activities_by_concept: dict[int, list[TargetActivity]] = {}
-        mechanisms_by_concept: dict[int, list[TargetMechanism]] = {}
-
-        if input.include_activities and concept_ids:
-            activity_sql = """
-                SELECT
-                    concept_id,
-                    gene_symbol,
-                    target_name,
-                    target_organism,
-                    COALESCE(best_ic50_nm, best_ki_nm, best_kd_nm, best_ec50_nm) AS activity_value_nm,
-                    CASE
-                        WHEN best_ic50_nm IS NOT NULL THEN 'IC50'
-                        WHEN best_ki_nm IS NOT NULL THEN 'Ki'
-                        WHEN best_kd_nm IS NOT NULL THEN 'Kd'
-                        ELSE 'EC50'
-                    END AS activity_type,
-                    best_pchembl AS pchembl,
-                    n_total_measurements,
-                    data_confidence,
-                    sources
-                FROM dm_molecule_target_summary
-                WHERE concept_id = ANY($1::bigint[])
-                  AND best_pchembl >= $2
-                ORDER BY concept_id, best_pchembl DESC NULLS LAST
-            """
-            activity_rows = await conn.execute_query(activity_sql, concept_ids, input.min_pchembl)
-            for r in activity_rows:
-                cid = r["concept_id"]
-                if cid not in activities_by_concept:
-                    activities_by_concept[cid] = []
-                if len(activities_by_concept[cid]) >= 8:
-                    continue
-                activities_by_concept[cid].append(
-                    TargetActivity(
-                        gene_symbol=r["gene_symbol"],
-                        target_name=r["target_name"],
-                        target_organism=r["target_organism"] or "Homo sapiens",
-                        activity_type=r["activity_type"] or "Unknown",
-                        activity_value_nm=float(r["activity_value_nm"]) if r["activity_value_nm"] else 0.0,
-                        pchembl=float(r["pchembl"]) if r["pchembl"] else None,
-                        n_measurements=r["n_total_measurements"] or 1,
-                        data_confidence=r["data_confidence"],
-                        sources=r["sources"] or [],
-                    )
-                )
-
-        if input.include_mechanisms and concept_ids:
-            mechanism_sql = """
-                SELECT
-                    concept_id,
-                    mechanism_of_action,
-                    action_type,
-                    target_name,
-                    target_type,
-                    target_organism,
-                    gene_symbols,
-                    uniprot_accessions,
-                    direct_interaction,
-                    molecular_mechanism,
-                    disease_efficacy,
-                    ref_type,
-                    ref_id,
-                    ref_url
-                FROM dm_drug_mechanism
-                WHERE concept_id = ANY($1::bigint[])
-                ORDER BY concept_id, action_type
-            """
-            mechanism_rows = await conn.execute_query(mechanism_sql, concept_ids)
-            for r in mechanism_rows:
-                cid = r["concept_id"]
-                if cid not in mechanisms_by_concept:
-                    mechanisms_by_concept[cid] = []
-                if len(mechanisms_by_concept[cid]) >= 5:
-                    continue
-                mechanisms_by_concept[cid].append(
-                    TargetMechanism(
-                        mechanism_of_action=r["mechanism_of_action"] or "Unknown",
-                        action_type=r["action_type"] or "Unknown",
-                        target_name=r["target_name"],
-                        target_type=r["target_type"],
-                        target_organism=r["target_organism"] or "Homo sapiens",
-                        gene_symbols=r["gene_symbols"] or [],
-                        uniprot_accessions=r["uniprot_accessions"] or [],
-                        direct_interaction=r["direct_interaction"] or False,
-                        molecular_mechanism=r["molecular_mechanism"] or False,
-                        disease_efficacy=r["disease_efficacy"] or False,
-                        ref_type=r["ref_type"],
-                        ref_id=r["ref_id"],
-                        ref_url=r["ref_url"],
-                    )
-                )
-        
-        profiles = [
-            CompoundTargetProfile(
-                concept_id=r["concept_id"],
-                concept_name=r["concept_name"],
-                chembl_id=r["chembl_id"],
-                canonical_smiles=r["canonical_smiles"],
-                activities=activities_by_concept.get(r["concept_id"], []),
-                mechanisms=mechanisms_by_concept.get(r["concept_id"], []),
-                n_activity_targets=len(activities_by_concept.get(r["concept_id"], [])),
-                n_mechanism_targets=len(mechanisms_by_concept.get(r["concept_id"], [])),
-                best_pchembl=float(r["best_pchembl"]) if r.get("best_pchembl") else None,
-            )
-            for r in rows
-        ]
-        
+        """Substructure search is disabled in pgvector mode."""
+        pattern = input.smiles or ""
         pattern_display = pattern[:30] + "..." if len(pattern) > 30 else pattern
-        
-        if not profiles:
+
+        validation = await self._validate_and_canonicalize_smiles(None, pattern)
+        if not validation.is_valid:
             return TargetSearchOutput(
-                status="not_found",
+                status="invalid_structure",
                 mode=input.mode,
-                query_summary=f"substructure '{pattern_display}'",
-                total_hits=0,
-                hits=[],
-                warnings=[f"No molecules found containing substructure: {pattern_display}"],
-                diagnostics=SearchDiagnostics(
-                    suggestions=[
-                        "Verify SMARTS/SMILES pattern is valid",
-                        "Try a simpler or more common substructure",
-                        "Very specific patterns may have no matches"
-                    ]
-                )
+                query_summary=f"Invalid substructure pattern: '{pattern_display}'",
+                error=validation.error_message,
+                warnings=validation.warnings,
             )
-        
+
         return TargetSearchOutput(
-            status="success",
+            status="invalid_input",
             mode=input.mode,
             query_summary=f"substructure '{pattern_display}'",
-            total_hits=len(profiles),
-            hits=profiles
+            error="Substructure search is not available without PostgreSQL RDKit cartridge operators.",
+            warnings=[
+                "Substructure database operators were removed in pgvector migration mode.",
+            ],
+            diagnostics=SearchDiagnostics(
+                suggestions=[
+                    "Use similar_molecules for analog discovery",
+                    "Use exact_structure for identity/near-identity lookup",
+                ]
+            ),
         )
 
     # =========================================================================

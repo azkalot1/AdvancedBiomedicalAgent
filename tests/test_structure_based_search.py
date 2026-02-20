@@ -85,40 +85,40 @@ TEST_SMILES = {
     },
 }
 
-# SMARTS patterns for substructure search
-TEST_SMARTS = {
+# Substructure patterns (SMILES)
+TEST_SUBSTRUCTURE_SMILES = {
     "benzene": {
-        "smarts": "c1ccccc1",
+        "smiles": "c1ccccc1",
         "description": "Benzene ring",
         "min_expected_hits": 100,
     },
     "indole": {
-        "smarts": "c1ccc2[nH]ccc2c1",
+        "smiles": "c1ccc2[nH]ccc2c1",
         "description": "Indole scaffold",
         "min_expected_hits": 10,
     },
     "pyrimidine": {
-        "smarts": "c1ncncc1",
+        "smiles": "c1ncncc1",
         "description": "Pyrimidine ring",
         "min_expected_hits": 50,
     },
     "sulfonamide": {
-        "smarts": "S(=O)(=O)N",
+        "smiles": "S(=O)(=O)N",
         "description": "Sulfonamide group",
         "min_expected_hits": 20,
     },
     "carboxylic_acid": {
-        "smarts": "C(=O)O",
+        "smiles": "C(=O)O",
         "description": "Carboxylic acid",
         "min_expected_hits": 50,
     },
     "amide": {
-        "smarts": "C(=O)N",
+        "smiles": "C(=O)N",
         "description": "Amide bond",
         "min_expected_hits": 100,
     },
     "kinase_hinge": {
-        "smarts": "c1ncnc2[nH]ccc12",
+        "smiles": "c1ncnc2[nH]ccc12",
         "description": "Kinase hinge binder (purine-like)",
         "min_expected_hits": 5,
     },
@@ -426,14 +426,14 @@ class StructureSearchTester:
 
     async def test_trials_by_substructure_basic(self) -> None:
         """Test basic substructure search for trials."""
-        for pattern_name, data in list(TEST_SMARTS.items())[:4]:
+        for pattern_name, data in list(TEST_SUBSTRUCTURE_SMILES.items())[:4]:
             await self._run_test(
                 f"trials_by_substructure_{pattern_name}",
                 molecule_trial_search_async(
                     DEFAULT_CONFIG,
                     MoleculeTrialSearchInput(
                         mode="trials_by_substructure",
-                        smarts=data["smarts"],
+                        smiles=data["smiles"],
                         limit=20,
                     ),
                 ),
@@ -442,7 +442,7 @@ class StructureSearchTester:
             )
 
     async def test_trials_by_substructure_smiles_as_pattern(self) -> None:
-        """Test substructure search using SMILES (not SMARTS) as pattern."""
+        """Test substructure search using SMILES pattern."""
         # Simple SMILES can be used as substructure patterns
         await self._run_test(
             "trials_by_substructure_benzene_smiles",
@@ -466,14 +466,14 @@ class StructureSearchTester:
             "phenyl_sulfonamide": "c1ccccc1S(=O)(=O)N",  # Sulfonamide drugs
         }
         
-        for scaffold_name, smarts in scaffolds.items():
+        for scaffold_name, pattern in scaffolds.items():
             await self._run_test(
                 f"trials_by_substructure_scaffold_{scaffold_name}",
                 molecule_trial_search_async(
                     DEFAULT_CONFIG,
                     MoleculeTrialSearchInput(
                         mode="trials_by_substructure",
-                        smarts=smarts,
+                        smiles=pattern,
                         limit=30,
                     ),
                 ),
@@ -489,7 +489,7 @@ class StructureSearchTester:
                 DEFAULT_CONFIG,
                 MoleculeTrialSearchInput(
                     mode="trials_by_substructure",
-                    smarts="c1ccccc1",  # Benzene
+                    smiles="c1ccccc1",  # Benzene
                     phase=["Phase 3"],
                     limit=20,
                 ),
@@ -807,14 +807,14 @@ class StructureSearchTester:
 
     async def test_substructure_search(self) -> None:
         """Test SUBSTRUCTURE mode in target search."""
-        for pattern_name, data in list(TEST_SMARTS.items())[:3]:
+        for pattern_name, data in list(TEST_SUBSTRUCTURE_SMILES.items())[:3]:
             await self._run_test(
                 f"substructure_{pattern_name}",
                 target_search_async(
                     DEFAULT_CONFIG,
                     TargetSearchInput(
                         mode=SearchMode.SUBSTRUCTURE,
-                        smarts=data["smarts"],
+                        smiles=data["smiles"],
                         limit=20,
                     ),
                 ),
@@ -934,7 +934,6 @@ class StructureSearchTester:
                 MoleculeTrialSearchInput(
                     mode="trials_by_substructure",
                     smiles=None,
-                    smarts=None,
                     limit=10,
                 ),
             ),

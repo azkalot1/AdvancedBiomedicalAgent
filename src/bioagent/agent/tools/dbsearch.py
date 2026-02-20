@@ -1626,7 +1626,6 @@ async def search_molecule_trials(
     target_gene: str | None = None,
     sequence: str | None = None,
     smiles: str | None = None,
-    smarts: str | None = None,
     similarity_threshold: float = 0.7,
     min_pchembl: float = 6.0,
     phase: list[str] | str | None = None,
@@ -1682,8 +1681,8 @@ async def search_molecule_trials(
             Requires: smiles (SMILES string)
             Example: search_molecule_trials(mode="trials_by_structure", smiles="CC(=O)Oc1ccccc1C(=O)O")
         
-        - "trials_by_substructure": Find trials for molecules containing a substructure.
-            Requires: smiles or smarts (substructure pattern)
+        - "trials_by_substructure": Substructure mode (SMILES-only input; currently unavailable in pgvector mode).
+            Requires: smiles
             Example: search_molecule_trials(mode="trials_by_substructure", smiles="c1ccccc1")
     
     ═══════════════════════════════════════════════════════════════════════════════
@@ -1708,9 +1707,6 @@ async def search_molecule_trials(
     
     smiles: SMILES string for structure-based searches.
         Required for: trials_by_structure, trials_by_substructure
-    
-    smarts: SMARTS pattern for substructure search (alternative to smiles).
-        Example: "[#6]1:[#6]:[#6]:[#6]:[#6]:[#6]:1" (benzene ring)
     
     similarity_threshold: Minimum Tanimoto similarity for structure search (0.0-1.0).
         Default: 0.7. Lower = more results, higher = stricter matching.
@@ -1845,10 +1841,10 @@ async def search_molecule_trials(
                 "❌ Invalid input: smiles is required for mode='trials_by_structure'.\n"
                 "Example: search_molecule_trials(mode='trials_by_structure', smiles='CC(=O)Oc1ccccc1C(=O)O')"
             )
-        if mode == "trials_by_substructure" and not (smiles or smarts):
+        if mode == "trials_by_substructure" and not smiles:
             return (
-                "❌ Invalid input: smiles or smarts is required for mode='trials_by_substructure'.\n"
-                "Example: search_molecule_trials(mode='trials_by_substructure', smarts='c1ccccc1')"
+                "❌ Invalid input: smiles is required for mode='trials_by_substructure'.\n"
+                "Example: search_molecule_trials(mode='trials_by_substructure', smiles='c1ccccc1')"
             )
 
         detail_level, error = _validate_detail_level(detail_level)
@@ -1893,7 +1889,6 @@ async def search_molecule_trials(
             condition=condition,
             sequence=sequence,
             smiles=smiles,
-            smarts=smarts,
             similarity_threshold=similarity_threshold,
             min_pchembl=min_pchembl,
             phase=phase_list,

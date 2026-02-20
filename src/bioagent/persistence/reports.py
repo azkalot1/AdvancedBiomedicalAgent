@@ -62,6 +62,9 @@ def _get_dsn() -> str:
         os.getenv("BIOAGENT_RESEARCH_OUTPUT_POSTGRES_URI")
         or os.getenv("AEGRA_POSTGRES_URI")
         or os.getenv("BIOAGENT_CHECKPOINT_POSTGRES_URI")
+        or os.getenv("DATA_POSTGRES_URI")
+        or os.getenv("DATA_POSTGRES_URL")
+        or os.getenv("DATA_DATABASE_URL")
         or os.getenv("APP_DATABASE_URL")
         or os.getenv("POSTGRES_URI")
         or os.getenv("DATABASE_URL")
@@ -134,7 +137,7 @@ async def _get_pool() -> asyncpg.Pool:
             if not dsn:
                 raise RuntimeError(
                     "Missing reports database DSN. Set BIOAGENT_RESEARCH_OUTPUT_POSTGRES_URI "
-                    "(or AEGRA_POSTGRES_URI/APP_DATABASE_URL/POSTGRES_URI/DATABASE_URL)."
+                    "(or AEGRA_POSTGRES_URI/DATA_POSTGRES_URI/APP_DATABASE_URL/POSTGRES_URI/DATABASE_URL)."
                 )
             _POOL = await asyncpg.create_pool(
                 dsn=dsn,

@@ -539,7 +539,12 @@ CREATE TABLE IF NOT EXISTS dm_indication (
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
+-- Backward-compatibility for legacy dm_indication schemas (table may pre-exist).
+ALTER TABLE dm_indication
+ADD COLUMN IF NOT EXISTS preferred_name_lower TEXT GENERATED ALWAYS AS (LOWER(preferred_name)) STORED;
 
+ALTER TABLE dm_indication
+ADD COLUMN IF NOT EXISTS embedding VECTOR(384);
 CREATE INDEX IF NOT EXISTS idx_indication_mesh ON dm_indication(mesh_id);
 CREATE INDEX IF NOT EXISTS idx_indication_efo ON dm_indication(efo_id);
 CREATE INDEX IF NOT EXISTS idx_indication_name ON dm_indication(preferred_name);
@@ -2064,7 +2069,7 @@ def create_materialized_analytics_view(config: DatabaseConfig, limit: Optional[i
                     act.standard_value as activity_value,
                     act.standard_units as activity_units,
                     act.pchembl_value
-                FROM   dbt
+                FROM dm_biotherapeutic dbt
                 LEFT JOIN dm_molecule_concept mc ON dbt.concept_id = mc.concept_id
                 JOIN activities act ON dbt.molregno = act.molregno
                 JOIN assays ass ON act.assay_id = ass.assay_id
