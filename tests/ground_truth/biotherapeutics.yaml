@@ -111,3 +111,19 @@ test_cases:
         - "DIQMTQ is a common VL framework motif"
     source: "ChEMBL"
     confidence: "medium"
+
+  - id: "similar_biologics_ann_008"
+    tool: "search_biotherapeutics"
+    input:
+      mode: "similar_biologics"
+      sequence: "EVQLVESGGGLVQPGGSLRLSCAASGFTFSSYAMSWVRQAPGKGLEW"
+      biotherapeutic_type: "all"
+    expected_facts:
+      required:
+        - "sequence"
+      optional:
+        - "similarity"
+        - "biotherapeutic"
+        - "antibody"
+    source: "ChEMBL"
+    confidence: "medium"

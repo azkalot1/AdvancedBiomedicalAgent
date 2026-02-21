@@ -28,6 +28,12 @@ from bioagent.data.ingest.async_config import AsyncDatabaseConfig, get_async_con
 from bioagent.data.ingest.config import DatabaseConfig
 
 
+def _sanitize_tsquery(text: str) -> str:
+    text = text or ""
+    cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in text)
+    return " & ".join(cleaned.split())
+
+
 class OutcomesSearchInput(BaseModel):
     mode: Literal["outcomes_for_trial", "trials_with_outcome", "efficacy_comparison"]
     nct_id: str | None = None
@@ -234,29 +240,63 @@ async def outcomes_search_async(
 
         if search_input.mode == "trials_with_outcome":
             keyword = search_input.outcome_keyword or ""
-            params: list[Any] = [f"%{keyword}%"]
-            outcome_filter, outcome_params = _outcome_type_filter(search_input.outcome_type, 2)
-            params.extend(outcome_params)
-            params.extend([search_input.limit, search_input.offset])
-            sql = f"""
+            keyword_pattern = f"%{keyword}%"
+            keyword_tsquery = _sanitize_tsquery(keyword)
+
+            # Fast path: use indexed tsvector columns first.
+            ft_params: list[Any] = [keyword_tsquery]
+            outcome_filter_ft, outcome_params_ft = _outcome_type_filter(search_input.outcome_type, 2)
+            ft_params.extend(outcome_params_ft)
+            ft_params.extend([search_input.limit, search_input.offset])
+            ft_sql = f"""
                 WITH matched_outcomes AS (
                     SELECT DISTINCT o.nct_id, o.title, o.outcome_type, o.time_frame
                     FROM ctgov_outcomes o
-                    WHERE (o.title ILIKE $1 OR o.description ILIKE $1)
-                    {outcome_filter}
+                    WHERE o.description_vector @@ to_tsquery('english', $1)
+                    {outcome_filter_ft}
                     UNION
                     SELECT DISTINCT m.nct_id, m.title, NULL::text AS outcome_type, NULL::text AS time_frame
                     FROM ctgov_outcome_measurements m
-                    WHERE m.title ILIKE $1 OR m.description ILIKE $1
+                    WHERE m.description_vector @@ to_tsquery('english', $1)
                 )
                 SELECT rs.nct_id, rs.brief_title, rs.phase, rs.overall_status,
                        mo.title AS outcome_title, mo.outcome_type, mo.time_frame
                 FROM matched_outcomes mo
                 JOIN rag_study_search rs ON rs.nct_id = mo.nct_id
                 ORDER BY rs.nct_id
-                LIMIT ${len(params) - 1} OFFSET ${len(params)}
+                LIMIT ${len(ft_params) - 1} OFFSET ${len(ft_params)}
             """
-            rows = await async_config.execute_query(sql, *params)
+
+            rows: list[dict[str, Any]] = []
+            if keyword_tsquery:
+                rows = await async_config.execute_query(ft_sql, *ft_params)
+
+            # Recall fallback: preserve legacy substring behavior only when
+            # full-text returns nothing or keyword sanitizes to empty.
+            if not rows:
+                params: list[Any] = [keyword_pattern]
+                outcome_filter, outcome_params = _outcome_type_filter(search_input.outcome_type, 2)
+                params.extend(outcome_params)
+                params.extend([search_input.limit, search_input.offset])
+                sql = f"""
+                    WITH matched_outcomes AS (
+                        SELECT DISTINCT o.nct_id, o.title, o.outcome_type, o.time_frame
+                        FROM ctgov_outcomes o
+                        WHERE (o.title ILIKE $1 OR o.description ILIKE $1)
+                        {outcome_filter}
+                        UNION
+                        SELECT DISTINCT m.nct_id, m.title, NULL::text AS outcome_type, NULL::text AS time_frame
+                        FROM ctgov_outcome_measurements m
+                        WHERE m.title ILIKE $1 OR m.description ILIKE $1
+                    )
+                    SELECT rs.nct_id, rs.brief_title, rs.phase, rs.overall_status,
+                           mo.title AS outcome_title, mo.outcome_type, mo.time_frame
+                    FROM matched_outcomes mo
+                    JOIN rag_study_search rs ON rs.nct_id = mo.nct_id
+                    ORDER BY rs.nct_id
+                    LIMIT ${len(params) - 1} OFFSET ${len(params)}
+                """
+                rows = await async_config.execute_query(sql, *params)
             hits = [TrialOutcomeMatchHit(
                 nct_id=row["nct_id"],
                 brief_title=row.get("brief_title"),

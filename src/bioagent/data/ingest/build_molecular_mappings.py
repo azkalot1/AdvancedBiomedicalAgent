@@ -26,7 +26,7 @@ Usage:
   python build_molecular_mappings.py --fast             # Fast debug mode (10k molecules)
   python build_molecular_mappings.py --limit 50000      # Custom limit
   python build_molecular_mappings.py --incremental      # Incremental update
-  python build_molecular_mappings.py --from-phase 5     # Resume from specific phase (1-14)
+  python build_molecular_mappings.py --from-phase 5     # Resume from specific phase (1-16)
   python build_molecular_mappings.py --refresh-only     # Refresh materialized views only
   
   # Reporting & Validation
@@ -42,6 +42,7 @@ Usage:
 from __future__ import annotations
 
 import re
+import os
 import sys
 import time
 import argparse
@@ -55,15 +56,37 @@ from pgvector.psycopg2 import register_vector
 # Handle imports
 try:
     from .config import DatabaseConfig, get_connection, DEFAULT_CONFIG
-    from ..semantic_utils import EMBEDDING_DIMENSION, encode_texts, normalize_semantic_text
+    from ..semantic_utils import (
+        EMBEDDING_DIMENSION,
+        PROTEIN_EMBEDDING_DIMENSION,
+        SMILES_EMBEDDING_DIMENSION,
+        get_smiles_embedding_model,
+        encode_protein_sequences,
+        encode_smiles_texts,
+        encode_texts,
+        normalize_semantic_text,
+        _env_bool
+    )
 except ImportError:
     from config import DatabaseConfig, get_connection, DEFAULT_CONFIG
     try:
-        from bioagent.data.semantic_utils import EMBEDDING_DIMENSION, encode_texts, normalize_semantic_text
+        from bioagent.data.semantic_utils import (
+            EMBEDDING_DIMENSION,
+            PROTEIN_EMBEDDING_DIMENSION,
+            SMILES_EMBEDDING_DIMENSION,
+            get_smiles_embedding_model,
+            encode_protein_sequences,
+            encode_smiles_texts,
+            encode_texts,
+            normalize_semantic_text,
+            _env_bool
+        )
     except ImportError:
         from sentence_transformers import SentenceTransformer
 
         EMBEDDING_DIMENSION = 384
+        SMILES_EMBEDDING_DIMENSION = 384
+        PROTEIN_EMBEDDING_DIMENSION = 1024
         _fallback_embedding_model: SentenceTransformer | None = None
 
         def normalize_semantic_text(value: str | None) -> str:
@@ -74,6 +97,17 @@ except ImportError:
             if _fallback_embedding_model is None:
                 _fallback_embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
             return [row.tolist() for row in _fallback_embedding_model.encode(list(values), show_progress_bar=False)]
+
+        def encode_smiles_texts(values, batch_size: int = 64, normalize: bool = True, tokenizer=None, model=None):
+            # Fallback path when package-relative semantic_utils imports are unavailable.
+            return encode_texts(values)
+
+        def get_smiles_embedding_model():
+            return None, None
+
+        def encode_protein_sequences(values, batch_size: int = 16):
+            # Fallback path when package-relative semantic_utils imports are unavailable.
+            return encode_texts(values)
 
 
 # ============================================================================
@@ -88,6 +122,51 @@ FAST_MODE_LIMITS = {
     'interventions': 10000,
     'fuzzy_interventions': 5000,
 }
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    """Read integer env var with safe fallback."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        return value if value >= minimum else default
+    except Exception:
+        return default
+
+
+def _configure_index_build_session(cur, scope_label: str) -> None:
+    """Tune session-level PostgreSQL settings for faster index creation."""
+    maintenance_work_mem_mb = _env_int(
+        "BIOAGENT_PG_MAINTENANCE_WORK_MEM_MB",
+        8192,
+        minimum=256,
+    )
+    parallel_workers = _env_int(
+        "BIOAGENT_PG_MAX_PARALLEL_MAINTENANCE_WORKERS",
+        4,
+        minimum=1,
+    )
+
+    try:
+        cur.execute(f"SET maintenance_work_mem TO '{maintenance_work_mem_mb}MB'")
+        print(
+            f"  ⚙️  {scope_label}: maintenance_work_mem={maintenance_work_mem_mb:,}MB"
+        )
+    except Exception as e:
+        print(f"  ⚠️  {scope_label}: could not set maintenance_work_mem ({e})")
+
+    try:
+        cur.execute(f"SET max_parallel_maintenance_workers TO {parallel_workers}")
+        print(
+            f"  ⚙️  {scope_label}: max_parallel_maintenance_workers={parallel_workers}"
+        )
+    except Exception as e:
+        print(
+            "  ⚠️  "
+            f"{scope_label}: could not set max_parallel_maintenance_workers ({e})"
+        )
 
 
 # ============================================================================
@@ -209,6 +288,7 @@ def get_source_counts(config: DatabaseConfig) -> Dict[str, int]:
 CREATE_EXTENSIONS_SQL = """
 CREATE EXTENSION IF NOT EXISTS rdkit;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS vector;
 """
 
 CREATE_AUDIT_TABLE_SQL = """
@@ -246,7 +326,7 @@ DROP TABLE IF EXISTS dm_molecule_stereo CASCADE;
 DROP TABLE IF EXISTS dm_molecule_concept CASCADE;
 """
 
-CREATE_SCHEMA_SQL = """
+CREATE_SCHEMA_SQL = f"""
 -- ============================================================================
 -- LEVEL 1: Drug Concepts (Therapeutic equivalence - groups all forms)
 -- ============================================================================
@@ -354,10 +434,16 @@ CREATE TABLE IF NOT EXISTS dm_molecule (
     mfp2 bfp,
     ffp2 bfp,
     
+    -- Semantic embedding for ANN candidate retrieval
+    embedding VECTOR({SMILES_EMBEDDING_DIMENSION}),
+    
     -- Provenance
     sources TEXT[],
     created_at TIMESTAMP DEFAULT NOW()
 );
+-- Backward-compatibility for legacy dm_molecule schemas (table may pre-exist).
+ALTER TABLE dm_molecule
+ADD COLUMN IF NOT EXISTS embedding VECTOR({SMILES_EMBEDDING_DIMENSION});
 
 CREATE INDEX IF NOT EXISTS idx_dm_mol_inchikey ON dm_molecule(inchi_key);
 CREATE INDEX IF NOT EXISTS idx_dm_mol_parent14 ON dm_molecule(parent_inchi_key_14);
@@ -373,6 +459,8 @@ CREATE INDEX IF NOT EXISTS idx_dm_mol_salt ON dm_molecule(is_salt);
 CREATE INDEX IF NOT EXISTS idx_dm_mol_mfp2 ON dm_molecule USING gist(mfp2);
 CREATE INDEX IF NOT EXISTS idx_dm_mol_ffp2 ON dm_molecule USING gist(ffp2);
 CREATE INDEX IF NOT EXISTS idx_dm_mol_mol ON dm_molecule USING gist(mol);
+CREATE INDEX IF NOT EXISTS idx_dm_mol_embedding_hnsw
+ON dm_molecule USING hnsw (embedding vector_cosine_ops);
 
 
 -- ============================================================================
@@ -390,14 +478,19 @@ CREATE TABLE IF NOT EXISTS dm_biotherapeutic (
     helm_notation TEXT,
     organism TEXT,
     drugcentral_id INTEGER,
+    embedding VECTOR({PROTEIN_EMBEDDING_DIMENSION}),
     sources TEXT[],
     created_at TIMESTAMP DEFAULT NOW()
 );
+ALTER TABLE dm_biotherapeutic
+ADD COLUMN IF NOT EXISTS embedding VECTOR({PROTEIN_EMBEDDING_DIMENSION});
 
 CREATE INDEX IF NOT EXISTS idx_dm_bio_concept ON dm_biotherapeutic(concept_id);
 CREATE INDEX IF NOT EXISTS idx_dm_bio_chembl ON dm_biotherapeutic(chembl_id);
 CREATE INDEX IF NOT EXISTS idx_dm_bio_name ON dm_biotherapeutic(pref_name);
 CREATE INDEX IF NOT EXISTS idx_dm_bio_name_trgm ON dm_biotherapeutic USING gin(pref_name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_dm_bio_embedding_hnsw
+ON dm_biotherapeutic USING hnsw (embedding vector_cosine_ops);
 
 CREATE TABLE IF NOT EXISTS dm_biotherapeutic_component (
     component_id BIGSERIAL PRIMARY KEY,
@@ -406,6 +499,7 @@ CREATE TABLE IF NOT EXISTS dm_biotherapeutic_component (
     component_type TEXT,
     description TEXT,
     sequence TEXT,
+    sequence_embedding VECTOR({PROTEIN_EMBEDDING_DIMENSION}),
     sequence_length INTEGER,
     organism TEXT,
     tax_id BIGINT,
@@ -414,10 +508,14 @@ CREATE TABLE IF NOT EXISTS dm_biotherapeutic_component (
     created_at TIMESTAMP DEFAULT NOW(),
     UNIQUE(bio_id, source_component_id)
 );
+ALTER TABLE dm_biotherapeutic_component
+ADD COLUMN IF NOT EXISTS sequence_embedding VECTOR({PROTEIN_EMBEDDING_DIMENSION});
 
 CREATE INDEX IF NOT EXISTS idx_dm_bio_component_bio ON dm_biotherapeutic_component(bio_id);
 CREATE INDEX IF NOT EXISTS idx_dm_bio_component_uniprot ON dm_biotherapeutic_component(uniprot_accession);
 CREATE INDEX IF NOT EXISTS idx_dm_bio_component_md5 ON dm_biotherapeutic_component(sequence_md5);
+CREATE INDEX IF NOT EXISTS idx_dm_bio_component_seq_embedding_hnsw
+ON dm_biotherapeutic_component USING hnsw (sequence_embedding vector_cosine_ops);
 
 CREATE TABLE IF NOT EXISTS dm_biotherapeutic_synonyms (
     id BIGSERIAL PRIMARY KEY,
@@ -1587,6 +1685,849 @@ def ingest_biotherapeutics(config: DatabaseConfig, limit: Optional[int] = None):
             print(f"  ✅ Biotherapeutics loaded: {biotherapeutic_count:,}")
             print(f"     Components loaded: {component_count:,}")
             print(f"     Synonyms indexed: {synonym_count:,}")
+
+
+def populate_molecule_embeddings(
+    config: DatabaseConfig,
+    limit: Optional[int] = None,
+    batch_size: int | None = None,
+):
+    """
+    Generate dm_molecule semantic embeddings in batches.
+
+    This is intentionally a standalone phase so long-running vector generation
+    can be monitored and resumed independently from molecule ingestion.
+    """
+    print("\n🧠 PHASE 15: Generating Molecule Embeddings...")
+    if batch_size is None:
+        batch_size = _env_int("BIOAGENT_MOLECULE_FETCH_BATCH_SIZE", 5000)
+    model_batch_size = _env_int("BIOAGENT_MOLECULE_MODEL_BATCH_SIZE", 128)
+    encode_chunk_size = _env_int("BIOAGENT_MOLECULE_ENCODE_CHUNK_SIZE", 2048)
+    insert_every_chunks = _env_int("BIOAGENT_MOLECULE_INSERT_EVERY_CHUNKS", 10)
+    insert_buffer_max_rows = _env_int("BIOAGENT_MOLECULE_INSERT_BUFFER_MAX_ROWS", 8192)
+    commit_interval = _env_int("BIOAGENT_MOLECULE_COMMIT_INTERVAL", 5)
+    progress_heartbeat_sec = _env_int("BIOAGENT_MOLECULE_PROGRESS_HEARTBEAT_SEC", 30, minimum=5)
+    prefetch_max_rows = _env_int("BIOAGENT_MOLECULE_PREFETCH_MAX_ROWS", 400000)
+    log_batch_timings = _env_bool("BIOAGENT_MOLECULE_LOG_BATCH_TIMINGS", default=True)
+    prefetch_all = _env_bool("BIOAGENT_MOLECULE_PREFETCH_ALL", default=True)
+    rebuild_indexes = _env_bool("BIOAGENT_MOLECULE_REBUILD_INDEXES", default=True)
+    rebuild_min_rows = _env_int("BIOAGENT_MOLECULE_INDEX_REBUILD_MIN_ROWS", 50000)
+    print(
+        f"  ⚙️  Fetch batch size: {batch_size:,} | Model batch size: {model_batch_size:,} "
+        f"| Encode chunk size: {encode_chunk_size:,}"
+    )
+    print(
+        f"  ⚙️  DB flush every chunks: {insert_every_chunks:,} "
+        f"(or {insert_buffer_max_rows:,} buffered rows)"
+    )
+    print(f"  ⚙️  Prefetch all candidates into memory: {prefetch_all}")
+    print(f"  ⚙️  Prefetch max rows safeguard: {prefetch_max_rows:,}")
+    print(f"  ⚙️  Commit interval (batches): {commit_interval:,}")
+    print(f"  ⚙️  Per-batch encode/insert timing logs: {log_batch_timings}")
+    if rebuild_indexes:
+        print(f"  ⚙️  Rebuild vector indexes for >= {rebuild_min_rows:,} candidates")
+    else:
+        print("  ⚙️  Keep vector indexes online during updates")
+    if limit:
+        print(f"  ⚡ FAST MODE: Limiting embedding pass to first ~{limit:,} eligible molecules")
+
+    with get_connection(config) as con:
+        with con.cursor() as cur:
+            start_time = time.time()
+            sync_commit_disabled = False
+            updated_total = 0
+            processed = 0
+
+            try:
+                register_vector(con)
+            except Exception:
+                # Continue anyway; vector adaptation may already be active.
+                pass
+
+            try:
+                def _ensure_embedding_indexes() -> None:
+                    _configure_index_build_session(cur, "Molecule index build")
+                    cur.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS idx_dm_mol_embedding_hnsw
+                        ON dm_molecule USING hnsw (embedding vector_cosine_ops);
+                        """
+                    )
+
+                # Ensure embedding column exists and matches current model dimension.
+                expected_vector_type = f"vector({SMILES_EMBEDDING_DIMENSION})"
+                cur.execute(
+                    """
+                    SELECT format_type(a.atttypid, a.atttypmod) AS type_name
+                    FROM pg_attribute a
+                    JOIN pg_class c ON c.oid = a.attrelid
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public'
+                      AND c.relname = 'dm_molecule'
+                      AND a.attname = 'embedding'
+                      AND NOT a.attisdropped
+                      AND a.attnum > 0
+                    """
+                )
+                row = cur.fetchone()
+                current_vector_type = (row[0] if row and row[0] else None)
+
+                if current_vector_type and current_vector_type.lower() != expected_vector_type:
+                    print(
+                        "  ℹ️  Rebuilding dm_molecule.embedding "
+                        f"({current_vector_type} -> {expected_vector_type})"
+                    )
+                    cur.execute("DROP INDEX IF EXISTS idx_dm_mol_embedding")
+                    cur.execute("DROP INDEX IF EXISTS idx_dm_mol_embedding_hnsw")
+                    cur.execute("ALTER TABLE dm_molecule DROP COLUMN embedding")
+
+                cur.execute(
+                    f"""
+                    ALTER TABLE IF EXISTS dm_molecule
+                    ADD COLUMN IF NOT EXISTS embedding VECTOR({SMILES_EMBEDDING_DIMENSION});
+                    """
+                )
+                con.commit()
+
+                max_mol_id: int | None = None
+                if limit:
+                    cur.execute(
+                        """
+                        SELECT MAX(mol_id)::BIGINT
+                        FROM (
+                            SELECT mol_id
+                            FROM dm_molecule
+                            WHERE embedding IS NULL
+                              AND canonical_smiles IS NOT NULL
+                            ORDER BY mol_id
+                            LIMIT %s
+                        ) t
+                        """,
+                        (limit,),
+                    )
+                    max_mol_id = cur.fetchone()[0]
+
+                count_sql = """
+                    SELECT COUNT(*)
+                    FROM dm_molecule
+                    WHERE embedding IS NULL
+                      AND canonical_smiles IS NOT NULL
+                """
+                count_params: tuple = ()
+                if max_mol_id is not None:
+                    count_sql += " AND mol_id <= %s"
+                    count_params = (max_mol_id,)
+
+                cur.execute(count_sql, count_params)
+                total_candidates = cur.fetchone()[0] or 0
+                if total_candidates == 0:
+                    _ensure_embedding_indexes()
+                    con.commit()
+                    print("  ℹ️  No molecules need embedding updates")
+                    return
+
+                should_rebuild_indexes = rebuild_indexes and total_candidates >= rebuild_min_rows
+                if should_rebuild_indexes:
+                    print("  🧹 Dropping vector indexes for faster bulk embedding updates...")
+                    cur.execute("DROP INDEX IF EXISTS idx_dm_mol_embedding")
+                    cur.execute("DROP INDEX IF EXISTS idx_dm_mol_embedding_hnsw")
+                    con.commit()
+
+                # Lower fsync overhead while this phase is running.
+                try:
+                    cur.execute("SET synchronous_commit TO OFF")
+                    sync_commit_disabled = True
+                except Exception:
+                    sync_commit_disabled = False
+
+                smiles_tokenizer = None
+                smiles_model = None
+                try:
+                    smiles_tokenizer, smiles_model = get_smiles_embedding_model()
+                except Exception:
+                    # Fallback import paths can rely on encode_smiles_texts internal behavior.
+                    smiles_tokenizer, smiles_model = None, None
+
+                device_type = "cpu"
+                try:
+                    model_device = getattr(smiles_model, "device", None)
+                    if model_device is not None and getattr(model_device, "type", None):
+                        device_type = str(model_device.type)
+                        print(f"  ⚙️  Model device type: {device_type}")
+                except Exception:
+                    device_type = "cpu"
+                    print(f"  ⚙️  Model device type: {device_type}")
+                if (
+                    device_type != "cuda"
+                    and os.getenv("BIOAGENT_MOLECULE_MODEL_BATCH_SIZE") is None
+                    and model_batch_size > 64
+                ):
+                    model_batch_size = 64
+                    print("  ⚙️  Auto-tuned model batch size to 64 for CPU embedding")
+                if (
+                    device_type != "cuda"
+                    and os.getenv("BIOAGENT_MOLECULE_FETCH_BATCH_SIZE") is None
+                    and batch_size > 2000
+                ):
+                    batch_size = 2000
+                    print("  ⚙️  Auto-tuned fetch batch size to 2,000 for CPU embedding")
+
+                rows_all: list[tuple[int, str]] | None = None
+                use_prefetch_all = prefetch_all and total_candidates <= prefetch_max_rows
+                if prefetch_all and not use_prefetch_all:
+                    print(
+                        "  ℹ️  Disabling prefetch-all for this run "
+                        f"({total_candidates:,} rows > {prefetch_max_rows:,} safeguard)"
+                    )
+                if prefetch_all:
+                    if use_prefetch_all:
+                        print("  📥 Prefetching all molecule rows into memory...")
+                        prefetch_sql = """
+                            SELECT mol_id, canonical_smiles
+                            FROM dm_molecule
+                            WHERE embedding IS NULL
+                              AND canonical_smiles IS NOT NULL
+                        """
+                        prefetch_params: list[int] = []
+                        if max_mol_id is not None:
+                            prefetch_sql += " AND mol_id <= %s"
+                            prefetch_params.append(max_mol_id)
+                        prefetch_sql += " ORDER BY mol_id"
+                        cur.execute(prefetch_sql, tuple(prefetch_params))
+                        rows_all = cur.fetchall()
+                        total_candidates = len(rows_all)
+                        print(f"  ✅ Prefetched rows: {total_candidates:,}")
+                        if total_candidates == 0:
+                            _ensure_embedding_indexes()
+                            con.commit()
+                            print("  ℹ️  No molecules need embedding updates")
+                            return
+
+                cur.execute(
+                    f"""
+                    CREATE TEMP TABLE IF NOT EXISTS tmp_molecule_embedding (
+                        mol_id BIGINT PRIMARY KEY,
+                        embedding VECTOR({SMILES_EMBEDDING_DIMENSION})
+                    );
+                    """
+                )
+                con.commit()
+
+                batches_since_commit = 0
+                batch_index = 0
+                last_mol_id = 0
+                last_progress_log = time.time()
+
+                def _encode_rows_with_progress(
+                    rows: list[tuple[int, str]],
+                    pbar
+                ) -> tuple[list[tuple[int, list[float]]], float]:
+                    nonlocal last_progress_log
+                    encode_started = time.time()
+                    mol_ids = [mol_id for mol_id, _ in rows]
+                    smiles_values = [(canonical_smiles or "").strip() for _, canonical_smiles in rows]
+                    vectors: list[list[float]] = []
+
+                    for idx in range(0, len(smiles_values), encode_chunk_size):
+                        sub_texts = smiles_values[idx : idx + encode_chunk_size]
+                        sub_vectors = encode_smiles_texts(
+                            sub_texts,
+                            batch_size=min(model_batch_size, len(sub_texts)),
+                            tokenizer=smiles_tokenizer,
+                            model=smiles_model,
+                        )
+                        vectors.extend(sub_vectors)
+                        pbar.update(len(sub_texts))
+
+                        now = time.time()
+                        if now - last_progress_log >= progress_heartbeat_sec:
+                            done = processed + len(vectors)
+                            elapsed = max(now - start_time, 1e-6)
+                            rate = done / elapsed
+                            pbar.write(
+                                f"  ⏱️  Progress: {done:,}/{total_candidates:,} "
+                                f"({rate:,.1f} mol/s)"
+                            )
+                            last_progress_log = now
+
+                    update_rows = [(mol_ids[i], vectors[i]) for i in range(len(mol_ids))]
+                    return update_rows, (time.time() - encode_started)
+
+                def _apply_updates(
+                    update_rows: list[tuple[int, list[float]]],
+                    encode_seconds: float,
+                    encoded_chunks: int,
+                    pbar,
+                ) -> None:
+                    nonlocal updated_total, batches_since_commit, batch_index
+                    if not update_rows:
+                        return
+                    batch_index += 1
+                    cur.execute("TRUNCATE tmp_molecule_embedding")
+                    insert_started = time.time()
+                    psycopg2.extras.execute_values(
+                        cur,
+                        "INSERT INTO tmp_molecule_embedding (mol_id, embedding) VALUES %s",
+                        update_rows,
+                        page_size=1000,
+                    )
+                    insert_seconds = time.time() - insert_started
+                    update_started = time.time()
+                    cur.execute(
+                        """
+                        UPDATE dm_molecule d
+                        SET embedding = t.embedding
+                        FROM tmp_molecule_embedding t
+                        WHERE d.mol_id = t.mol_id
+                        """
+                    )
+                    update_seconds = time.time() - update_started
+                    updated_this_batch = cur.rowcount if cur.rowcount >= 0 else len(update_rows)
+                    updated_total += cur.rowcount if cur.rowcount >= 0 else len(update_rows)
+                    batches_since_commit += 1
+                    committed = False
+                    if batches_since_commit >= commit_interval:
+                        con.commit()
+                        batches_since_commit = 0
+                        committed = True
+                    if log_batch_timings:
+                        pbar.write(
+                            f"  ⏱️  Batch {batch_index:,} DB: rows={len(update_rows):,} "
+                            f"encoded_chunks={encoded_chunks:,} "
+                            f"encode_total={encode_seconds:.2f}s "
+                            f"insert={insert_seconds:.2f}s "
+                            f"update={update_seconds:.2f}s updated={updated_this_batch:,}"
+                            + (" commit" if committed else "")
+                        )
+
+                pending_updates: list[tuple[int, list[float]]] = []
+                pending_encode_seconds = 0.0
+                pending_encoded_chunks = 0
+
+                def _flush_pending(pbar) -> None:
+                    nonlocal pending_updates, pending_encode_seconds, pending_encoded_chunks
+                    if not pending_updates:
+                        return
+                    _apply_updates(
+                        pending_updates,
+                        pending_encode_seconds,
+                        pending_encoded_chunks,
+                        pbar,
+                    )
+                    pending_updates = []
+                    pending_encode_seconds = 0.0
+                    pending_encoded_chunks = 0
+
+                with tqdm(total=total_candidates, desc="     Embedding molecules", unit="mol", leave=False) as pbar:
+                    if rows_all is not None:
+                        print("  🚀 Starting embedding/update loop from in-memory rows...")
+                        for start_idx in range(0, total_candidates, batch_size):
+                            rows = rows_all[start_idx : start_idx + batch_size]
+                            if not rows:
+                                break
+
+                            for chunk_idx in range(0, len(rows), encode_chunk_size):
+                                chunk_rows = rows[chunk_idx : chunk_idx + encode_chunk_size]
+                                if not chunk_rows:
+                                    continue
+                                if log_batch_timings:
+                                    pbar.write(
+                                        f"  ⏱️  Encode chunk: rows={len(chunk_rows):,} "
+                                        f"pending_flush={pending_encoded_chunks + 1}/{insert_every_chunks}"
+                                    )
+                                update_rows, encode_seconds = _encode_rows_with_progress(chunk_rows, pbar)
+                                pending_updates.extend(update_rows)
+                                pending_encode_seconds += encode_seconds
+                                pending_encoded_chunks += 1
+                                processed += len(chunk_rows)
+
+                                if (
+                                    pending_encoded_chunks >= insert_every_chunks
+                                    or len(pending_updates) >= insert_buffer_max_rows
+                                ):
+                                    _flush_pending(pbar)
+                    else:
+                        print("  🚀 Starting embedding/update loop from paged DB fetch...")
+                        while processed < total_candidates:
+                            fetch_sql = """
+                                SELECT mol_id, canonical_smiles
+                                FROM dm_molecule
+                                WHERE embedding IS NULL
+                                  AND canonical_smiles IS NOT NULL
+                                  AND mol_id > %s
+                            """
+                            fetch_params: list[int] = [last_mol_id]
+
+                            if max_mol_id is not None:
+                                fetch_sql += " AND mol_id <= %s"
+                                fetch_params.append(max_mol_id)
+
+                            fetch_sql += " ORDER BY mol_id LIMIT %s"
+                            fetch_params.append(min(batch_size, total_candidates - processed))
+                            cur.execute(fetch_sql, tuple(fetch_params))
+                            rows = cur.fetchall()
+                            if not rows:
+                                break
+
+                            last_mol_id = rows[-1][0]
+                            for chunk_idx in range(0, len(rows), encode_chunk_size):
+                                chunk_rows = rows[chunk_idx : chunk_idx + encode_chunk_size]
+                                if not chunk_rows:
+                                    continue
+                                if log_batch_timings:
+                                    pbar.write(
+                                        f"  ⏱️  Encode chunk: rows={len(chunk_rows):,} "
+                                        f"pending_flush={pending_encoded_chunks + 1}/{insert_every_chunks}"
+                                    )
+                                update_rows, encode_seconds = _encode_rows_with_progress(chunk_rows, pbar)
+                                pending_updates.extend(update_rows)
+                                pending_encode_seconds += encode_seconds
+                                pending_encoded_chunks += 1
+                                processed += len(chunk_rows)
+
+                                if (
+                                    pending_encoded_chunks >= insert_every_chunks
+                                    or len(pending_updates) >= insert_buffer_max_rows
+                                ):
+                                    _flush_pending(pbar)
+
+                    _flush_pending(pbar)
+
+                if batches_since_commit > 0:
+                    con.commit()
+
+                if sync_commit_disabled:
+                    try:
+                        cur.execute("SET synchronous_commit TO ON")
+                    except Exception:
+                        pass
+
+                if should_rebuild_indexes:
+                    print("  🏗️  Rebuilding vector indexes after bulk update...")
+                _ensure_embedding_indexes()
+                cur.execute("ANALYZE dm_molecule")
+                con.commit()
+
+                log_audit(cur, 'PHASE_15', 'populate_molecule_embeddings', updated_total, time.time() - start_time, 'SUCCESS')
+                con.commit()
+                print(f"  ✅ Molecule embeddings updated: {updated_total:,}")
+                print(f"     Total processed: {processed:,}")
+            except Exception as e:
+                con.rollback()
+                try:
+                    if sync_commit_disabled:
+                        cur.execute("SET synchronous_commit TO ON")
+                        con.commit()
+                except Exception:
+                    con.rollback()
+                log_audit(cur, 'PHASE_15', 'populate_molecule_embeddings', 0, time.time() - start_time, 'FAILED', str(e))
+                con.commit()
+                print(f"  ⚠️  Molecule embedding generation failed (continuing): {type(e).__name__}: {e}")
+
+
+def populate_biotherapeutic_embeddings(
+    config: DatabaseConfig,
+    limit: Optional[int] = None,
+    batch_size: int | None = None,
+):
+    """
+    Generate ESM2 embeddings from component amino-acid sequences.
+
+    Phase flow:
+      1) Embed dm_biotherapeutic_component.sequence -> sequence_embedding
+      2) Aggregate component vectors per bio_id -> dm_biotherapeutic.embedding
+
+    GPU optimizations vs original:
+      - synchronous_commit OFF during bulk update phase
+      - Commit every N batches instead of every batch (reduces WAL fsync stalls)
+      - Prefetch all rows into memory when dataset is small enough
+      - encode_protein_sequences now uses fp16 autocast + sorted batching internally
+    """
+    print("\n🧬 PHASE 16: Generating Biotherapeutic Sequence Embeddings...")
+    if batch_size is None:
+        batch_size = _env_int("BIOAGENT_PROTEIN_FETCH_BATCH_SIZE", 512)
+    model_batch_size   = _env_int("BIOAGENT_PROTEIN_MODEL_BATCH_SIZE", 32)
+    commit_interval    = _env_int("BIOAGENT_PROTEIN_COMMIT_INTERVAL", 10)
+    prefetch_max_rows  = _env_int("BIOAGENT_PROTEIN_PREFETCH_MAX_ROWS", 50000)
+    log_batch_timings  = _env_bool("BIOAGENT_PROTEIN_LOG_BATCH_TIMINGS", default=True)
+    prefetch_all       = _env_bool("BIOAGENT_PROTEIN_PREFETCH_ALL", default=True)
+
+    print(f"  ⚙️  Fetch batch size: {batch_size:,} | Model batch size: {model_batch_size:,}")
+    print(f"  ⚙️  Commit interval (batches): {commit_interval:,}")
+    print(f"  ⚙️  Prefetch all candidates into memory: {prefetch_all}")
+    if limit:
+        print(f"  ⚡ FAST MODE: Limiting to first ~{limit:,} components needing embeddings")
+
+    with get_connection(config) as con:
+        with con.cursor() as cur:
+            start_time = time.time()
+            sync_commit_disabled = False
+            try:
+                register_vector(con)
+            except Exception:
+                pass
+
+            try:
+                expected_vector_type = f"vector({PROTEIN_EMBEDDING_DIMENSION})"
+
+                # ── Schema alignment: dm_biotherapeutic_component ──────────────
+                cur.execute(
+                    """
+                    SELECT format_type(a.atttypid, a.atttypmod)
+                    FROM pg_attribute a
+                    JOIN pg_class c ON c.oid = a.attrelid
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public'
+                      AND c.relname = 'dm_biotherapeutic_component'
+                      AND a.attname = 'sequence_embedding'
+                      AND NOT a.attisdropped AND a.attnum > 0
+                    """
+                )
+                comp_row = cur.fetchone()
+                comp_type = comp_row[0] if comp_row and comp_row[0] else None
+                if comp_type and comp_type.lower() != expected_vector_type:
+                    print(
+                        f"  ℹ️  Rebuilding dm_biotherapeutic_component.sequence_embedding "
+                        f"({comp_type} -> {expected_vector_type})"
+                    )
+                    cur.execute("DROP INDEX IF EXISTS idx_dm_bio_component_seq_embedding_hnsw")
+                    cur.execute(
+                        "ALTER TABLE dm_biotherapeutic_component DROP COLUMN sequence_embedding"
+                    )
+
+                # ── Schema alignment: dm_biotherapeutic ─────────────────────────
+                cur.execute(
+                    """
+                    SELECT format_type(a.atttypid, a.atttypmod)
+                    FROM pg_attribute a
+                    JOIN pg_class c ON c.oid = a.attrelid
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public'
+                      AND c.relname = 'dm_biotherapeutic'
+                      AND a.attname = 'embedding'
+                      AND NOT a.attisdropped AND a.attnum > 0
+                    """
+                )
+                bio_row = cur.fetchone()
+                bio_type = bio_row[0] if bio_row and bio_row[0] else None
+                if bio_type and bio_type.lower() != expected_vector_type:
+                    print(
+                        f"  ℹ️  Rebuilding dm_biotherapeutic.embedding "
+                        f"({bio_type} -> {expected_vector_type})"
+                    )
+                    cur.execute("DROP INDEX IF EXISTS idx_dm_bio_embedding")
+                    cur.execute("DROP INDEX IF EXISTS idx_dm_bio_embedding_hnsw")
+                    cur.execute("ALTER TABLE dm_biotherapeutic DROP COLUMN embedding")
+
+                # ── Ensure columns + indexes exist ──────────────────────────────
+                cur.execute(
+                    f"""
+                    ALTER TABLE IF EXISTS dm_biotherapeutic_component
+                    ADD COLUMN IF NOT EXISTS sequence_embedding VECTOR({PROTEIN_EMBEDDING_DIMENSION});
+                    """
+                )
+                cur.execute(
+                    f"""
+                    ALTER TABLE IF EXISTS dm_biotherapeutic
+                    ADD COLUMN IF NOT EXISTS embedding VECTOR({PROTEIN_EMBEDDING_DIMENSION});
+                    """
+                )
+                _configure_index_build_session(cur, "Biotherapeutic index build")
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_dm_bio_embedding_hnsw
+                    ON dm_biotherapeutic USING hnsw (embedding vector_cosine_ops);
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_dm_bio_component_seq_embedding_hnsw
+                    ON dm_biotherapeutic_component USING hnsw (sequence_embedding vector_cosine_ops);
+                    """
+                )
+                con.commit()
+
+                # ── Candidate count ─────────────────────────────────────────────
+                max_component_id: int | None = None
+                if limit:
+                    cur.execute(
+                        """
+                        SELECT MAX(component_id)::BIGINT
+                        FROM (
+                            SELECT component_id
+                            FROM dm_biotherapeutic_component
+                            WHERE sequence IS NOT NULL
+                              AND sequence <> ''
+                              AND sequence_embedding IS NULL
+                            ORDER BY component_id
+                            LIMIT %s
+                        ) t
+                        """,
+                        (limit,),
+                    )
+                    max_component_id = cur.fetchone()[0]
+
+                count_sql = """
+                    SELECT COUNT(*)
+                    FROM dm_biotherapeutic_component
+                    WHERE sequence IS NOT NULL
+                      AND sequence <> ''
+                      AND sequence_embedding IS NULL
+                """
+                count_params: tuple = ()
+                if max_component_id is not None:
+                    count_sql += " AND component_id <= %s"
+                    count_params = (max_component_id,)
+
+                cur.execute(count_sql, count_params)
+                total_components = cur.fetchone()[0] or 0
+                if total_components == 0:
+                    print("  ℹ️  No biotherapeutic components need embedding updates")
+                    return
+
+                # ── Temp tables ─────────────────────────────────────────────────
+                cur.execute(
+                    f"""
+                    CREATE TEMP TABLE IF NOT EXISTS tmp_bio_component_embedding (
+                        component_id BIGINT PRIMARY KEY,
+                        bio_id       BIGINT,
+                        embedding    VECTOR({PROTEIN_EMBEDDING_DIMENSION})
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TEMP TABLE IF NOT EXISTS tmp_touched_bio_ids (
+                        bio_id BIGINT PRIMARY KEY
+                    );
+                    """
+                )
+                con.commit()
+
+                # ── Lower WAL fsync overhead ────────────────────────────────────
+                try:
+                    cur.execute("SET synchronous_commit TO OFF")
+                    sync_commit_disabled = True
+                except Exception:
+                    sync_commit_disabled = False
+
+                # ── Optional prefetch ───────────────────────────────────────────
+                rows_all: list[tuple[int, int, str]] | None = None
+                use_prefetch = prefetch_all and total_components <= prefetch_max_rows
+                if prefetch_all and not use_prefetch:
+                    print(
+                        f"  ℹ️  Disabling prefetch-all "
+                        f"({total_components:,} rows > {prefetch_max_rows:,} safeguard)"
+                    )
+                if use_prefetch:
+                    print("  📥 Prefetching all component rows into memory...")
+                    prefetch_sql = """
+                        SELECT component_id, bio_id, sequence
+                        FROM dm_biotherapeutic_component
+                        WHERE sequence IS NOT NULL
+                          AND sequence <> ''
+                          AND sequence_embedding IS NULL
+                    """
+                    prefetch_params_list: list[int] = []
+                    if max_component_id is not None:
+                        prefetch_sql += " AND component_id <= %s"
+                        prefetch_params_list.append(max_component_id)
+                    prefetch_sql += " ORDER BY component_id"
+                    cur.execute(prefetch_sql, tuple(prefetch_params_list))
+                    rows_all = cur.fetchall()
+                    total_components = len(rows_all)
+                    print(f"  ✅ Prefetched rows: {total_components:,}")
+                    if total_components == 0:
+                        print("  ℹ️  No biotherapeutic components need embedding updates")
+                        return
+
+                # ── Main embedding loop ─────────────────────────────────────────
+                last_component_id = 0
+                processed = 0
+                updated_components = 0
+                batches_since_commit = 0
+                batch_index = 0
+
+                with tqdm(
+                    total=total_components,
+                    desc="     Embedding protein sequences",
+                    unit="seq",
+                    leave=False,
+                ) as pbar:
+
+                    def _get_next_rows(start_idx: int) -> list[tuple[int, int, str]]:
+                        """Return the next page of rows from memory or DB."""
+                        nonlocal last_component_id
+                        if rows_all is not None:
+                            return rows_all[start_idx : start_idx + batch_size]
+                        fetch_sql = """
+                            SELECT component_id, bio_id, sequence
+                            FROM dm_biotherapeutic_component
+                            WHERE sequence IS NOT NULL
+                              AND sequence <> ''
+                              AND sequence_embedding IS NULL
+                              AND component_id > %s
+                        """
+                        fetch_params: list[int] = [last_component_id]
+                        if max_component_id is not None:
+                            fetch_sql += " AND component_id <= %s"
+                            fetch_params.append(max_component_id)
+                        fetch_sql += " ORDER BY component_id LIMIT %s"
+                        fetch_params.append(min(batch_size, total_components - processed))
+                        cur.execute(fetch_sql, tuple(fetch_params))
+                        fetched = cur.fetchall()
+                        if fetched:
+                            last_component_id = fetched[-1][0]
+                        return fetched
+
+                    start_idx = 0
+                    while processed < total_components:
+                        rows = _get_next_rows(start_idx)
+                        if not rows:
+                            break
+
+                        t_encode_start = time.time()
+
+                        component_ids = [r[0] for r in rows]
+                        bio_ids       = [r[1] for r in rows]
+                        sequences     = [(r[2] or "").strip() for r in rows]
+
+                        # encode_protein_sequences now handles length-sorting + fp16 internally.
+                        vectors = encode_protein_sequences(
+                            sequences,
+                            batch_size=min(model_batch_size, len(sequences)),
+                        )
+                        encode_seconds = time.time() - t_encode_start
+
+                        update_rows = [
+                            (component_ids[i], bio_ids[i], vectors[i])
+                            for i in range(len(component_ids))
+                        ]
+
+                        t_insert_start = time.time()
+                        cur.execute("TRUNCATE tmp_bio_component_embedding")
+                        psycopg2.extras.execute_values(
+                            cur,
+                            "INSERT INTO tmp_bio_component_embedding "
+                            "(component_id, bio_id, embedding) VALUES %s",
+                            update_rows,
+                            page_size=256,
+                        )
+                        insert_seconds = time.time() - t_insert_start
+
+                        t_update_start = time.time()
+                        cur.execute(
+                            """
+                            UPDATE dm_biotherapeutic_component c
+                            SET sequence_embedding = t.embedding
+                            FROM tmp_bio_component_embedding t
+                            WHERE c.component_id = t.component_id
+                            """
+                        )
+                        update_seconds = time.time() - t_update_start
+                        updated_components += cur.rowcount if cur.rowcount >= 0 else len(update_rows)
+
+                        cur.execute(
+                            """
+                            INSERT INTO tmp_touched_bio_ids (bio_id)
+                            SELECT DISTINCT bio_id FROM tmp_bio_component_embedding
+                            ON CONFLICT (bio_id) DO NOTHING
+                            """
+                        )
+
+                        processed += len(rows)
+                        start_idx += len(rows)
+                        batch_index += 1
+                        batches_since_commit += 1
+                        pbar.update(len(rows))
+
+                        # Commit every N batches instead of every batch.
+                        committed = False
+                        if batches_since_commit >= commit_interval:
+                            con.commit()
+                            batches_since_commit = 0
+                            committed = True
+
+                        if log_batch_timings:
+                            pbar.write(
+                                f"  ⏱️  Batch {batch_index:,}: rows={len(rows):,} "
+                                f"encode={encode_seconds:.2f}s "
+                                f"insert={insert_seconds:.2f}s "
+                                f"update={update_seconds:.2f}s"
+                                + (" commit" if committed else "")
+                            )
+
+                # Flush any uncommitted batches.
+                if batches_since_commit > 0:
+                    con.commit()
+
+                # Re-enable synchronous_commit before the aggregation step.
+                if sync_commit_disabled:
+                    try:
+                        cur.execute("SET synchronous_commit TO ON")
+                        sync_commit_disabled = False
+                    except Exception:
+                        pass
+
+                # ── Aggregate component vectors -> biotherapeutic level ──────────
+                print("  🔗 Aggregating component embeddings to biotherapeutic level...")
+                cur.execute(
+                    """
+                    WITH component_agg AS (
+                        SELECT c.bio_id, AVG(c.sequence_embedding) AS embedding
+                        FROM dm_biotherapeutic_component c
+                        JOIN tmp_touched_bio_ids t ON t.bio_id = c.bio_id
+                        WHERE c.sequence_embedding IS NOT NULL
+                        GROUP BY c.bio_id
+                    )
+                    UPDATE dm_biotherapeutic b
+                    SET embedding = a.embedding
+                    FROM component_agg a
+                    WHERE b.bio_id = a.bio_id
+                    """
+                )
+                updated_biotherapeutics = cur.rowcount
+
+                cur.execute("ANALYZE dm_biotherapeutic_component")
+                cur.execute("ANALYZE dm_biotherapeutic")
+                con.commit()
+
+                log_audit(
+                    cur,
+                    'PHASE_16',
+                    'populate_biotherapeutic_embeddings',
+                    updated_components + updated_biotherapeutics,
+                    time.time() - start_time,
+                    'SUCCESS',
+                )
+                con.commit()
+
+                print(f"  ✅ Component embeddings updated: {updated_components:,}")
+                print(f"  ✅ Biotherapeutic vectors updated: {updated_biotherapeutics:,}")
+
+            except Exception as e:
+                con.rollback()
+                try:
+                    if sync_commit_disabled:
+                        cur.execute("SET synchronous_commit TO ON")
+                        con.commit()
+                except Exception:
+                    con.rollback()
+                log_audit(
+                    cur,
+                    'PHASE_16',
+                    'populate_biotherapeutic_embeddings',
+                    0,
+                    time.time() - start_time,
+                    'FAILED',
+                    str(e),
+                )
+                con.commit()
+                print(
+                    f"  ⚠️  Biotherapeutic embedding generation failed (continuing): "
+                    f"{type(e).__name__}: {e}"
+                )
+
 
 # ============================================================================
 # PHASE 3: POPULATE SYNONYMS
@@ -6044,8 +6985,8 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
         skip_validation: If True, skip data quality checks.
         enable_fuzzy: If True, enable fuzzy matching for clinical trials.
         fuzzy_threshold: Minimum similarity for fuzzy matches (0-1).
-        from_phase: If set, start from this phase (1-14). Earlier phases are skipped.
-        to_phase: If set, stop after this phase (1-14). Later phases are skipped.
+        from_phase: If set, start from this phase (1-16). Earlier phases are skipped.
+        to_phase: If set, stop after this phase (1-16). Later phases are skipped.
         limit: Maximum molecules/items to process per source (for fast/debug mode).
     """
     config = DEFAULT_CONFIG
@@ -6219,6 +7160,18 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
     else:
         print("⏩ Skipping Phase 14: index_drug_mechanism_table")
 
+    # Phase 15: Molecule SMILES embeddings (standalone runnable phase)
+    if start_phase <= 15 <= end_phase:
+        populate_molecule_embeddings(config, limit=limit)
+    else:
+        print("⏩ Skipping Phase 15: populate_molecule_embeddings")
+
+    # Phase 16: Biotherapeutic sequence embeddings (standalone runnable phase)
+    if start_phase <= 16 <= end_phase:
+        populate_biotherapeutic_embeddings(config, limit=limit)
+    else:
+        print("⏩ Skipping Phase 16: populate_biotherapeutic_embeddings")
+
     # 7. Validate (always run)
     print("\n🔍 Validating pipeline...")
     with get_connection(config) as con:
@@ -6271,6 +7224,8 @@ Examples:
   %(prog)s --from-phase 5         # Rebuild only analytics views
   %(prog)s --from-phase 9 --to-phase 9   # Re-run Phase 9 only (indications)
   %(prog)s --from-phase 9 --to-phase 12  # Re-run Phases 9-12 only
+  %(prog)s --incremental --from-phase 15 --to-phase 15  # Run only molecule embeddings
+  %(prog)s --incremental --from-phase 16 --to-phase 16  # Run only biotherapeutic embeddings
   %(prog)s --refresh-only         # Refresh materialized views only
   %(prog)s --report               # Generate report without running pipeline
   %(prog)s --validate-only        # Run validation checks only
@@ -6288,9 +7243,10 @@ Phases:
  10 = link_dailymed_products      (link DailyMed FDA labels)
  11 = link_openfda_labels         (link OpenFDA labels)
  12 = create_indication_functions (indication search SQL functions)
- 13 = create_drug_mechanism_table  (create drug mechanism table)
- 14 = index_drug_mechanism_table   (index drug mechanism table)
- 14 = index_drug_mechanism_table   (index drug mechanism table)
+ 13 = create_drug_mechanism_table (create drug mechanism table)
+ 14 = index_drug_mechanism_table  (index drug mechanism table)
+ 15 = populate_molecule_embeddings  (ChemBERTa SMILES embeddings for dm_molecule)
+ 16 = populate_biotherapeutic_embeddings (ProtBert sequence embeddings for biologics)
 
 Fast Mode Defaults (--fast):
   - ChEMBL:      10,000 molecules
@@ -6307,10 +7263,10 @@ Fast Mode Defaults (--fast):
                         help='Maximum molecules/items to process per source')
     parser.add_argument('--incremental', action='store_true', 
                         help='Run incremental update instead of full rebuild')
-    parser.add_argument('--from-phase', type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-                        help='Start from this phase (1-14), skipping earlier phases')
-    parser.add_argument('--to-phase', type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-                        help='Stop after this phase (1-14), skipping later phases')
+    parser.add_argument('--from-phase', type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                        help='Start from this phase (1-16), skipping earlier phases')
+    parser.add_argument('--to-phase', type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                        help='Stop after this phase (1-16), skipping later phases')
     parser.add_argument('--skip-validation', action='store_true',
                         help='Skip data quality validation')
     parser.add_argument('--refresh-only', action='store_true',

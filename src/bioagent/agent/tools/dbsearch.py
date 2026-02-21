@@ -760,7 +760,9 @@ def _format_biotherapeutic_output(
         chembl = getattr(hit, "chembl_id", None) or "N/A"
         bio_type = getattr(hit, "biotherapeutic_type", None) or "N/A"
         organism = getattr(hit, "organism", None) or "N/A"
-        lines.append(f"[{i}] {name} | {bio_type} | ChEMBL: {chembl} | {organism}")
+        similarity = getattr(hit, "similarity_score", None)
+        sim_text = f" | similarity: {similarity:.3f}" if isinstance(similarity, (int, float)) else ""
+        lines.append(f"[{i}] {name} | {bio_type} | ChEMBL: {chembl} | {organism}{sim_text}")
         if detail_level != "brief":
             components = getattr(hit, "components", []) or []
             for comp in components[:5]:
@@ -1201,6 +1203,13 @@ async def search_clinical_trials(
             include_adverse_events = True
             include_baseline = True
 
+        # Fast path for agentic search: only load heavy study JSON for
+        # comprehensive views that explicitly need expanded narratives.
+        include_study_json = detail_level == "comprehensive"
+
+        # Standard mode is optimized for ranking/browsing many trials.
+        formatter_detail_level = "brief" if detail_level == "standard" else detail_level
+
         # Build search input
         search_input = ClinicalTrialsSearchInput(
             # Search queries
@@ -1244,7 +1253,7 @@ async def search_clinical_trials(
             sort_order=sort_order_enum,
             limit=min(limit, 100),
             offset=offset,
-            include_study_json=True,
+            include_study_json=include_study_json,
             
             # Output sections
             output_eligibility=include_eligibility,
@@ -1262,7 +1271,7 @@ async def search_clinical_trials(
         top_nct_id = result.hits[0].nct_id if result.hits else None
         return _format_clinical_trials_output(
             result,
-            detail_level=detail_level,
+            detail_level=formatter_detail_level,
             source_tool="search_clinical_trials",
             result_context={"top_nct_id": top_nct_id},
         )
@@ -2339,7 +2348,7 @@ async def search_biotherapeutics(
 
     Modes:
         - "by_sequence": Match by sequence motif (uses sequence/sequence_motif).
-        - "similar_biologics": Find biologics sharing a motif (uses sequence/sequence_motif).
+        - "similar_biologics": ANN similarity over ProtBert sequence embeddings.
 
     For target-based biologic queries, use search_target_drugs with
     molecule_type="biotherapeutic".
