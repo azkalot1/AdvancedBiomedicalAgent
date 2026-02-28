@@ -145,7 +145,7 @@ def _configure_index_build_session(cur, scope_label: str) -> None:
     )
     parallel_workers = _env_int(
         "BIOAGENT_PG_MAX_PARALLEL_MAINTENANCE_WORKERS",
-        4,
+        4 ,
         minimum=1,
     )
 
@@ -1691,6 +1691,7 @@ def populate_molecule_embeddings(
     config: DatabaseConfig,
     limit: Optional[int] = None,
     batch_size: int | None = None,
+    force_rerun: bool = False,
 ):
     """
     Generate dm_molecule semantic embeddings in batches.
@@ -1730,6 +1731,8 @@ def populate_molecule_embeddings(
         print("  ⚙️  Keep vector indexes online during updates")
     if limit:
         print(f"  ⚡ FAST MODE: Limiting embedding pass to first ~{limit:,} eligible molecules")
+    if force_rerun:
+        print("  🔄 Force rerun enabled: clearing existing molecule embeddings first")
 
     with get_connection(config) as con:
         with con.cursor() as cur:
@@ -1781,12 +1784,46 @@ def populate_molecule_embeddings(
                     cur.execute("DROP INDEX IF EXISTS idx_dm_mol_embedding_hnsw")
                     cur.execute("ALTER TABLE dm_molecule DROP COLUMN embedding")
 
+                if force_rerun and not limit:
+                    print("  ⚡ Fast force-rerun reset: recreating dm_molecule.embedding column")
+                    cur.execute("DROP INDEX IF EXISTS idx_dm_mol_embedding")
+                    cur.execute("DROP INDEX IF EXISTS idx_dm_mol_embedding_hnsw")
+                    cur.execute("ALTER TABLE dm_molecule DROP COLUMN IF EXISTS embedding")
+
                 cur.execute(
                     f"""
                     ALTER TABLE IF EXISTS dm_molecule
                     ADD COLUMN IF NOT EXISTS embedding VECTOR({SMILES_EMBEDDING_DIMENSION});
                     """
                 )
+                if force_rerun:
+                    if limit:
+                        cur.execute(
+                            """
+                            UPDATE dm_molecule d
+                            SET embedding = NULL
+                            WHERE d.embedding IS NOT NULL
+                              AND d.mol_id IN (
+                                  SELECT mol_id
+                                  FROM dm_molecule
+                                  WHERE canonical_smiles IS NOT NULL
+                                  ORDER BY mol_id
+                                  LIMIT %s
+                              )
+                            """,
+                            (limit,),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            UPDATE dm_molecule
+                            SET embedding = NULL
+                            WHERE embedding IS NOT NULL
+                              AND canonical_smiles IS NOT NULL
+                            """
+                        )
+                    if limit:
+                        print(f"  🧹 Cleared existing molecule embeddings: {cur.rowcount:,}")
                 con.commit()
 
                 max_mol_id: int | None = None
@@ -2129,6 +2166,7 @@ def populate_biotherapeutic_embeddings(
     config: DatabaseConfig,
     limit: Optional[int] = None,
     batch_size: int | None = None,
+    force_rerun: bool = False,
 ):
     """
     Generate ESM2 embeddings from component amino-acid sequences.
@@ -2157,6 +2195,8 @@ def populate_biotherapeutic_embeddings(
     print(f"  ⚙️  Prefetch all candidates into memory: {prefetch_all}")
     if limit:
         print(f"  ⚡ FAST MODE: Limiting to first ~{limit:,} components needing embeddings")
+    if force_rerun:
+        print("  🔄 Force rerun enabled: clearing existing biotherapeutic embeddings first")
 
     with get_connection(config) as con:
         with con.cursor() as cur:
@@ -2219,6 +2259,14 @@ def populate_biotherapeutic_embeddings(
                     cur.execute("DROP INDEX IF EXISTS idx_dm_bio_embedding_hnsw")
                     cur.execute("ALTER TABLE dm_biotherapeutic DROP COLUMN embedding")
 
+                if force_rerun and not limit:
+                    print("  ⚡ Fast force-rerun reset: recreating biotherapeutic embedding columns")
+                    cur.execute("DROP INDEX IF EXISTS idx_dm_bio_component_seq_embedding_hnsw")
+                    cur.execute("DROP INDEX IF EXISTS idx_dm_bio_embedding")
+                    cur.execute("DROP INDEX IF EXISTS idx_dm_bio_embedding_hnsw")
+                    cur.execute("ALTER TABLE dm_biotherapeutic_component DROP COLUMN IF EXISTS sequence_embedding")
+                    cur.execute("ALTER TABLE dm_biotherapeutic DROP COLUMN IF EXISTS embedding")
+
                 # ── Ensure columns + indexes exist ──────────────────────────────
                 cur.execute(
                     f"""
@@ -2245,6 +2293,53 @@ def populate_biotherapeutic_embeddings(
                     ON dm_biotherapeutic_component USING hnsw (sequence_embedding vector_cosine_ops);
                     """
                 )
+                if force_rerun:
+                    if limit:
+                        cur.execute(
+                            """
+                            UPDATE dm_biotherapeutic_component c
+                            SET sequence_embedding = NULL
+                            WHERE c.sequence_embedding IS NOT NULL
+                              AND c.component_id IN (
+                                  SELECT component_id
+                                  FROM dm_biotherapeutic_component
+                                  WHERE sequence IS NOT NULL
+                                    AND sequence <> ''
+                                  ORDER BY component_id
+                                  LIMIT %s
+                              )
+                            """,
+                            (limit,),
+                        )
+                        cleared_components = cur.rowcount if cur.rowcount >= 0 else 0
+                    else:
+                        cleared_components = 0
+                    if limit:
+                        cur.execute(
+                            """
+                            UPDATE dm_biotherapeutic b
+                            SET embedding = NULL
+                            WHERE b.embedding IS NOT NULL
+                              AND b.bio_id IN (
+                                  SELECT DISTINCT x.bio_id
+                                  FROM (
+                                      SELECT bio_id
+                                      FROM dm_biotherapeutic_component
+                                      WHERE sequence IS NOT NULL
+                                        AND sequence <> ''
+                                      ORDER BY component_id
+                                      LIMIT %s
+                                  ) x
+                              )
+                            """,
+                            (limit,),
+                        )
+                        cleared_biotherapeutics = cur.rowcount if cur.rowcount >= 0 else 0
+                    else:
+                        cleared_biotherapeutics = 0
+                    if limit:
+                        print(f"  🧹 Cleared component sequence embeddings: {cleared_components:,}")
+                        print(f"  🧹 Cleared biotherapeutic embeddings: {cleared_biotherapeutics:,}")
                 con.commit()
 
                 # ── Candidate count ─────────────────────────────────────────────
@@ -6976,7 +7071,8 @@ def ensure_schema_exists(config: DatabaseConfig):
 def main(full_rebuild: bool = True, skip_validation: bool = False, 
          enable_fuzzy: bool = True, fuzzy_threshold: float = 0.8,
          from_phase: Optional[int] = None, to_phase: Optional[int] = None,
-         limit: Optional[int] = None, drop_indexes: bool = False):
+         limit: Optional[int] = None, drop_indexes: bool = False,
+         force_rerun_embeddings: bool = False):
     """
     Run the complete molecular integration pipeline.
     
@@ -6988,6 +7084,7 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
         from_phase: If set, start from this phase (1-16). Earlier phases are skipped.
         to_phase: If set, stop after this phase (1-16). Later phases are skipped.
         limit: Maximum molecules/items to process per source (for fast/debug mode).
+        force_rerun_embeddings: If True, clear existing embeddings before running phases 15/16.
     """
     config = DEFAULT_CONFIG
     
@@ -7162,13 +7259,21 @@ def main(full_rebuild: bool = True, skip_validation: bool = False,
 
     # Phase 15: Molecule SMILES embeddings (standalone runnable phase)
     if start_phase <= 15 <= end_phase:
-        populate_molecule_embeddings(config, limit=limit)
+        populate_molecule_embeddings(
+            config,
+            limit=limit,
+            force_rerun=force_rerun_embeddings,
+        )
     else:
         print("⏩ Skipping Phase 15: populate_molecule_embeddings")
 
     # Phase 16: Biotherapeutic sequence embeddings (standalone runnable phase)
     if start_phase <= 16 <= end_phase:
-        populate_biotherapeutic_embeddings(config, limit=limit)
+        populate_biotherapeutic_embeddings(
+            config,
+            limit=limit,
+            force_rerun=force_rerun_embeddings,
+        )
     else:
         print("⏩ Skipping Phase 16: populate_biotherapeutic_embeddings")
 
@@ -7226,6 +7331,7 @@ Examples:
   %(prog)s --from-phase 9 --to-phase 12  # Re-run Phases 9-12 only
   %(prog)s --incremental --from-phase 15 --to-phase 15  # Run only molecule embeddings
   %(prog)s --incremental --from-phase 16 --to-phase 16  # Run only biotherapeutic embeddings
+  %(prog)s --incremental --from-phase 15 --to-phase 16 --force-rerun-embeddings
   %(prog)s --refresh-only         # Refresh materialized views only
   %(prog)s --report               # Generate report without running pipeline
   %(prog)s --validate-only        # Run validation checks only
@@ -7287,6 +7393,8 @@ Fast Mode Defaults (--fast):
                         help='Minimum similarity for fuzzy matches (0-1, default: 0.8)')
     parser.add_argument('--drop-indexes', action='store_true',
                         help='Drop all indexes before reindexing')
+    parser.add_argument('--force-rerun-embeddings', action='store_true',
+                        help='For phases 15/16, clear existing embeddings and regenerate')
     
     args = parser.parse_args()
     
@@ -7339,5 +7447,6 @@ Fast Mode Defaults (--fast):
             from_phase=args.from_phase,
             to_phase=args.to_phase,
             limit=limit,
-            drop_indexes=args.drop_indexes
+            drop_indexes=args.drop_indexes,
+            force_rerun_embeddings=args.force_rerun_embeddings,
         )

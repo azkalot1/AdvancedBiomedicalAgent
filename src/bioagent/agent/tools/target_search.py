@@ -2296,7 +2296,6 @@ TARGET_SEARCH_TOOLS = [
     search_drug_targets,
     search_target_drugs,
     search_similar_molecules,
-    search_similar_biotherapeutics,
     search_exact_structure,
     search_substructure,
     get_drug_profile,

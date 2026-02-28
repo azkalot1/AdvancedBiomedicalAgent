@@ -388,8 +388,12 @@ TOOL_TEST_CASES: dict[str, dict[str, Any]] = {
         ],
     },
     "search_biotherapeutics": {
-        "description": "Search biologics by sequence motif",
+        "description": "Search biologics by name, sequence motif, or full sequence",
         "cases": [
+            ToolTestCase(
+                query="Find biotherapeutics by name trastuzumab",
+                expected_any=["trastuzumab"],
+            ),
             ToolTestCase(
                 query="Find antibody sequence motif QVQLV",
                 expected_any=["QVQLV"],

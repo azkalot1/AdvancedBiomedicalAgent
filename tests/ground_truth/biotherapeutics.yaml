@@ -127,3 +127,55 @@ test_cases:
         - "antibody"
     source: "ChEMBL"
     confidence: "medium"
+
+  # ========================================
+  # CONSOLIDATED BIOTHERAPEUTIC TOOL MODES
+  # ========================================
+  - id: "biologics_by_name_009"
+    tool: "search_biotherapeutics"
+    input:
+      mode: "by_name"
+      name: "trastuzumab"
+      biotherapeutic_type: "antibody"
+      limit: 10
+    expected_facts:
+      required:
+        - "trastuzumab"
+      optional:
+        - "antibody"
+        - "ERBB2"
+    source: "ChEMBL"
+    confidence: "high"
+
+  - id: "biologics_by_sequence_motif_param_010"
+    tool: "search_biotherapeutics"
+    input:
+      mode: "by_sequence"
+      sequence_motif: "EVQLVESGG"
+      biotherapeutic_type: "antibody"
+      limit: 10
+    expected_facts:
+      required:
+        - "EVQLVESGG"
+      optional:
+        - "antibody"
+        - "sequence"
+    source: "ChEMBL"
+    confidence: "medium"
+
+  - id: "biologics_similar_sequence_consolidated_011"
+    tool: "search_biotherapeutics"
+    input:
+      mode: "similar_biologics"
+      sequence: "DIQMTQSPSSLSASVGDRVTITCRASQ"
+      biotherapeutic_type: "antibody"
+      limit: 10
+    expected_facts:
+      required:
+        - "similarity"
+      optional:
+        - "antibody"
+        - "sequence"
+        - "biotherapeutic"
+    source: "ChEMBL"
+    confidence: "medium"
