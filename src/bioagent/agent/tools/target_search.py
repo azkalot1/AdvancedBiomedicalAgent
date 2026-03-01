@@ -95,6 +95,8 @@ def _format_compound_profile(rank: int, hit: CompoundTargetProfile) -> list[str]
     header_parts = [f"[{rank}] {hit.concept_name}"]
     if hit.tanimoto_similarity:
         header_parts.append(f"(similarity: {hit.tanimoto_similarity:.2f})")
+    elif hit.embedding_similarity is not None:
+        header_parts.append(f"(embedding similarity: {hit.embedding_similarity:.2f})")
     lines.append(" ".join(header_parts))
     
     # Identifiers
@@ -295,6 +297,52 @@ def _format_target_pathway(rank: int, hit: TargetPathwayHit) -> list[str]:
     return lines
 
 
+def _format_target_pathways_grouped(
+    hits: list[TargetPathwayHit],
+    detail_level: str,
+) -> list[str]:
+    """Format target pathway hits grouped by gene symbol for multi-gene queries."""
+    grouped: dict[str, list[TargetPathwayHit]] = {}
+    for hit in hits:
+        grouped.setdefault(hit.gene_symbol, []).append(hit)
+
+    lines: list[str] = []
+    for gene_idx, gene_symbol in enumerate(sorted(grouped.keys()), 1):
+        gene_hits = grouped[gene_symbol]
+        unique_classes = {
+            (h.protein_class_desc or "unknown pathway class", h.protein_class_id)
+            for h in gene_hits
+        }
+        if detail_level == "brief":
+            top_classes = sorted([klass for klass, _ in unique_classes])[:2]
+            preview = ", ".join(top_classes) if top_classes else "none"
+            lines.append(
+                f"[{gene_idx}] {gene_symbol} | pathway classes: {len(unique_classes)} | {preview}"
+            )
+            continue
+
+        lines.append(f"[{gene_idx}] {gene_symbol}")
+        lines.append(f"    Pathway classes: {len(unique_classes)}")
+
+        sorted_hits = sorted(
+            gene_hits,
+            key=lambda h: (
+                h.protein_class_desc or "unknown pathway class",
+                h.protein_class_id if h.protein_class_id is not None else 10**9,
+            ),
+        )
+        for pathway in sorted_hits:
+            pathway_desc = pathway.protein_class_desc or "unknown pathway class"
+            lines.append(f"    • {pathway_desc}")
+            if detail_level == "comprehensive" and pathway.protein_class_id is not None:
+                lines.append(f"      Protein class ID: {pathway.protein_class_id}")
+            if pathway.synonyms:
+                max_synonyms = 10 if detail_level == "comprehensive" else 5
+                lines.append(f"      Synonyms: {', '.join(pathway.synonyms[:max_synonyms])}")
+
+    return lines
+
+
 def _format_pharmacology_output(
     result: TargetSearchOutput,
     detail_level: str = "standard",
@@ -364,6 +412,38 @@ def _format_pharmacology_output(
     
     lines.append("")
     lines.append("=" * 60)
+
+    if result.mode == SearchMode.TARGET_PATHWAYS:
+        max_hits = 100 if detail_level == "comprehensive" else 30
+        pathway_hits = sorted(
+            [hit for hit in result.hits if isinstance(hit, TargetPathwayHit)],
+            key=lambda h: (
+                h.gene_symbol,
+                h.protein_class_desc or "unknown pathway class",
+                h.protein_class_id if h.protein_class_id is not None else 10**9,
+            ),
+        )
+        if pathway_hits:
+            lines.append("")
+            lines.extend(_format_target_pathways_grouped(pathway_hits[:max_hits], detail_level))
+            if len(pathway_hits) > max_hits:
+                lines.append("")
+                lines.append(
+                    f"... showing {max_hits} of {len(pathway_hits)} pathway records. "
+                    "Use 'detail_level=\"comprehensive\"' or a smaller gene set for full output."
+                )
+            if result.diagnostics and result.diagnostics.suggestions:
+                lines.append("")
+                lines.append("Notes:")
+                for suggestion in result.diagnostics.suggestions[:3]:
+                    lines.append(f"  ℹ {suggestion}")
+            if detail_level == "comprehensive" and result.diagnostics:
+                lines.extend(_format_diagnostics(result.diagnostics, verbose=True))
+            results_text = "\n".join(lines)
+            signals = build_handoff_signals(source_tool or "", result_context or {})
+            if not signals:
+                signals = "[AGENT_SIGNALS]\n---\nRelated searches:\n  -> None"
+            return f"[RESULTS]\n{results_text}\n\n{signals}"
     
     max_hits = 100 if detail_level == "comprehensive" else 30
     for i, hit in enumerate(result.hits[:max_hits], 1):
@@ -473,6 +553,52 @@ def _validate_gene_symbol(gene_symbol: str | None) -> tuple[str | None, str | No
     return gene_symbol, None
 
 
+def _validate_gene_symbols_input(
+    gene_symbol: str | list[str] | None,
+) -> tuple[list[str] | None, str | None]:
+    """Validate one or more gene symbols and return normalized unique values."""
+    if gene_symbol is None:
+        return None, "gene_symbol is required. Example: ['EGFR', 'ABL1']"
+
+    raw_values: list[str] = []
+    if isinstance(gene_symbol, str):
+        parts = [gene_symbol]
+        for separator in [",", ";", "|", "\n", "\t"]:
+            exploded: list[str] = []
+            for value in parts:
+                exploded.extend(value.split(separator))
+            parts = exploded
+        raw_values = [value.strip() for value in parts if value and value.strip()]
+    elif isinstance(gene_symbol, list):
+        for item in gene_symbol:
+            if item is None:
+                continue
+            if not isinstance(item, str):
+                return None, "gene_symbol list must contain only strings."
+            raw_values.append(item.strip())
+        raw_values = [value for value in raw_values if value]
+    else:
+        return None, "gene_symbol must be a string or a list of strings."
+
+    if not raw_values:
+        return None, "gene_symbol is required. Example: ['EGFR', 'ABL1']"
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_value in raw_values:
+        clean_symbol, error = _validate_gene_symbol(raw_value)
+        if error:
+            return None, error
+        if clean_symbol and clean_symbol not in seen:
+            seen.add(clean_symbol)
+            normalized.append(clean_symbol)
+
+    if not normalized:
+        return None, "gene_symbol is required. Example: ['EGFR', 'ABL1']"
+
+    return normalized, None
+
+
 def _validate_text_query(value: str | None, label: str) -> tuple[str | None, str | None]:
     """Validate a generic text query parameter."""
     if not value or not isinstance(value, str) or not value.strip():
@@ -517,6 +643,18 @@ def _validate_smiles(smiles: str | None) -> tuple[str | None, str | None]:
         return smiles, None
     except Exception as e:
         return None, f"invalid SMILES syntax: {type(e).__name__}: {e}"
+
+
+def _validate_sequence(sequence: str | None) -> tuple[str | None, str | None]:
+    """Validate amino-acid sequence input for biotherapeutic similarity search."""
+    if not sequence:
+        return None, "sequence is required. Provide an amino-acid sequence."
+    cleaned = "".join(sequence.strip().upper().split())
+    if len(cleaned) < 8:
+        return None, "sequence is too short. Provide at least 8 amino acids."
+    if len(cleaned) > 20000:
+        return None, f"sequence is too long ({len(cleaned)} chars). Maximum is 20000."
+    return cleaned, None
 
 
 def _validate_activity_type(activity_type: str) -> tuple[ActivityType | None, str | None]:
@@ -912,6 +1050,59 @@ async def search_similar_molecules(
             "  → Verify the SMILES string is valid\n"
             "  → Use a chemical structure editor to generate valid SMILES\n"
             "  → Try lowering similarity_threshold for more results"
+        )
+
+
+@tool("search_similar_biotherapeutics", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_similar_biotherapeutics(
+    sequence: str,
+    limit: int = 50,
+    detail_level: str = "standard",
+) -> str:
+    """
+    Find sequence-similar biotherapeutics using ANN over ProtBert embeddings.
+
+    Args:
+        sequence: Amino-acid sequence query.
+        limit: Maximum hits (default: 50, max: 500).
+        detail_level: Output detail level.
+
+    Returns:
+        Similar biotherapeutics ranked by embedding similarity.
+    """
+    sequence, error = _validate_sequence(sequence)
+    if error:
+        return f"✗ Input error: {error}"
+
+    limit, error = _validate_limit(limit)
+    if error:
+        return f"✗ Input error: {error}"
+
+    detail_level, error = _validate_detail_level(detail_level)
+    if error:
+        return f"✗ Input error: {error}"
+
+    try:
+        search_input = TargetSearchInput(
+            mode=SearchMode.SIMILAR_BIOTHERAPEUTICS,
+            sequence=sequence,
+            limit=limit,
+        )
+        searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
+        result = await searcher.search(search_input)
+        return _format_pharmacology_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_similar_biotherapeutics",
+        )
+    except Exception as e:
+        return (
+            f"✗ Error searching similar biotherapeutics: {type(e).__name__}: {e}\n\n"
+            "Suggestions:\n"
+            "  → Provide a valid amino-acid sequence\n"
+            "  → Ensure biotherapeutic embeddings were populated (ingestion phase 16)\n"
+            "  → Try a longer sequence context for better retrieval"
         )
 
 
@@ -1578,12 +1769,12 @@ async def search_indication_drugs(
 @tool("search_target_pathways", return_direct=False)
 @robust_unwrap_llm_inputs
 async def search_target_pathways(
-    gene_symbol: str,
+    gene_symbol: str | list[str],
     limit: int = 50,
     detail_level: str = "standard",
 ) -> str:
-    """Find pathway annotations for a target gene."""
-    gene_symbol, error = _validate_gene_symbol(gene_symbol)
+    """Find pathway annotations for one or more target genes."""
+    gene_symbols, error = _validate_gene_symbols_input(gene_symbol)
     if error:
         return f"✗ Input error: {error}"
 
@@ -1598,17 +1789,18 @@ async def search_target_pathways(
     try:
         search_input = TargetSearchInput(
             mode=SearchMode.TARGET_PATHWAYS,
-            query=gene_symbol,
+            query=gene_symbols[0] if len(gene_symbols) == 1 else None,
+            gene_symbols=gene_symbols,
             limit=limit,
         )
-
         searcher = PharmacologySearch(DEFAULT_CONFIG, verbose=True)
         result = await searcher.search(search_input)
+
         return _format_pharmacology_output(
             result,
             detail_level=detail_level,
             source_tool="search_target_pathways",
-            result_context={"gene_symbol": gene_symbol},
+            result_context={"gene_symbols": gene_symbols},
         )
 
     except Exception as e:
@@ -1666,6 +1858,7 @@ async def pharmacology_search(
     drug_name: str | None = None,
     gene_symbol: str | None = None,
     smiles: str | None = None,
+    sequence: str | None = None,
     drug_names: list[str] | None = None,
     off_targets: list[str] | None = None,
     indication: str | None = None,
@@ -1691,6 +1884,7 @@ async def pharmacology_search(
             - "drug_forms": Get all salt/stereo forms of a drug (requires drug_name)
             - "drug_trials": Find clinical trials for a drug (requires drug_name)
             - "similar_molecules": Find structurally similar molecules (requires smiles)
+            - "similar_biotherapeutics": Find sequence-similar biologics (requires sequence)
             - "exact_structure": Identify a molecule from SMILES (requires smiles)
             - "substructure": Find molecules containing a substructure (requires smiles)
             - "compare_drugs": Compare drugs on a target (requires gene_symbol + drug_names)
@@ -1713,6 +1907,9 @@ async def pharmacology_search(
         smiles: SMILES string of a molecule.
             Required for: similar_molecules, exact_structure, substructure
             Example: "CC(=O)Oc1ccccc1C(=O)O" (aspirin)
+
+        sequence: Amino-acid sequence for biologic similarity search.
+            Required for: similar_biotherapeutics
         
         drug_names: List of drug names for comparison.
             Required for: compare_drugs
@@ -1816,6 +2013,7 @@ async def pharmacology_search(
         "drug_forms": SearchMode.DRUG_FORMS,
         "drug_trials": SearchMode.TRIALS_FOR_DRUG,
         "similar_molecules": SearchMode.SIMILAR_MOLECULES,
+        "similar_biotherapeutics": SearchMode.SIMILAR_BIOTHERAPEUTICS,
         "exact_structure": SearchMode.EXACT_STRUCTURE,
         "substructure": SearchMode.SUBSTRUCTURE,
         "compare_drugs": SearchMode.COMPARE_DRUGS,
@@ -1838,6 +2036,7 @@ async def pharmacology_search(
             "  • drug_forms - Get all salt/stereo forms\n"
             "  • drug_trials - Find clinical trials\n"
             "  • similar_molecules - Find structurally similar molecules\n"
+            "  • similar_biotherapeutics - Find sequence-similar biologics\n"
             "  • exact_structure - Identify a molecule from SMILES\n"
             "  • substructure - Find molecules containing a substructure\n"
             "  • compare_drugs - Compare drugs on a target\n"
@@ -1862,6 +2061,7 @@ async def pharmacology_search(
             "  • drug_forms - Get all salt/stereo forms (requires drug_name)\n"
             "  • drug_trials - Find clinical trials (requires drug_name)\n"
             "  • similar_molecules - Find structurally similar molecules (requires smiles)\n"
+            "  • similar_biotherapeutics - Find sequence-similar biologics (requires sequence)\n"
             "  • exact_structure - Identify a molecule from SMILES (requires smiles)\n"
             "  • substructure - Find molecules with substructure (requires smiles)\n"
             "  • compare_drugs - Compare drugs on a target (requires gene_symbol + drug_names)\n"
@@ -1926,6 +2126,11 @@ async def pharmacology_search(
         smiles = smiles.strip()
         if len(smiles) > 5000:
             return f"✗ Input error: smiles is too long ({len(smiles)} chars). Maximum is 5000."
+
+    if mode == SearchMode.SIMILAR_BIOTHERAPEUTICS:
+        sequence, error = _validate_sequence(sequence)
+        if error:
+            return f"✗ Input error: {error}"
     
     # Drug names list required for compare
     if mode == SearchMode.COMPARE_DRUGS:
@@ -2035,6 +2240,7 @@ async def pharmacology_search(
             mode=mode,
             query=query_value,
             smiles=smiles,
+            sequence=sequence,
             similarity_threshold=float(similarity_threshold),
             min_pchembl=float(min_pchembl),
             data_source=ds,
@@ -2071,6 +2277,9 @@ async def pharmacology_search(
         if smiles:
             smiles_preview = _truncate(smiles, 40)
             context_parts.append(f"smiles='{smiles_preview}'")
+        if sequence:
+            sequence_preview = _truncate(sequence, 30)
+            context_parts.append(f"sequence='{sequence_preview}'")
         
         return (
             f"✗ Error in pharmacology search: {type(e).__name__}: {e}\n\n"
@@ -2078,6 +2287,7 @@ async def pharmacology_search(
             "Suggestions:\n"
             "  → Check spelling of drug/gene names\n"
             "  → Verify SMILES string is valid\n"
+            "  → Verify protein sequence is valid for biotherapeutic search\n"
             "  → Try lowering min_pchembl for more results"
         )
 

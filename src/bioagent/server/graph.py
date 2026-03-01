@@ -32,10 +32,10 @@ DEFAULT_SUMMARIZER_MODEL = "google/gemini-3-flash-preview"
 ALLOWED_CHAT_MODELS = (
     "anthropic/claude-opus-4.6",
     "anthropic/claude-sonnet-4.6",
-    "moonshotai/kimi-k2.5",
     "google/gemini-3-flash-preview",
-    "google/gemini-3-pro-preview",
-    "openai/gpt-5.2",
+    "google/gemini-3.1-pro-preview",
+    "z-ai/glm-5",
+    "moonshotai/kimi-k2.5"
 )
 
 
@@ -47,10 +47,10 @@ def _env_true(name: str, *, default: bool) -> bool:
 
 
 def _resolve_primary_model_name() -> str:
-    configured = os.getenv("BIOAGENT_MODEL", "google/gemini-3-flash-preview").strip()
+    configured = os.getenv("BIOAGENT_MODEL", "anthropic/claude-sonnet-4.6").strip()
     if configured in ALLOWED_CHAT_MODELS:
         return configured
-    return "google/gemini-3-flash-preview"
+    return "anthropic/claude-sonnet-4.6"
 
 
 class RuntimeModelSelectionMiddleware(AgentMiddleware):

@@ -12,10 +12,9 @@ import requests
 DEFAULT_PREDEFINED_MODELS = (
     "anthropic/claude-opus-4.6",
     "anthropic/claude-sonnet-4.5",
-    "moonshotai/kimi-k2.5",
     "google/gemini-3-flash-preview",
-    "google/gemini-3-pro-preview",
-    "openai/gpt-5.2",
+    "google/gemini-3.1-pro-preview",
+
 )
 
 

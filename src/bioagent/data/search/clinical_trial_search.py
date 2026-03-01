@@ -91,6 +91,43 @@ def _truncate(text: str, max_len: int = 80) -> str:
     return text[:max_len] + "..." if len(text) > max_len else text
 
 
+def _is_timeout_error(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    error_name = type(exc).__name__.lower()
+    if "timeout" in error_name:
+        return True
+    message = str(exc).lower()
+    return (
+        "timed out" in message
+        or "timeout" in message
+        or "statement timeout" in message
+        or "canceling statement due to statement timeout" in message
+    )
+
+
+def _timeout_suggestions(search_input: "ClinicalTrialsSearchInput") -> list[str]:
+    suggestions = [
+        "Narrow the query by adding condition, intervention, or sponsor constraints.",
+        "Reduce `limit` to return fewer records per call.",
+        "Use tighter date/status/phase filters to shrink the search space.",
+    ]
+    if search_input.offset > 0:
+        suggestions.append("Retry from `offset=0`, then paginate once results are returned.")
+    if search_input.strategy in {SearchStrategy.TRIGRAM, SearchStrategy.COMBINED}:
+        suggestions.append("Try `strategy='fulltext'` for a faster first pass.")
+    return suggestions
+
+
+def _timeout_error_text(suggestions: list[str]) -> str:
+    bullets = "\n".join(f"- {item}" for item in suggestions)
+    return (
+        "Clinical trial search timed out before completion.\n"
+        "Suggestions:\n"
+        f"{bullets}"
+    )
+
+
 # =============================================================================
 # OUTCOME/AE ITERATORS
 # =============================================================================
@@ -729,6 +766,7 @@ class ClinicalTrialsSearchOutput:
     # Query echo
     query_summary: str = ""
     filters_applied: list[str] = field(default_factory=list)
+    suggestions: list[str] = field(default_factory=list)
     
     # Pagination info
     limit: int = 50
@@ -785,7 +823,11 @@ class ClinicalTrialsSearchOutput:
         
         # Handle errors
         if self.error:
-            console.print(Panel(f"[red]{self.error}[/red]", title="Error", border_style="red"))
+            error_message = self.error
+            if self.suggestions and "suggestions:" not in error_message.lower():
+                suggestion_lines = "\n".join(f"- {item}" for item in self.suggestions)
+                error_message = f"{error_message}\n\nSuggestions:\n{suggestion_lines}"
+            console.print(Panel(f"[red]{error_message}[/red]", title="Error", border_style="red"))
             return
         
         # No results
@@ -912,6 +954,8 @@ class ClinicalTrialsSearchInput(BaseModel):
     offset: int = Field(default=0, ge=0)
     include_study_json: bool = Field(default=True)
     condition_semantic_terms: list[str] | None = Field(default=None, exclude=True)
+    use_mesh_condition_fallback: bool = Field(default=False, exclude=True)
+    mesh_similarity_threshold: float = Field(default=0.45, ge=0.0, le=1.0, exclude=True)
     
     # Output Sections
     output_eligibility: bool = True
@@ -1244,6 +1288,15 @@ class ClinicalTrialQueryBuilder:
             ts_ph = self._add_param(" & ".join(term.split()))
             value_rows.append(f"({term_ph}, {ts_ph})")
         terms_cte = f"condition_terms(term, tsquery) AS (VALUES {', '.join(value_rows)})"
+        prefilters = self._build_match_prefilters("rs")
+        prefilter_sql = f" AND {' AND '.join(prefilters)}" if prefilters else ""
+        use_mesh = bool(self.input.use_mesh_condition_fallback)
+        mesh_threshold_ph = self._add_param(self.input.mesh_similarity_threshold) if use_mesh else None
+        mesh_where = (
+            f"(rs.mesh_conditions_norm % ct.term AND similarity(rs.mesh_conditions_norm, ct.term) >= {mesh_threshold_ph})"
+            if use_mesh
+            else None
+        )
 
         if self.input.strategy == SearchStrategy.FULLTEXT:
             return f"""
@@ -1253,39 +1306,83 @@ class ClinicalTrialQueryBuilder:
                            MAX(ts_rank(rs.terms_tsv, to_tsquery('english', ct.tsquery)))::real AS score
                     FROM public.rag_study_search rs
                     JOIN condition_terms ct ON TRUE
-                    WHERE rs.terms_tsv @@ to_tsquery('english', ct.tsquery)
+                    WHERE rs.terms_tsv @@ to_tsquery('english', ct.tsquery){prefilter_sql}
                     GROUP BY rs.nct_id
                 )"""
         elif self.input.strategy == SearchStrategy.TRIGRAM:
+            trigram_where = f"rs.conditions_norm % ct.term OR {mesh_where}" if mesh_where else "rs.conditions_norm % ct.term"
+            trigram_score = (
+                "MAX(GREATEST(similarity(rs.conditions_norm, ct.term), similarity(rs.mesh_conditions_norm, ct.term)))::real AS score"
+                if use_mesh
+                else "MAX(similarity(rs.conditions_norm, ct.term))::real AS score"
+            )
             return f"""
                 {terms_cte},
                 condition_matches AS (
                     SELECT rs.nct_id,
-                           MAX(GREATEST(
-                               similarity(rs.conditions_norm, ct.term),
-                               similarity(rs.mesh_conditions_norm, ct.term)
-                           ))::real AS score
+                           {trigram_score}
                     FROM public.rag_study_search rs
                     JOIN condition_terms ct ON TRUE
-                    WHERE rs.conditions_norm % ct.term OR rs.mesh_conditions_norm % ct.term
+                    WHERE ({trigram_where}){prefilter_sql}
                     GROUP BY rs.nct_id
                 )"""
         else:
+            combined_where = f"rs.conditions_norm % ct.term OR {mesh_where} OR rs.terms_tsv @@ to_tsquery('english', ct.tsquery)" if mesh_where else "rs.conditions_norm % ct.term OR rs.terms_tsv @@ to_tsquery('english', ct.tsquery)"
+            mesh_score_term = "COALESCE(similarity(rs.mesh_conditions_norm, ct.term), 0)," if use_mesh else ""
             return f"""
                 {terms_cte},
                 condition_matches AS (
                     SELECT rs.nct_id, MAX(GREATEST(
                         COALESCE(similarity(rs.conditions_norm, ct.term), 0),
-                        COALESCE(similarity(rs.mesh_conditions_norm, ct.term), 0),
+                        {mesh_score_term}
                         COALESCE(ts_rank(rs.terms_tsv, to_tsquery('english', ct.tsquery)) * 0.5, 0)
                     ))::real AS score
                     FROM public.rag_study_search rs
                     JOIN condition_terms ct ON TRUE
-                    WHERE rs.conditions_norm % ct.term
-                       OR rs.mesh_conditions_norm % ct.term
-                       OR rs.terms_tsv @@ to_tsquery('english', ct.tsquery)
+                    WHERE ({combined_where}){prefilter_sql}
                     GROUP BY rs.nct_id
                 )"""
+
+    def _build_match_prefilters(self, alias: str = "rs") -> list[str]:
+        """
+        Duplicate selective base-table filters inside match CTEs so Postgres can
+        intersect indexes earlier and avoid broad trigram candidate expansion.
+        """
+        filters: list[str] = []
+        if self.input.status:
+            placeholders = ", ".join(self._add_param(s.value) for s in self.input.status)
+            filters.append(f"{alias}.overall_status IN ({placeholders})")
+        if self.input.phase:
+            placeholders = ", ".join(self._add_param(p.value) for p in self.input.phase)
+            filters.append(f"{alias}.phase IN ({placeholders})")
+        if self.input.study_type:
+            filters.append(f"{alias}.study_type = {self._add_param(self.input.study_type.value)}")
+        if self.input.intervention_type:
+            param = self._add_param([i.value for i in self.input.intervention_type])
+            filters.append(f"{alias}.intervention_types && {param}::text[]")
+        if self.input.start_date_from:
+            filters.append(f"{alias}.start_date_parsed >= {self._add_param(self.input.start_date_from)}")
+        if self.input.start_date_to:
+            filters.append(f"{alias}.start_date_parsed <= {self._add_param(self.input.start_date_to)}")
+        if self.input.completion_date_from:
+            filters.append(f"{alias}.completion_date_parsed >= {self._add_param(self.input.completion_date_from)}")
+        if self.input.completion_date_to:
+            filters.append(f"{alias}.completion_date_parsed <= {self._add_param(self.input.completion_date_to)}")
+        if self.input.min_enrollment is not None:
+            filters.append(f"{alias}.enrollment >= {self._add_param(self.input.min_enrollment)}")
+        if self.input.max_enrollment is not None:
+            filters.append(f"{alias}.enrollment <= {self._add_param(self.input.max_enrollment)}")
+        if self.input.has_results is not None:
+            if self.input.has_results:
+                filters.append(f"{alias}.results_first_submitted_date IS NOT NULL")
+            else:
+                filters.append(f"{alias}.results_first_submitted_date IS NULL")
+        if self.input.is_fda_regulated is not None:
+            if self.input.is_fda_regulated:
+                filters.append(f"({alias}.is_fda_regulated_drug = true OR {alias}.is_fda_regulated_device = true)")
+            else:
+                filters.append(f"({alias}.is_fda_regulated_drug IS NOT TRUE AND {alias}.is_fda_regulated_device IS NOT TRUE)")
+        return filters
 
     def _build_intervention_cte(self) -> str:
         query_norm = self._add_param(self.input.intervention.lower())
@@ -1528,18 +1625,50 @@ class ClinicalTrialSearcher:
             )
         
         try:
-            enriched_input = search_input
-            if search_input.condition:
+            conn = await self._get_conn()
+            builder = ClinicalTrialQueryBuilder(search_input)
+            sql, params = builder.build()
+            rows = await conn.execute_query(sql, *params)
+
+            if (
+                search_input.condition
+                and not search_input.use_mesh_condition_fallback
+                and search_input.strategy in {SearchStrategy.TRIGRAM, SearchStrategy.COMBINED}
+                and len(rows) < search_input.limit
+            ):
+                fallback_input = search_input.model_copy(update={"use_mesh_condition_fallback": True})
+                fallback_builder = ClinicalTrialQueryBuilder(fallback_input)
+                fallback_sql, fallback_params = fallback_builder.build()
+                fallback_rows = await conn.execute_query(fallback_sql, *fallback_params)
+                if fallback_rows:
+                    merged: list[dict[str, Any]] = []
+                    seen: set[str] = set()
+                    max_rows = search_input.limit + 1
+                    for row in rows + fallback_rows:
+                        nct_id = row.get("nct_id")
+                        if not nct_id or nct_id in seen:
+                            continue
+                        seen.add(nct_id)
+                        merged.append(row)
+                        if len(merged) >= max_rows:
+                            break
+                    rows = merged
+
+            # Semantic condition expansion is expensive for broad trigram queries.
+            # Use it only as a fallback when the direct condition query yields no rows.
+            if (
+                not rows
+                and search_input.condition
+                and not search_input.condition_semantic_terms
+            ):
                 semantic_terms = await self._get_semantic_condition_terms(search_input.condition)
                 if semantic_terms:
                     enriched_input = search_input.model_copy(
                         update={"condition_semantic_terms": semantic_terms}
                     )
-            builder = ClinicalTrialQueryBuilder(enriched_input)
-            sql, params = builder.build()
-            
-            conn = await self._get_conn()
-            rows = await conn.execute_query(sql, *params)
+                    builder = ClinicalTrialQueryBuilder(enriched_input)
+                    sql, params = builder.build()
+                    rows = await conn.execute_query(sql, *params)
             
             if not rows:
                 return ClinicalTrialsSearchOutput(
@@ -1599,6 +1728,15 @@ class ClinicalTrialSearcher:
                 limit=search_input.limit, offset=search_input.offset, has_more=has_more,
             )
         except Exception as e:
+            if _is_timeout_error(e):
+                suggestions = _timeout_suggestions(search_input)
+                return ClinicalTrialsSearchOutput(
+                    status="error",
+                    error=_timeout_error_text(suggestions),
+                    query_summary=self._build_query_summary(search_input),
+                    filters_applied=self._build_filter_summary(search_input),
+                    suggestions=suggestions,
+                )
             return ClinicalTrialsSearchOutput(
                 status="error", error=f"{type(e).__name__}: {e}",
                 query_summary=self._build_query_summary(search_input),

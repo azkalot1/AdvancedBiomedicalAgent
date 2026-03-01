@@ -2129,7 +2129,7 @@ class SearchToolTester:
         )
 
     async def test_biotherapeutic_sequence_search(self) -> None:
-        """Test biotherapeutic sequence search (by_sequence, similar_biologics) and biologic subtype filters."""
+        """Test consolidated biotherapeutic search modes and biologic subtype filters."""
         await self._run_test(
             "bio_sequence_pdcd1",
             target_search_async(
@@ -2139,6 +2139,18 @@ class SearchToolTester:
                     query="PDCD1",
                     data_source=DataSource.MECHANISM,
                     molecule_type_filter="biotherapeutic",
+                    limit=10,
+                ),
+            ),
+            self._assert_status_in_allowed,
+        )
+        await self._run_test(
+            "bio_by_name",
+            biotherapeutic_sequence_search_async(
+                DEFAULT_CONFIG,
+                BiotherapeuticSearchInput(
+                    mode="by_name",
+                    name="trastuzumab",
                     limit=10,
                 ),
             ),
@@ -2201,6 +2213,20 @@ class SearchToolTester:
 
     async def test_biotherapeutic_sequence_search_extended(self) -> None:
         """Extended biotherapeutic sequence search tests."""
+        # Test by_name with common biologic INNs
+        for bio_name in ["trastuzumab", "adalimumab", "rituximab"]:
+            await self._run_test(
+                f"bio_by_name_{bio_name}",
+                biotherapeutic_sequence_search_async(
+                    DEFAULT_CONFIG,
+                    BiotherapeuticSearchInput(
+                        mode="by_name",
+                        name=bio_name,
+                        limit=10,
+                    ),
+                ),
+                self._assert_status_in_allowed,
+            )
         # Test target-based biologics for various targets
         for target in ["ERBB2", "TNF", "VEGFA", "MS4A1", "CTLA4"]:
             await self._run_test(
@@ -2508,13 +2534,19 @@ class SearchToolTester:
         assert out.error
 
     async def test_invalid_input_missing_required_biotherapeutic(self) -> None:
-        """Missing sequence for mode returns status=invalid_input."""
+        """Missing required fields for mode returns status=invalid_input."""
         out = await biotherapeutic_sequence_search_async(
             DEFAULT_CONFIG,
             BiotherapeuticSearchInput(mode="by_sequence", sequence=None, limit=10),
         )
         assert out.status == "invalid_input"
         assert out.error
+        out2 = await biotherapeutic_sequence_search_async(
+            DEFAULT_CONFIG,
+            BiotherapeuticSearchInput(mode="by_name", name=None, limit=10),
+        )
+        assert out2.status == "invalid_input"
+        assert out2.error
 
     async def test_invalid_input_missing_required_target_search(self) -> None:
         """Missing query for TARGETS_FOR_DRUG returns status=invalid_input with diagnostics."""

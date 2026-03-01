@@ -492,12 +492,10 @@ async def _handle_label_search(
     async_config: AsyncDatabaseConfig, search_input: DailyMedAndOpenFDAInput, model: SentenceTransformer
 ) -> list[DailyMedAndOpenFDASearchResult]:
     if search_input.drug_names:
-        # **NEW AGGREGATION LOGIC**: Iterate and build one result object per searched drug name.
-        final_results = []
-        for drug_name in search_input.drug_names:
+        async def _build_one(drug_name: str) -> DailyMedAndOpenFDASearchResult | None:
             set_id_ids, set_ids = await _find_ids_for_single_drug_async(async_config, drug_name, search_input.top_n_drugs)
             if not set_id_ids and not set_ids:
-                continue
+                return None
 
             structured_task = _search_structured_sections_async(async_config, set_id_ids, search_input, model)
             dailymed_task = _search_dailymed_structured_async(async_config, set_ids, search_input, model)
@@ -505,16 +503,16 @@ async def _handle_label_search(
 
             all_sections_for_this_drug = [SearchResultItem(**r) for r in results_structured + results_dailymed]
             if not all_sections_for_this_drug:
-                continue
+                return None
 
             deduplicated_sections = await _deduplicate_by_embedding(all_sections_for_this_drug, model)
             properties = await _find_drug_properties_async(async_config, drug_name)
-
-            aggregated_result = DailyMedAndOpenFDASearchResult(
+            return DailyMedAndOpenFDASearchResult(
                 product_name=drug_name, properties=properties, sections=deduplicated_sections
             )
-            final_results.append(aggregated_result)
-        return final_results
+
+        results = await asyncio.gather(*[_build_one(drug_name) for drug_name in search_input.drug_names])
+        return [r for r in results if r is not None]
     else:
         # **DISCOVERY SEARCH**: Find drugs by keyword and group by database product name.
         set_id_ids, set_ids = await _discover_drug_ids_by_keyword_async(async_config, search_input)
@@ -546,16 +544,17 @@ async def dailymed_and_openfda_search_async(db_config: DatabaseConfig, search_in
     """
     try:
         async_config = await get_async_connection(db_config)
-        model = await asyncio.to_thread(_get_sentence_model)
-
-        if (
+        property_lookup_only = (
             search_input.drug_names
             and not search_input.section_queries
             and not search_input.keyword_query
             and not search_input.fetch_all_sections
-        ):
+        )
+
+        if property_lookup_only:
             results = await _handle_property_lookup(async_config, search_input.drug_names)
         else:
+            model = await asyncio.to_thread(_get_sentence_model)
             results = await _handle_label_search(async_config, search_input, model)
 
         status = "not_found" if not results else "success"

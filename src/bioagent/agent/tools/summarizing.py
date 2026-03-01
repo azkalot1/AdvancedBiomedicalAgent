@@ -62,6 +62,52 @@ Title:
 )
 
 
+def _format_timeout_seconds(timeout_seconds: float | None) -> str:
+    if timeout_seconds is None:
+        return "unknown"
+    if float(timeout_seconds).is_integer():
+        return str(int(timeout_seconds))
+    return str(timeout_seconds)
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    name = type(exc).__name__.lower()
+    if "timeout" in name:
+        return True
+    message = str(exc).lower()
+    return (
+        "timed out" in message
+        or "timeout" in message
+        or "statement timeout" in message
+    )
+
+
+def _build_timeout_response(
+    tool_name: str,
+    timeout_seconds: float | None,
+    params: dict[str, Any],
+) -> str:
+    timeout_txt = _format_timeout_seconds(timeout_seconds)
+    query_preview = json.dumps(params, default=str)[:500]
+    suggestions = [
+        "Narrow the query scope (fewer terms/filters).",
+        "Reduce result size (for example, use a smaller `limit`).",
+        "Split the request into smaller steps and retry.",
+        "Retry in a few moments in case the backend is busy.",
+    ]
+    suggestion_lines = "\n".join(f"- {item}" for item in suggestions)
+    return (
+        "[RESULTS]\n"
+        f"Tool '{tool_name}' timed out after {timeout_txt} seconds.\n\n"
+        "Suggestions:\n"
+        f"{suggestion_lines}\n\n"
+        f"Query preview: {query_preview}\n\n"
+        "[AGENT_SIGNALS]\n---\nRelated searches:\n  -> None"
+    )
+
+
 def _split_output_sections(raw_output: str) -> tuple[str, str]:
     if "[AGENT_SIGNALS]" in raw_output:
         results_part, signals_part = raw_output.split("[AGENT_SIGNALS]", 1)
@@ -163,16 +209,19 @@ def make_summarizing_tool(
         else:
             invoke_coro = asyncio.to_thread(original_tool.invoke, kwargs)
 
-        if tool_timeout_seconds and tool_timeout_seconds > 0:
-            try:
+        try:
+            if tool_timeout_seconds and tool_timeout_seconds > 0:
                 raw_output = await asyncio.wait_for(invoke_coro, timeout=tool_timeout_seconds)
-            except asyncio.TimeoutError as exc:
-                timeout_txt = int(tool_timeout_seconds) if float(tool_timeout_seconds).is_integer() else tool_timeout_seconds
-                raise TimeoutError(
-                    f"Tool '{original_tool.name}' timed out after {timeout_txt} seconds."
-                ) from exc
-        else:
-            raw_output = await invoke_coro
+            else:
+                raw_output = await invoke_coro
+        except Exception as exc:
+            if _is_timeout_error(exc):
+                return _build_timeout_response(
+                    tool_name=original_tool.name,
+                    timeout_seconds=tool_timeout_seconds,
+                    params=kwargs,
+                )
+            raise
 
         if not isinstance(raw_output, str) or len(raw_output) <= max_output_length:
             return raw_output
@@ -256,7 +305,7 @@ def make_summarizing_tool(
 
     timeout_note = ""
     if tool_timeout_seconds and tool_timeout_seconds > 0:
-        timeout_txt = int(tool_timeout_seconds) if float(tool_timeout_seconds).is_integer() else tool_timeout_seconds
+        timeout_txt = _format_timeout_seconds(tool_timeout_seconds)
         timeout_note = f" Tool execution timeout: {timeout_txt} seconds."
 
     enhanced_description = original_tool.description + (

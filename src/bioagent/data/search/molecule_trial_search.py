@@ -49,6 +49,21 @@ def _sanitize_tsquery(text: str) -> str:
     return " & ".join(cleaned.split())
 
 
+def _is_timeout_error(exc: Exception) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    name = type(exc).__name__.lower()
+    if "timeout" in name:
+        return True
+    message = str(exc).lower()
+    return (
+        "timed out" in message
+        or "timeout" in message
+        or "statement timeout" in message
+        or "canceling statement due to statement timeout" in message
+    )
+
+
 # =============================================================================
 # SMILES Preprocessing and Validation
 # =============================================================================
@@ -1054,11 +1069,54 @@ async def _find_substructure_molecules_with_trials(
     async_config: AsyncDatabaseConfig,
     pattern: str,
     limit: int,
+    search_input: MoleculeTrialSearchInput | None = None,
 ) -> list[dict[str, Any]]:
-    """Find molecules containing a query substructure that have trial associations."""
-    sql = """
+    """
+    Find molecules containing a query substructure that have trial associations.
+
+    Applies trial-level filters early (phase/status/date/etc.) to avoid
+    expensive broad substructure scans that later get filtered out.
+    """
+    params: list[Any] = [pattern]
+    param_idx = 1
+    trial_where_parts: list[str] = []
+
+    if search_input and search_input.phase:
+        param_idx += 1
+        params.append(search_input.phase)
+        trial_where_parts.append(f"rs.phase = ANY(${param_idx}::text[])")
+
+    if search_input and search_input.status:
+        param_idx += 1
+        params.append(search_input.status)
+        trial_where_parts.append(f"rs.overall_status = ANY(${param_idx}::text[])")
+
+    if search_input:
+        trial_frag, trial_params = _build_trial_filters(search_input, param_idx + 1)
+        if trial_frag:
+            clause = trial_frag.strip()
+            if clause.upper().startswith("AND "):
+                clause = clause[4:]
+            trial_where_parts.append(clause)
+            params.extend(trial_params)
+            param_idx += len(trial_params)
+
+    trial_where_sql = ""
+    if trial_where_parts:
+        trial_where_sql = "WHERE " + " AND ".join(trial_where_parts)
+
+    params.append(limit)
+    limit_param = param_idx + 1
+
+    sql = f"""
         WITH query_mol AS (
             SELECT mol_from_smiles($1::cstring) AS mol
+        ),
+        trial_filtered_concepts AS (
+            SELECT DISTINCT map.concept_id
+            FROM map_ctgov_molecules map
+            JOIN rag_study_search rs ON rs.nct_id = map.nct_id
+            {trial_where_sql}
         ),
         sub_mols AS (
             SELECT
@@ -1069,15 +1127,11 @@ async def _find_substructure_molecules_with_trials(
                 dm.chembl_id,
                 dm.inchi_key
             FROM dm_molecule dm
+            JOIN trial_filtered_concepts tfc ON tfc.concept_id = dm.concept_id
             CROSS JOIN query_mol q
             WHERE q.mol IS NOT NULL
               AND dm.mol IS NOT NULL
               AND dm.mol @> q.mol
-        ),
-        mols_with_trials AS (
-            SELECT DISTINCT sm.concept_id
-            FROM sub_mols sm
-            JOIN map_ctgov_molecules map ON map.concept_id = sm.concept_id
         )
         SELECT DISTINCT ON (sm.concept_id)
             sm.mol_id,
@@ -1087,12 +1141,11 @@ async def _find_substructure_molecules_with_trials(
             sm.chembl_id,
             sm.inchi_key
         FROM sub_mols sm
-        JOIN mols_with_trials mwt ON sm.concept_id = mwt.concept_id
         LEFT JOIN dm_molecule_concept mc ON sm.concept_id = mc.concept_id
         ORDER BY sm.concept_id, sm.mol_id
-        LIMIT $2
+        LIMIT ${limit_param}
     """
-    return await async_config.execute_query(sql, pattern, limit)
+    return await async_config.execute_query(sql, *params)
 
 
 async def _get_trials_for_concepts(
@@ -1248,6 +1301,55 @@ def _build_structure_error_response(
     )
 
 
+def _mode_query_summary(search_input: MoleculeTrialSearchInput) -> str:
+    if search_input.mode == "trials_by_molecule":
+        return search_input.molecule_name or search_input.inchi_key or ""
+    if search_input.mode == "molecules_by_condition":
+        return search_input.condition or ""
+    if search_input.mode == "trials_by_target":
+        return search_input.target_gene or ""
+    if search_input.mode in {"trials_by_structure", "trials_by_substructure"}:
+        return search_input.smiles or ""
+    if search_input.mode == "trials_by_sequence":
+        return search_input.sequence or ""
+    return ""
+
+
+def _timeout_suggestions(search_input: MoleculeTrialSearchInput) -> list[str]:
+    suggestions = [
+        "Reduce `limit` to return fewer records per request.",
+        "Add or tighten filters (phase, status, date range) to reduce workload.",
+        "Split the request into smaller steps and retry.",
+    ]
+    if search_input.mode == "trials_by_structure":
+        suggestions.append("Increase `similarity_threshold` to narrow structure matches.")
+    if search_input.mode == "trials_by_substructure":
+        suggestions.append("Use a more specific substructure pattern.")
+    if search_input.mode == "molecules_by_condition":
+        suggestions.append("Use a more specific condition term.")
+    if search_input.offset > 0:
+        suggestions.append("Retry from `offset=0`, then paginate once results are returned.")
+    return suggestions
+
+
+def _build_timeout_error_response(
+    search_input: MoleculeTrialSearchInput,
+) -> MoleculeTrialSearchOutput:
+    suggestions = _timeout_suggestions(search_input)
+    suggestion_lines = "\n".join(f"- {item}" for item in suggestions)
+    return MoleculeTrialSearchOutput(
+        status="error",
+        mode=search_input.mode,
+        error=(
+            "Molecule-trial search timed out before completion.\n"
+            "Suggestions:\n"
+            f"{suggestion_lines}"
+        ),
+        query_summary=_mode_query_summary(search_input),
+        suggestions=suggestions,
+    )
+
+
 # =============================================================================
 # Main Search Function
 # =============================================================================
@@ -1349,63 +1451,81 @@ async def molecule_trial_search_async(
         # =====================================================================
         if search_input.mode == "molecules_by_condition":
             condition = search_input.condition or ""
-            semantic_terms = await _get_semantic_condition_terms(async_config, condition)
-            terms: list[str] = [condition]
-            terms.extend(semantic_terms)
-            normalized_terms: list[str] = []
-            seen_terms: set[str] = set()
-            for term in terms:
-                normalized = normalize_semantic_text(term)
-                if not normalized or normalized in seen_terms:
-                    continue
-                seen_terms.add(normalized)
-                normalized_terms.append(normalized)
-            if not normalized_terms:
-                normalized_terms = [normalize_semantic_text(condition)]
-
-            term_values: list[str] = []
-            params: list[Any] = []
-            for term in normalized_terms[:5]:
-                params.append(term)
-                term_idx = len(params)
-                params.append(_sanitize_tsquery(term))
-                ts_idx = len(params)
-                term_values.append(f"(${term_idx}, ${ts_idx})")
-
             type_filter = ""
             if search_input.molecule_type == "biotherapeutic":
                 type_filter = "AND mc.is_biotherapeutic = TRUE"
             elif search_input.molecule_type == "small_molecule":
                 type_filter = "AND (mc.is_biotherapeutic IS FALSE OR mc.is_biotherapeutic IS NULL)"
-            trial_frag, trial_params = _build_trial_filters(search_input, len(params) + 1)
-            params.extend(trial_params)
-            params.extend([search_input.limit, search_input.offset])
-            sql = f"""
-                WITH condition_terms(term, tsquery) AS (
-                    VALUES {", ".join(term_values)}
-                ),
-                matched_trials AS (
-                    SELECT nct_id
-                    FROM rag_study_search rs
-                    JOIN condition_terms ct ON TRUE
-                    WHERE (
-                        rs.conditions_norm % ct.term
-                        OR rs.conditions_norm ILIKE '%' || ct.term || '%'
-                        OR rs.terms_tsv @@ to_tsquery('english', ct.tsquery)
-                    )
-                    {trial_frag}
+
+            async def _run_condition_query(
+                terms: list[str],
+                include_ilike: bool = False,
+            ) -> list[dict[str, Any]]:
+                normalized_terms: list[str] = []
+                seen_terms: set[str] = set()
+                for term in terms:
+                    normalized = normalize_semantic_text(term)
+                    if not normalized or normalized in seen_terms:
+                        continue
+                    seen_terms.add(normalized)
+                    normalized_terms.append(normalized)
+                if not normalized_terms:
+                    normalized_terms = [normalize_semantic_text(condition)]
+
+                term_values: list[str] = []
+                params: list[Any] = []
+                for term in normalized_terms[:5]:
+                    params.append(term)
+                    term_idx = len(params)
+                    params.append(_sanitize_tsquery(term))
+                    ts_idx = len(params)
+                    term_values.append(f"(${term_idx}, ${ts_idx})")
+
+                trial_frag, trial_params = _build_trial_filters(search_input, len(params) + 1)
+                params.extend(trial_params)
+                params.extend([search_input.limit, search_input.offset])
+                keyword_clause = (
+                    "rs.conditions_norm % ct.term OR rs.terms_tsv @@ to_tsquery('english', ct.tsquery)"
+                    if not include_ilike
+                    else "rs.conditions_norm % ct.term OR rs.conditions_norm ILIKE '%' || ct.term || '%' OR rs.terms_tsv @@ to_tsquery('english', ct.tsquery)"
                 )
-                SELECT mc.concept_id, mc.preferred_name AS concept_name,
-                       COUNT(DISTINCT map.nct_id)::int AS n_trials
-                FROM map_ctgov_molecules map
-                JOIN matched_trials mt ON mt.nct_id = map.nct_id
-                LEFT JOIN dm_molecule_concept mc ON map.concept_id = mc.concept_id
-                WHERE 1=1 {type_filter}
-                GROUP BY mc.concept_id, mc.preferred_name
-                ORDER BY n_trials DESC, mc.preferred_name
-                LIMIT ${len(params)-1} OFFSET ${len(params)}
-            """
-            rows = await async_config.execute_query(sql, *params)
+                sql = f"""
+                    WITH condition_terms(term, tsquery) AS (
+                        VALUES {", ".join(term_values)}
+                    ),
+                    matched_trials AS (
+                        SELECT nct_id
+                        FROM rag_study_search rs
+                        JOIN condition_terms ct ON TRUE
+                        WHERE ({keyword_clause})
+                        {trial_frag}
+                    )
+                    SELECT mc.concept_id, mc.preferred_name AS concept_name,
+                           COUNT(DISTINCT map.nct_id)::int AS n_trials
+                    FROM map_ctgov_molecules map
+                    JOIN matched_trials mt ON mt.nct_id = map.nct_id
+                    LEFT JOIN dm_molecule_concept mc ON map.concept_id = mc.concept_id
+                    WHERE 1=1 {type_filter}
+                    GROUP BY mc.concept_id, mc.preferred_name
+                    ORDER BY n_trials DESC, mc.preferred_name
+                    LIMIT ${len(params)-1} OFFSET ${len(params)}
+                """
+                return await async_config.execute_query(sql, *params)
+
+            # Fast first pass: no semantic expansion and no broad ILIKE.
+            rows = await _run_condition_query([condition], include_ilike=False)
+
+            # Fallback: add semantic term expansion only when initial recall is low.
+            if len(rows) < search_input.limit:
+                semantic_terms = await _get_semantic_condition_terms(async_config, condition)
+                if semantic_terms:
+                    fallback_rows = await _run_condition_query([condition, *semantic_terms], include_ilike=False)
+                    if len(fallback_rows) > len(rows):
+                        rows = fallback_rows
+
+            # Final recall fallback for difficult free-text queries.
+            if not rows:
+                rows = await _run_condition_query([condition], include_ilike=True)
             hits = [MoleculeByConditionHit(
                 concept_id=row.get("concept_id"),
                 concept_name=row.get("concept_name"),
@@ -1878,6 +1998,7 @@ async def molecule_trial_search_async(
                 async_config,
                 canonical_pattern,
                 limit=100,
+                search_input=search_input,
             )
 
             if not mol_rows:
@@ -1968,6 +2089,8 @@ async def molecule_trial_search_async(
         )
 
     except Exception as exc:
+        if _is_timeout_error(exc):
+            return _build_timeout_error_response(search_input)
         return MoleculeTrialSearchOutput(
             status="error",
             mode=search_input.mode,

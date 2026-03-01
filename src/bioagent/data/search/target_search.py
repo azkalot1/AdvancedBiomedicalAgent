@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import re
+import time
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -29,14 +31,28 @@ from rich.panel import Panel
 MORGAN_FP_BITS = 2048
 MORGAN_FP_RADIUS = 2
 
+
+def _sanitize_text_query(text: str) -> str:
+    """Normalize free text for safe full-text query inputs."""
+    cleaned = re.sub(r"[^A-Za-z0-9\s]+", " ", text or "").strip()
+    return re.sub(r"\s+", " ", cleaned)
+
 try:
     from bioagent.data.ingest.async_config import AsyncDatabaseConfig, get_async_connection
     from bioagent.data.ingest.config import DatabaseConfig, DEFAULT_CONFIG
-    from bioagent.data.semantic_utils import encode_query_vector
+    from bioagent.data.semantic_utils import (
+        encode_query_vector,
+        encode_smiles_query_vector,
+        encode_protein_query_vector,
+    )
 except ImportError:
     from async_config import AsyncDatabaseConfig, get_async_connection
     from config import DatabaseConfig, DEFAULT_CONFIG
-    from bioagent.data.semantic_utils import encode_query_vector
+    from bioagent.data.semantic_utils import (
+        encode_query_vector,
+        encode_smiles_query_vector,
+        encode_protein_query_vector,
+    )
 
 
 # =============================================================================
@@ -52,6 +68,7 @@ class SearchMode(str, Enum):
     DRUGS_FOR_TARGET = "drugs_for_target"
     SELECTIVE_DRUGS = "selective_drugs"
     SIMILAR_MOLECULES = "similar_molecules"
+    SIMILAR_BIOTHERAPEUTICS = "similar_biotherapeutics"
     EXACT_STRUCTURE = "exact_structure"
     SUBSTRUCTURE = "substructure"
     COMPARE_DRUGS = "compare_drugs"
@@ -150,6 +167,7 @@ class CompoundTargetProfile(BaseModel):
     n_mechanism_targets: int = 0
     best_pchembl: float | None = None
     tanimoto_similarity: float | None = None
+    embedding_similarity: float | None = None
 
     @property
     def has_activity_data(self) -> bool:
@@ -293,7 +311,9 @@ class TargetSearchInput(BaseModel):
     """Unified input for all search types."""
     mode: SearchMode
     query: str | None = None
+    gene_symbols: list[str] = Field(default_factory=list)
     smiles: str | None = None
+    sequence: str | None = None
     similarity_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     min_pchembl: float = Field(default=5.0, ge=0.0, le=15.0)
     activity_type: ActivityType = ActivityType.ALL
@@ -343,6 +363,9 @@ class TargetSearchInput(BaseModel):
         elif self.mode in [SearchMode.SIMILAR_MOLECULES, SearchMode.EXACT_STRUCTURE]:
             if not self.smiles:
                 errors.append(f"'smiles' is required for {self.mode.value}")
+        elif self.mode == SearchMode.SIMILAR_BIOTHERAPEUTICS:
+            if not self.sequence:
+                errors.append("'sequence' is required for similar_biotherapeutics")
         
         elif self.mode == SearchMode.SUBSTRUCTURE:
             if not self.smiles:
@@ -364,9 +387,17 @@ class TargetSearchInput(BaseModel):
             if not self.query:
                 errors.append(f"'query' is required for {self.mode.value}")
         
-        elif self.mode in [SearchMode.TARGET_PATHWAYS, SearchMode.DRUG_INTERACTIONS]:
+        elif self.mode == SearchMode.TARGET_PATHWAYS:
+            has_query = bool(self.query and self.query.strip())
+            has_gene_symbols = bool(self.gene_symbols)
+            if not has_query and not has_gene_symbols:
+                errors.append(
+                    f"'query' (single gene symbol) or 'gene_symbols' (list of gene symbols) is required for {self.mode.value}"
+                )
+
+        elif self.mode == SearchMode.DRUG_INTERACTIONS:
             if not self.query:
-                errors.append(f"'query' (gene symbol or drug name) is required for {self.mode.value}")
+                errors.append(f"'query' (drug name) is required for {self.mode.value}")
         
         return errors
 
@@ -702,11 +733,64 @@ class PharmacologySearch:
         self.db_config = db_config
         self._async_config: AsyncDatabaseConfig | None = None
         self.verbose = verbose
+        self._molecule_ann_column: str | None = None
+        self._molecule_ann_checked: bool = False
+        self._biotherapeutic_ann_checked: bool = False
+        self._has_biotherapeutic_embedding: bool = False
     
     async def _get_conn(self) -> AsyncDatabaseConfig:
         if self._async_config is None:
             self._async_config = await get_async_connection(self.db_config)
         return self._async_config
+
+    async def _get_molecule_ann_column(self, conn: AsyncDatabaseConfig) -> str | None:
+        """
+        Detect ANN embedding column for molecule-first retrieval.
+        Preferred: embedding, fallback: fp_ann pseudo-ANN vectors.
+        """
+        if self._molecule_ann_checked:
+            return self._molecule_ann_column
+        try:
+            rows = await conn.execute_query(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'dm_molecule'
+                  AND column_name IN ('fp_ann', 'embedding')
+                ORDER BY CASE column_name WHEN 'embedding' THEN 1 WHEN 'fp_ann' THEN 2 ELSE 99 END
+                LIMIT 1
+                """
+            )
+            self._molecule_ann_column = rows[0]["column_name"] if rows else None
+        except Exception:
+            self._molecule_ann_column = None
+        finally:
+            self._molecule_ann_checked = True
+        return self._molecule_ann_column
+
+    async def _has_biotherapeutic_ann_column(self, conn: AsyncDatabaseConfig) -> bool:
+        """Check whether dm_biotherapeutic.embedding exists for ANN search."""
+        if self._biotherapeutic_ann_checked:
+            return self._has_biotherapeutic_embedding
+        try:
+            rows = await conn.execute_query(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'dm_biotherapeutic'
+                      AND column_name = 'embedding'
+                ) AS has_embedding
+                """
+            )
+            self._has_biotherapeutic_embedding = bool(rows and rows[0].get("has_embedding"))
+        except Exception:
+            self._has_biotherapeutic_embedding = False
+        finally:
+            self._biotherapeutic_ann_checked = True
+        return self._has_biotherapeutic_embedding
 
     @staticmethod
     def _summarize_sources(source_lists: list[list[str]]) -> dict[str, int]:
@@ -853,6 +937,16 @@ class PharmacologySearch:
                     "Default threshold 0.7 finds similar scaffolds"
                 ]
             },
+            SearchMode.SIMILAR_BIOTHERAPEUTICS: {
+                "description": "Find sequence-similar biotherapeutics (ANN over ProtBert vectors)",
+                "required": "sequence (amino-acid sequence)",
+                "examples": ["EVQLVESGGGLVQPGGSLRLSCAASGFTFSSYAMSWVRQAPGKGLEWV..."],
+                "tips": [
+                    "Provide amino-acid sequence (not SMILES)",
+                    "Uses ProtBert embedding similarity; no exact Tanimoto stage",
+                    "Run embedding ingestion phase first if no hits are returned"
+                ]
+            },
             SearchMode.EXACT_STRUCTURE: {
                 "description": "Find exact structure match",
                 "required": "smiles (valid SMILES string)",
@@ -899,8 +993,8 @@ class PharmacologySearch:
             },
             SearchMode.TARGET_PATHWAYS: {
                 "description": "Get protein class summary for a target gene",
-                "required": "query (gene symbol)",
-                "examples": ["EGFR", "BRAF"],
+                "required": "query (single gene symbol) or gene_symbols (list of gene symbols)",
+                "examples": ["query='EGFR'", "gene_symbols=['EGFR', 'BRAF']"],
                 "tips": [
                     "Returns protein class hierarchy from ChEMBL",
                     "Useful for high-level target categorization"
@@ -1136,6 +1230,16 @@ class PharmacologySearch:
                 suggestions.append("Try search_similar_molecules with threshold 0.9 instead")
             
             suggestions.append("Verify SMILES string is valid using a chemical structure tool")
+
+        elif mode == SearchMode.SIMILAR_BIOTHERAPEUTICS:
+            seq_preview = input.sequence[:50] + "..." if input.sequence and len(input.sequence) > 50 else input.sequence
+            warnings.append("No sequence-similar biotherapeutics found")
+            warnings.append(f"Query sequence: {seq_preview}")
+            suggestions.extend([
+                "Ensure biotherapeutic embeddings are populated (ingestion phase 16)",
+                "Use a longer amino-acid sequence for better retrieval quality",
+                "Try by-sequence motif search for exact subsequence matching",
+            ])
             
         elif mode == SearchMode.SELECTIVE_DRUGS:
             warnings.append(f"No selective drugs found for {input.effective_target} vs {input.off_targets}")
@@ -1316,7 +1420,7 @@ class PharmacologySearch:
             return TargetSearchOutput(
                 status="error",
                 mode=input.mode,
-                query_summary=input.query or input.smiles or "N/A",
+                query_summary=input.query or input.smiles or input.sequence or "N/A",
                 error=error_msg,
                 warnings=warnings,
                 input_params=input.model_dump(exclude_none=True),
@@ -1330,6 +1434,7 @@ class PharmacologySearch:
             SearchMode.TARGETS_FOR_DRUG: self._search_targets_for_drug,
             SearchMode.DRUGS_FOR_TARGET: self._search_drugs_for_target,
             SearchMode.SIMILAR_MOLECULES: self._search_similar_molecules,
+            SearchMode.SIMILAR_BIOTHERAPEUTICS: self._search_similar_biotherapeutics,
             SearchMode.EXACT_STRUCTURE: self._search_exact_structure,
             SearchMode.SUBSTRUCTURE: self._search_substructure,
             SearchMode.TRIALS_FOR_DRUG: self._search_trials_for_drug,
@@ -1956,25 +2061,52 @@ class PharmacologySearch:
         
         if not concept_ids:
             # Try direct search in interventions as fallback for biologics
+            query_exact = input.query.strip()
+            query_pattern = f"%{query_exact}%"
+            query_ts = _sanitize_text_query(query_exact)
             direct_sql = """
-                SELECT DISTINCT
+                WITH ranked_interventions AS (
+                    SELECT
+                        i.nct_id,
+                        i.name,
+                        GREATEST(
+                            COALESCE(similarity(LOWER(i.name), LOWER($1)), 0),
+                            COALESCE(ts_rank(to_tsvector('english', COALESCE(i.name, '')), plainto_tsquery('english', $2)), 0)
+                        )::float AS rank_score
+                    FROM ctgov_interventions i
+                    WHERE i.intervention_type IN ('DRUG', 'BIOLOGICAL')
+                      AND (
+                          LOWER(i.name) % LOWER($1)
+                          OR ($2 <> '' AND to_tsvector('english', COALESCE(i.name, '')) @@ plainto_tsquery('english', $2))
+                          OR i.name ILIKE $3
+                      )
+                    ORDER BY rank_score DESC NULLS LAST, i.nct_id DESC
+                    LIMIT $4
+                ),
+                dedup_interventions AS (
+                    SELECT DISTINCT ON (nct_id)
+                        nct_id,
+                        name,
+                        rank_score
+                    FROM ranked_interventions
+                    ORDER BY nct_id, rank_score DESC NULLS LAST, name
+                )
+                SELECT
                     s.nct_id,
                     s.brief_title as trial_title,
                     s.overall_status as trial_status,
                     s.phase,
                     NULL::bigint as concept_id,
-                    i.name as concept_name,
+                    di.name as concept_name,
                     NULL as molecule_form,
                     'direct_intervention' as match_type,
-                    NULL::float as confidence
-                FROM ctgov_interventions i
-                JOIN ctgov_studies s ON i.nct_id = s.nct_id
-                WHERE i.intervention_type IN ('DRUG', 'BIOLOGICAL')
-                  AND i.name ILIKE $1
-                ORDER BY s.nct_id DESC
-                LIMIT $2
+                    di.rank_score as confidence
+                FROM dedup_interventions di
+                JOIN ctgov_studies s ON di.nct_id = s.nct_id
+                ORDER BY di.rank_score DESC NULLS LAST, s.nct_id DESC
+                LIMIT $4
             """
-            rows = await conn.execute_query(direct_sql, f"%{input.query}%", input.limit)
+            rows = await conn.execute_query(direct_sql, query_exact, query_ts, query_pattern, input.limit)
             
             if rows:
                 hits = [
@@ -2177,56 +2309,154 @@ class PharmacologySearch:
         
         canonical_smiles = validation.canonical_smiles
         
-        # === Step 2: Find similar molecules using PostgreSQL RDKit cartridge ===
-        similar_sql = """
-            WITH query_fp AS (
-                SELECT morganbv_fp(mol_from_smiles($1::cstring), 2) AS fp
-            ),
-            similar_mols AS (
-                SELECT 
-                    dm.mol_id,
-                    dm.concept_id,
-                    dm.pref_name AS molecule_name,
-                    dm.canonical_smiles,
-                    dm.chembl_id,
-                    tanimoto_sml(q.fp, dm.mfp2)::float AS tanimoto_similarity
-                FROM dm_molecule dm
-                CROSS JOIN query_fp q
-                WHERE dm.mfp2 IS NOT NULL
-                  AND dm.mfp2 % q.fp
-                  AND tanimoto_sml(q.fp, dm.mfp2) >= $2
-                ORDER BY tanimoto_sml(q.fp, dm.mfp2) DESC
-                LIMIT $3
-            ),
-            deduped AS (
-                SELECT DISTINCT ON (sm.concept_id)
-                    sm.concept_id,
-                    COALESCE(mc.preferred_name, sm.molecule_name) AS concept_name,
-                    sm.chembl_id,
-                    sm.canonical_smiles,
-                    sm.tanimoto_similarity,
-                    mc.is_biotherapeutic
-                FROM similar_mols sm
-                LEFT JOIN dm_molecule_concept mc ON sm.concept_id = mc.concept_id
-                ORDER BY sm.concept_id, sm.tanimoto_similarity DESC
-            )
-            SELECT
-                concept_id,
-                concept_name,
-                chembl_id,
+        # === Step 2: Candidate retrieval + exact reranking ===
+        ann_column = await self._get_molecule_ann_column(conn)
+        candidate_k = min(max(input.limit * 80, 1000), 5000)
+        rerank_k = max(input.limit * 5, 100)
+        mol_rows: list[dict[str, Any]] = []
+
+        # If vector column exists:
+        # - embedding => preferred ANN path
+        # - fp_ann => pseudo-ANN path
+        # In all cases, use two-stage retrieval:
+        #   1) coarse shortlist
+        #   2) exact Tanimoto rerank
+        if ann_column:
+            try:
+                query_vector = encode_smiles_query_vector(canonical_smiles)
+                similar_sql_ann = f"""
+                    WITH query_data AS (
+                        SELECT
+                            morganbv_fp(mol_from_smiles($1::cstring), 2) AS fp,
+                            $2 AS qv
+                    ),
+                    ann_candidates AS (
+                        SELECT
+                            dm.mol_id,
+                            dm.concept_id,
+                            dm.pref_name AS molecule_name,
+                            dm.canonical_smiles,
+                            dm.chembl_id
+                        FROM dm_molecule dm
+                        CROSS JOIN query_data q
+                        WHERE dm.{ann_column} IS NOT NULL
+                        ORDER BY dm.{ann_column} <=> q.qv
+                        LIMIT $3
+                    ),
+                    similar_mols AS (
+                        SELECT
+                            c.mol_id,
+                            c.concept_id,
+                            c.molecule_name,
+                            c.canonical_smiles,
+                            c.chembl_id,
+                            tanimoto_sml(q.fp, dm.mfp2)::float AS tanimoto_similarity
+                        FROM ann_candidates c
+                        JOIN dm_molecule dm ON dm.mol_id = c.mol_id
+                        CROSS JOIN query_data q
+                        WHERE dm.mfp2 IS NOT NULL
+                          AND tanimoto_sml(q.fp, dm.mfp2) >= $4
+                        ORDER BY tanimoto_sml(q.fp, dm.mfp2) DESC
+                        LIMIT $5
+                    ),
+                    deduped AS (
+                        SELECT DISTINCT ON (sm.concept_id)
+                            sm.concept_id,
+                            COALESCE(mc.preferred_name, sm.molecule_name) AS concept_name,
+                            sm.chembl_id,
+                            sm.canonical_smiles,
+                            sm.tanimoto_similarity,
+                            mc.is_biotherapeutic
+                        FROM similar_mols sm
+                        LEFT JOIN dm_molecule_concept mc ON sm.concept_id = mc.concept_id
+                        ORDER BY sm.concept_id, sm.tanimoto_similarity DESC
+                    )
+                    SELECT
+                        concept_id,
+                        concept_name,
+                        chembl_id,
+                        canonical_smiles,
+                        tanimoto_similarity,
+                        is_biotherapeutic
+                    FROM deduped
+                    ORDER BY tanimoto_similarity DESC, concept_id
+                """
+                mol_rows = await conn.execute_query(
+                    similar_sql_ann,
+                    canonical_smiles,
+                    query_vector,
+                    candidate_k,
+                    input.similarity_threshold,
+                    rerank_k,
+                )
+            except Exception:
+                # Safe fallback when embedding dimensions or ANN config are not aligned.
+                mol_rows = []
+
+        if not mol_rows:
+            # Vector columns unavailable (or ANN failed): still do explicit two-stage retrieval.
+            similar_sql = """
+                WITH query_fp AS (
+                    SELECT morganbv_fp(mol_from_smiles($1::cstring), 2) AS fp
+                ),
+                coarse_candidates AS (
+                    SELECT 
+                        dm.mol_id,
+                        dm.concept_id,
+                        dm.pref_name AS molecule_name,
+                        dm.canonical_smiles,
+                        dm.chembl_id
+                    FROM dm_molecule dm
+                    CROSS JOIN query_fp q
+                    WHERE dm.mfp2 IS NOT NULL
+                      AND dm.mfp2 % q.fp
+                    LIMIT $2
+                ),
+                similar_mols AS (
+                    SELECT
+                        c.mol_id,
+                        c.concept_id,
+                        c.molecule_name,
+                        c.canonical_smiles,
+                        c.chembl_id,
+                        tanimoto_sml(q.fp, dm.mfp2)::float AS tanimoto_similarity
+                    FROM coarse_candidates c
+                    JOIN dm_molecule dm ON dm.mol_id = c.mol_id
+                    CROSS JOIN query_fp q
+                    WHERE dm.mfp2 IS NOT NULL
+                      AND tanimoto_sml(q.fp, dm.mfp2) >= $3
+                    ORDER BY tanimoto_sml(q.fp, dm.mfp2) DESC
+                    LIMIT $4
+                ),
+                deduped AS (
+                    SELECT DISTINCT ON (sm.concept_id)
+                        sm.concept_id,
+                        COALESCE(mc.preferred_name, sm.molecule_name) AS concept_name,
+                        sm.chembl_id,
+                        sm.canonical_smiles,
+                        sm.tanimoto_similarity,
+                        mc.is_biotherapeutic
+                    FROM similar_mols sm
+                    LEFT JOIN dm_molecule_concept mc ON sm.concept_id = mc.concept_id
+                    ORDER BY sm.concept_id, sm.tanimoto_similarity DESC
+                )
+                SELECT
+                    concept_id,
+                    concept_name,
+                    chembl_id,
+                    canonical_smiles,
+                    tanimoto_similarity,
+                    is_biotherapeutic
+                FROM deduped
+                ORDER BY tanimoto_similarity DESC, concept_id
+            """
+            mol_rows = await conn.execute_query(
+                similar_sql,
                 canonical_smiles,
-                tanimoto_similarity,
-                is_biotherapeutic
-            FROM deduped
-            ORDER BY tanimoto_similarity DESC, concept_id
-        """
-        
-        mol_rows = await conn.execute_query(
-            similar_sql,
-            canonical_smiles,
-            input.similarity_threshold,
-            input.limit * 5,
-        )
+                candidate_k,
+                input.similarity_threshold,
+                rerank_k,
+            )
         
         smiles_display = input.smiles[:40] + "..." if len(input.smiles) > 40 else input.smiles
         
@@ -2560,6 +2790,210 @@ class PharmacologySearch:
     # =========================================================================
     # HANDLER: EXACT_STRUCTURE
     # =========================================================================
+
+    async def _search_similar_biotherapeutics(self, input: TargetSearchInput) -> TargetSearchOutput:
+        """Find sequence-similar biotherapeutics using ProtBert ANN vectors."""
+        start_time = time.time()
+        conn = await self._get_conn()
+
+        sequence_query = (input.sequence or "").strip()
+        if not sequence_query:
+            return TargetSearchOutput(
+                status="invalid_input",
+                mode=input.mode,
+                query_summary="missing sequence",
+                error="'sequence' is required for similar_biotherapeutics",
+            )
+
+        if not await self._has_biotherapeutic_ann_column(conn):
+            return TargetSearchOutput(
+                status="not_found",
+                mode=input.mode,
+                query_summary="similar biotherapeutics",
+                warnings=["dm_biotherapeutic.embedding column is missing"],
+                diagnostics=SearchDiagnostics(
+                    suggestions=["Run ingestion phase 16 to generate biotherapeutic embeddings"]
+                ),
+            )
+
+        try:
+            query_vector = encode_protein_query_vector(sequence_query)
+        except Exception as e:
+            return TargetSearchOutput(
+                status="error",
+                mode=input.mode,
+                query_summary="similar biotherapeutics",
+                error=f"Failed to encode protein sequence: {type(e).__name__}: {e}",
+            )
+
+        if not query_vector:
+            return TargetSearchOutput(
+                status="invalid_input",
+                mode=input.mode,
+                query_summary="similar biotherapeutics",
+                error="Protein sequence produced an empty embedding vector",
+            )
+
+        sql = """
+            WITH ranked AS (
+                SELECT
+                    b.bio_id,
+                    b.concept_id,
+                    COALESCE(mc.preferred_name, b.pref_name) AS concept_name,
+                    b.chembl_id,
+                    b.molecule_type,
+                    b.biotherapeutic_type,
+                    (1 - (b.embedding <=> $1))::float AS embedding_similarity,
+                    mc.is_biotherapeutic
+                FROM dm_biotherapeutic b
+                LEFT JOIN dm_molecule_concept mc ON b.concept_id = mc.concept_id
+                WHERE b.embedding IS NOT NULL
+                ORDER BY b.embedding <=> $1
+                LIMIT $2
+                OFFSET $3
+            )
+            SELECT *
+            FROM ranked
+            ORDER BY embedding_similarity DESC NULLS LAST, concept_id
+        """
+        rows = await conn.execute_query(sql, query_vector, input.limit, input.offset)
+        if not rows:
+            return TargetSearchOutput(
+                status="not_found",
+                mode=input.mode,
+                query_summary="similar biotherapeutics",
+                warnings=["No biotherapeutics with sequence embeddings were found"],
+            )
+
+        profiles: list[CompoundTargetProfile] = []
+        for row in rows:
+            if row.get("concept_id") is None:
+                continue
+            profiles.append(
+                CompoundTargetProfile(
+                    concept_id=row["concept_id"],
+                    concept_name=row["concept_name"],
+                    chembl_id=row.get("chembl_id"),
+                    canonical_smiles=None,
+                    is_biotherapeutic=bool(row.get("is_biotherapeutic", True)),
+                    molecule_type=row.get("molecule_type"),
+                    biotherapeutic_type=row.get("biotherapeutic_type"),
+                    embedding_similarity=float(row.get("embedding_similarity") or 0.0),
+                    activities=[],
+                    mechanisms=[],
+                    n_activity_targets=0,
+                    n_mechanism_targets=0,
+                    best_pchembl=None,
+                )
+            )
+
+        # Optional enrichment reuses the same concept-level lookup stack.
+        concept_ids = [p.concept_id for p in profiles if p.concept_id]
+        if concept_ids and (
+            input.include_activities
+            or input.include_mechanisms
+            or input.include_trial_summary
+            or input.include_indication_summary
+            or input.include_aggregated_summary
+        ):
+            enrichment_input = input.model_copy(update={"mode": SearchMode.SIMILAR_MOLECULES})
+            # Reuse existing enrichment branch by mapping concept IDs into pseudo rows.
+            # Keep it lightweight: only fetch per-concept stats through existing tables.
+            activities_by_concept: dict[int, list[TargetActivity]] = {}
+            mechanisms_by_concept: dict[int, list[TargetMechanism]] = {}
+
+            if input.include_activities:
+                activity_rows = await conn.execute_query(
+                    """
+                    SELECT concept_id, gene_symbol, target_name, target_organism,
+                           COALESCE(best_ic50_nm, best_ki_nm, best_kd_nm, best_ec50_nm) AS activity_value_nm,
+                           CASE
+                               WHEN best_ic50_nm IS NOT NULL THEN 'IC50'
+                               WHEN best_ki_nm IS NOT NULL THEN 'Ki'
+                               WHEN best_kd_nm IS NOT NULL THEN 'Kd'
+                               ELSE 'EC50'
+                           END AS activity_type,
+                           best_pchembl AS pchembl, n_total_measurements, data_confidence, sources
+                    FROM dm_molecule_target_summary
+                    WHERE concept_id = ANY($1::bigint[])
+                      AND best_pchembl >= $2
+                    ORDER BY concept_id, best_pchembl DESC NULLS LAST
+                    """,
+                    concept_ids,
+                    enrichment_input.min_pchembl,
+                )
+                for r in activity_rows:
+                    cid = r["concept_id"]
+                    activities_by_concept.setdefault(cid, []).append(
+                        TargetActivity(
+                            gene_symbol=r["gene_symbol"],
+                            target_name=r["target_name"],
+                            target_organism=r["target_organism"] or "Homo sapiens",
+                            activity_type=r["activity_type"] or "Unknown",
+                            activity_value_nm=float(r["activity_value_nm"]) if r["activity_value_nm"] else 0,
+                            pchembl=float(r["pchembl"]) if r["pchembl"] else None,
+                            n_measurements=r["n_total_measurements"] or 1,
+                            data_confidence=r["data_confidence"],
+                            sources=r["sources"] or [],
+                        )
+                    )
+
+            if input.include_mechanisms:
+                mechanism_rows = await conn.execute_query(
+                    """
+                    SELECT concept_id, mechanism_of_action, action_type, target_name, target_type,
+                           target_organism, gene_symbols, uniprot_accessions,
+                           direct_interaction, molecular_mechanism, disease_efficacy, ref_type, ref_id, ref_url
+                    FROM dm_drug_mechanism
+                    WHERE concept_id = ANY($1::bigint[])
+                    ORDER BY concept_id, action_type
+                    """,
+                    concept_ids,
+                )
+                for r in mechanism_rows:
+                    cid = r["concept_id"]
+                    mechanisms_by_concept.setdefault(cid, []).append(
+                        TargetMechanism(
+                            mechanism_of_action=r["mechanism_of_action"] or "Unknown",
+                            action_type=r["action_type"] or "Unknown",
+                            target_name=r["target_name"],
+                            target_type=r["target_type"],
+                            target_organism=r["target_organism"] or "Homo sapiens",
+                            gene_symbols=r["gene_symbols"] or [],
+                            uniprot_accessions=r["uniprot_accessions"] or [],
+                            direct_interaction=r["direct_interaction"] or False,
+                            molecular_mechanism=r["molecular_mechanism"] or False,
+                            disease_efficacy=r["disease_efficacy"] or False,
+                            ref_type=r["ref_type"],
+                            ref_id=r["ref_id"],
+                            ref_url=r["ref_url"],
+                        )
+                    )
+
+            for p in profiles:
+                p.activities = activities_by_concept.get(p.concept_id, [])
+                p.mechanisms = mechanisms_by_concept.get(p.concept_id, [])
+                p.n_activity_targets = len(p.activities)
+                p.n_mechanism_targets = len(p.mechanisms)
+                p.best_pchembl = max((a.pchembl for a in p.activities if a.pchembl), default=None)
+
+        profiles.sort(key=lambda p: -(p.embedding_similarity or 0))
+        return TargetSearchOutput(
+            status="success",
+            mode=input.mode,
+            query_summary=f"sequence-similar biotherapeutics for query length {len(sequence_query)}",
+            total_hits=len(profiles),
+            hits=profiles,
+            execution_time_ms=(time.time() - start_time) * 1000,
+            confidence_explanation="ANN ranking by ProtBert embedding cosine similarity",
+            diagnostics=SearchDiagnostics(
+                query_info={
+                    "sequence_length": len(sequence_query),
+                    "limit": input.limit,
+                    "offset": input.offset,
+                }
+            ),
+        )
     
     async def _search_exact_structure(self, input: TargetSearchInput) -> TargetSearchOutput:
         """Find exact structure match using similarity search."""
@@ -3105,24 +3539,68 @@ class PharmacologySearch:
         )
 
     async def _search_target_pathways(self, input: TargetSearchInput) -> TargetSearchOutput:
-        """Return protein class summaries for a target gene."""
+        """Return protein class summaries for one or more target genes."""
         conn = await self._get_conn()
-        gene_symbol = input.query.upper()
+
+        requested_gene_symbols = input.gene_symbols or ([] if not input.query else [input.query])
+        normalized_gene_symbols: list[str] = []
+        seen_gene_symbols: set[str] = set()
+        for symbol in requested_gene_symbols:
+            normalized = (symbol or "").strip().upper()
+            if not normalized or normalized in seen_gene_symbols:
+                continue
+            seen_gene_symbols.add(normalized)
+            normalized_gene_symbols.append(normalized)
+
+        if not normalized_gene_symbols:
+            return TargetSearchOutput(
+                status="invalid_input",
+                mode=input.mode,
+                query_summary="target pathways",
+                total_hits=0,
+                hits=[],
+                error="No valid gene symbols were provided.",
+                warnings=["Provide one gene symbol or a non-empty list of gene symbols."],
+            )
 
         sql = """
+            WITH requested_genes AS (
+                SELECT DISTINCT UPPER(TRIM(g)) AS gene_symbol
+                FROM unnest($1::text[]) AS g
+                WHERE g IS NOT NULL AND TRIM(g) <> ''
+            ),
+            pathway_rows AS (
+                SELECT
+                    t.gene_symbol,
+                    t.protein_class_id,
+                    pc.protein_class_desc,
+                    array_remove(array_agg(DISTINCT pcs.protein_class_synonym), NULL) AS synonyms
+                FROM dm_target t
+                JOIN requested_genes rg ON rg.gene_symbol = t.gene_symbol
+                LEFT JOIN protein_classification pc ON t.protein_class_id = pc.protein_class_id
+                LEFT JOIN protein_class_synonyms pcs ON t.protein_class_id = pcs.protein_class_id
+                GROUP BY t.gene_symbol, t.protein_class_id, pc.protein_class_desc
+            ),
+            ranked AS (
+                SELECT
+                    pathway_rows.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY pathway_rows.gene_symbol
+                        ORDER BY pathway_rows.protein_class_desc NULLS LAST, pathway_rows.protein_class_id NULLS LAST
+                    ) AS row_num
+                FROM pathway_rows
+            )
             SELECT
-                t.gene_symbol,
-                t.protein_class_id,
-                pc.protein_class_desc,
-                array_remove(array_agg(DISTINCT pcs.protein_class_synonym), NULL) AS synonyms
-            FROM dm_target t
-            LEFT JOIN protein_classification pc ON t.protein_class_id = pc.protein_class_id
-            LEFT JOIN protein_class_synonyms pcs ON t.protein_class_id = pcs.protein_class_id
-            WHERE t.gene_symbol = $1
-            GROUP BY t.gene_symbol, t.protein_class_id, pc.protein_class_desc
+                gene_symbol,
+                protein_class_id,
+                protein_class_desc,
+                synonyms
+            FROM ranked
+            WHERE row_num <= $2
+            ORDER BY gene_symbol, row_num
         """
 
-        rows = await conn.execute_query(sql, gene_symbol)
+        rows = await conn.execute_query(sql, normalized_gene_symbols, input.limit)
         hits = [
             TargetPathwayHit(
                 gene_symbol=r["gene_symbol"],
@@ -3134,18 +3612,44 @@ class PharmacologySearch:
         ]
 
         warnings = []
-        if hits and not hits[0].protein_class_desc:
+        if len(normalized_gene_symbols) == 1 and hits and not hits[0].protein_class_desc:
             warnings.append("Target found but protein class metadata is missing")
-        if not hits:
-            warnings.append(f"No target metadata found for '{gene_symbol}'")
+        found_gene_symbols = {hit.gene_symbol for hit in hits}
+        missing_gene_symbols = [
+            symbol for symbol in normalized_gene_symbols if symbol not in found_gene_symbols
+        ]
+        if missing_gene_symbols:
+            warnings.append(
+                "No target metadata found for: " + ", ".join(missing_gene_symbols)
+            )
+
+        diagnostics: SearchDiagnostics | None = None
+        diagnostic_suggestions: list[str] = []
+        if len(normalized_gene_symbols) > 1:
+            diagnostic_suggestions.append(
+                f"`limit={input.limit}` is applied per gene symbol."
+            )
+        if missing_gene_symbols:
+            diagnostic_suggestions.append(
+                "Verify missing symbols use official HGNC notation."
+            )
+        if diagnostic_suggestions:
+            diagnostics = SearchDiagnostics(suggestions=diagnostic_suggestions)
+
+        query_summary = (
+            f"target pathways for '{normalized_gene_symbols[0]}'"
+            if len(normalized_gene_symbols) == 1
+            else f"target pathways for {', '.join(normalized_gene_symbols)}"
+        )
 
         return TargetSearchOutput(
             status="success" if hits else "not_found",
             mode=input.mode,
-            query_summary=f"target pathways for '{gene_symbol}'",
+            query_summary=query_summary,
             total_hits=len(hits),
             hits=hits,
-            warnings=warnings
+            warnings=warnings,
+            diagnostics=diagnostics,
         )
 
     async def _search_drug_interactions(self, input: TargetSearchInput) -> TargetSearchOutput:

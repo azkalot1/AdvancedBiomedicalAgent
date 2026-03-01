@@ -7,7 +7,8 @@ Intended for antibody/enzyme biologics with sequence motifs.
 
 Modes:
     - by_sequence: match biotherapeutic components by sequence motif
-    - similar_biologics: motif-based similarity lookup
+    - by_name: match biotherapeutics by preferred name/synonym
+    - similar_biologics: ANN sequence similarity via ProtBert embeddings
 
 Data Sources:
     - dm_biotherapeutic
@@ -22,16 +23,18 @@ from pydantic import BaseModel, Field, field_validator
 
 from bioagent.data.ingest.async_config import AsyncDatabaseConfig, get_async_connection
 from bioagent.data.ingest.config import DatabaseConfig
+from bioagent.data.semantic_utils import encode_protein_query_vector
 
 
 class BiotherapeuticSearchInput(BaseModel):
-    mode: Literal["by_sequence", "similar_biologics"]
+    mode: Literal["by_sequence", "by_name", "similar_biologics"]
+    name: str | None = None
     sequence: str | None = None
     biotherapeutic_type: Literal["antibody", "enzyme", "all"] = "all"
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
 
-    @field_validator("sequence", mode="before")
+    @field_validator("name", "sequence", mode="before")
     @classmethod
     def strip_strings(cls, v):
         if isinstance(v, str):
@@ -41,6 +44,8 @@ class BiotherapeuticSearchInput(BaseModel):
 
     def validate_for_mode(self) -> list[str]:
         errors: list[str] = []
+        if self.mode == "by_name" and not self.name:
+            errors.append("'name' is required for name-based search")
         if self.mode in ("by_sequence", "similar_biologics") and not self.sequence:
             errors.append("'sequence' is required for sequence-based search")
         return errors
@@ -62,6 +67,7 @@ class BiotherapeuticHit(BaseModel):
     molecule_type: str | None = None
     biotherapeutic_type: str | None = None
     organism: str | None = None
+    similarity_score: float | None = None
     components: list[BiotherapeuticComponentHit] = Field(default_factory=list)
 
 
@@ -105,12 +111,119 @@ async def _fetch_by_sequence(
     return await async_config.execute_query(sql, *params)
 
 
+async def _fetch_by_name(
+    async_config: AsyncDatabaseConfig,
+    name: str,
+    bio_type: str,
+    limit: int,
+    offset: int,
+) -> list[dict[str, Any]]:
+    name_lower = name.lower()
+    prefix_pattern = f"{name_lower}%"
+    contains_pattern = f"%{name_lower}%"
+
+    params: list[Any] = [name_lower, prefix_pattern, contains_pattern]
+    type_clause, type_params = _bio_type_filter(bio_type, 4)
+    params.extend(type_params)
+    params.extend([limit, offset])
+
+    sql = f"""
+        WITH matched AS (
+            SELECT
+                b.bio_id,
+                MAX(
+                    CASE
+                        WHEN LOWER(COALESCE(b.pref_name, '')) = $1 OR s.synonym_lower = $1 THEN 3
+                        WHEN LOWER(COALESCE(b.pref_name, '')) LIKE $2 OR s.synonym_lower LIKE $2 THEN 2
+                        ELSE 1
+                    END
+                ) AS name_match_rank
+            FROM dm_biotherapeutic b
+            LEFT JOIN dm_biotherapeutic_synonyms s ON s.bio_id = b.bio_id
+            WHERE (
+                LOWER(COALESCE(b.pref_name, '')) LIKE $3
+                OR s.synonym_lower LIKE $3
+            )
+            {type_clause}
+            GROUP BY b.bio_id
+            ORDER BY name_match_rank DESC, b.bio_id
+            LIMIT ${len(params) - 1} OFFSET ${len(params)}
+        )
+        SELECT
+            b.bio_id, b.concept_id, b.chembl_id, b.pref_name, b.molecule_type, b.biotherapeutic_type, b.organism,
+            c.component_id, c.component_type, c.description, c.sequence_length, c.uniprot_accession
+        FROM matched m
+        JOIN dm_biotherapeutic b ON b.bio_id = m.bio_id
+        LEFT JOIN dm_biotherapeutic_component c ON c.bio_id = b.bio_id
+        ORDER BY m.name_match_rank DESC, b.pref_name, c.component_id
+    """
+    return await async_config.execute_query(sql, *params)
+
+
+async def _has_embedding_column(async_config: AsyncDatabaseConfig) -> bool:
+    rows = await async_config.execute_query(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'dm_biotherapeutic'
+              AND column_name = 'embedding'
+        ) AS has_embedding
+        """
+    )
+    return bool(rows and rows[0].get("has_embedding"))
+
+
+async def _fetch_similar_biologics(
+    async_config: AsyncDatabaseConfig,
+    sequence: str,
+    bio_type: str,
+    limit: int,
+    offset: int,
+) -> list[dict[str, Any]]:
+    query_vector = encode_protein_query_vector(sequence)
+    if not query_vector:
+        return []
+
+    type_clause, type_params = _bio_type_filter(bio_type, 4)
+    params: list[Any] = [query_vector, limit, offset]
+    params.extend(type_params)
+
+    sql = f"""
+        WITH ranked AS (
+            SELECT
+                b.bio_id,
+                b.concept_id,
+                b.chembl_id,
+                b.pref_name,
+                b.molecule_type,
+                b.biotherapeutic_type,
+                b.organism,
+                (1 - (b.embedding <=> $1))::float AS similarity_score
+            FROM dm_biotherapeutic b
+            WHERE b.embedding IS NOT NULL
+            {type_clause}
+            ORDER BY b.embedding <=> $1
+            LIMIT $2 OFFSET $3
+        )
+        SELECT
+            r.bio_id, r.concept_id, r.chembl_id, r.pref_name, r.molecule_type, r.biotherapeutic_type, r.organism,
+            r.similarity_score,
+            c.component_id, c.component_type, c.description, c.sequence_length, c.uniprot_accession
+        FROM ranked r
+        LEFT JOIN dm_biotherapeutic_component c ON c.bio_id = r.bio_id
+        ORDER BY r.similarity_score DESC NULLS LAST, r.pref_name, c.component_id
+    """
+    return await async_config.execute_query(sql, *params)
+
+
 async def biotherapeutic_sequence_search_async(
     db_config: DatabaseConfig,
     search_input: BiotherapeuticSearchInput,
 ) -> BiotherapeuticSearchOutput:
     """
-    Search biotherapeutics by sequence motif or target gene.
+    Search biotherapeutics by name, sequence motif, or embedding similarity.
 
     Args:
         db_config: Database configuration for the PostgreSQL source.
@@ -131,19 +244,43 @@ async def biotherapeutic_sequence_search_async(
     try:
         async_config = await get_async_connection(db_config)
 
-        rows = await _fetch_by_sequence(
-            async_config,
-            search_input.sequence or "",
-            search_input.biotherapeutic_type,
-            search_input.limit,
-            search_input.offset,
-        )
+        if search_input.mode == "similar_biologics":
+            if not await _has_embedding_column(async_config):
+                return BiotherapeuticSearchOutput(
+                    status="error",
+                    mode=search_input.mode,
+                    query_summary=search_input.sequence or "",
+                    error="dm_biotherapeutic.embedding is missing. Run biotherapeutic embedding ingestion phase.",
+                )
+            rows = await _fetch_similar_biologics(
+                async_config,
+                search_input.sequence or "",
+                search_input.biotherapeutic_type,
+                search_input.limit,
+                search_input.offset,
+            )
+        elif search_input.mode == "by_name":
+            rows = await _fetch_by_name(
+                async_config,
+                search_input.name or "",
+                search_input.biotherapeutic_type,
+                search_input.limit,
+                search_input.offset,
+            )
+        else:
+            rows = await _fetch_by_sequence(
+                async_config,
+                search_input.sequence or "",
+                search_input.biotherapeutic_type,
+                search_input.limit,
+                search_input.offset,
+            )
 
         if not rows:
             return BiotherapeuticSearchOutput(
                 status="not_found",
                 mode=search_input.mode,
-                query_summary=search_input.sequence or "",
+                query_summary=search_input.name or search_input.sequence or "",
             )
 
         grouped: dict[int, BiotherapeuticHit] = {}
@@ -160,6 +297,7 @@ async def biotherapeutic_sequence_search_async(
                     molecule_type=row.get("molecule_type"),
                     biotherapeutic_type=row.get("biotherapeutic_type"),
                     organism=row.get("organism"),
+                    similarity_score=float(row.get("similarity_score")) if row.get("similarity_score") is not None else None,
                 )
             grouped[bio_id].components.append(
                 BiotherapeuticComponentHit(
@@ -177,7 +315,7 @@ async def biotherapeutic_sequence_search_async(
             mode=search_input.mode,
             total_hits=len(hits),
             hits=hits,
-            query_summary=search_input.sequence or "",
+            query_summary=search_input.name or search_input.sequence or "",
         )
     except Exception as exc:
         return BiotherapeuticSearchOutput(

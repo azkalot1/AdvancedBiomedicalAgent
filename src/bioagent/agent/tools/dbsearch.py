@@ -760,7 +760,9 @@ def _format_biotherapeutic_output(
         chembl = getattr(hit, "chembl_id", None) or "N/A"
         bio_type = getattr(hit, "biotherapeutic_type", None) or "N/A"
         organism = getattr(hit, "organism", None) or "N/A"
-        lines.append(f"[{i}] {name} | {bio_type} | ChEMBL: {chembl} | {organism}")
+        similarity = getattr(hit, "similarity_score", None)
+        sim_text = f" | similarity: {similarity:.3f}" if isinstance(similarity, (int, float)) else ""
+        lines.append(f"[{i}] {name} | {bio_type} | ChEMBL: {chembl} | {organism}{sim_text}")
         if detail_level != "brief":
             components = getattr(hit, "components", []) or []
             for comp in components[:5]:
@@ -1201,6 +1203,13 @@ async def search_clinical_trials(
             include_adverse_events = True
             include_baseline = True
 
+        # Fast path for agentic search: only load heavy study JSON for
+        # comprehensive views that explicitly need expanded narratives.
+        include_study_json = detail_level == "comprehensive"
+
+        # Standard mode is optimized for ranking/browsing many trials.
+        formatter_detail_level = "brief" if detail_level == "standard" else detail_level
+
         # Build search input
         search_input = ClinicalTrialsSearchInput(
             # Search queries
@@ -1244,7 +1253,7 @@ async def search_clinical_trials(
             sort_order=sort_order_enum,
             limit=min(limit, 100),
             offset=offset,
-            include_study_json=True,
+            include_study_json=include_study_json,
             
             # Output sections
             output_eligibility=include_eligibility,
@@ -1262,7 +1271,7 @@ async def search_clinical_trials(
         top_nct_id = result.hits[0].nct_id if result.hits else None
         return _format_clinical_trials_output(
             result,
-            detail_level=detail_level,
+            detail_level=formatter_detail_level,
             source_tool="search_clinical_trials",
             result_context={"top_nct_id": top_nct_id},
         )
@@ -2327,6 +2336,7 @@ async def lookup_drug_identifiers(
 @robust_unwrap_llm_inputs
 async def search_biotherapeutics(
     mode: str,
+    name: str | None = None,
     sequence: str | None = None,
     sequence_motif: str | None = None,
     biotherapeutic_type: str = "all",
@@ -2335,26 +2345,36 @@ async def search_biotherapeutics(
     detail_level: str = "standard",
 ) -> str:
     """
-    Search biotherapeutics by sequence motif.
+    Search biotherapeutics by name, sequence motif, or full sequence.
 
     Modes:
-        - "by_sequence": Match by sequence motif (uses sequence/sequence_motif).
-        - "similar_biologics": Find biologics sharing a motif (uses sequence/sequence_motif).
+        - "by_name": Match by preferred name/synonym (uses name).
+        - "by_sequence": Match by sequence motif (uses sequence or sequence_motif).
+        - "similar_biologics": ANN similarity over ProtBert embeddings
+          (pass a protein sequence via sequence).
 
     For target-based biologic queries, use search_target_drugs with
     molecule_type="biotherapeutic".
     """
     try:
-        valid_modes = {"by_sequence", "similar_biologics"}
+        valid_modes = {"by_name", "by_sequence", "similar_biologics"}
         if not mode or mode not in valid_modes:
             return (
                 "❌ Invalid input: mode is required.\n"
-                "Valid options: by_sequence, similar_biologics"
+                "Valid options: by_name, by_sequence, similar_biologics"
             )
-        if not (sequence or sequence_motif):
+        if mode == "by_name" and not name:
+            return (
+                "❌ Invalid input: name is required for mode='by_name'.\n"
+                "Example: search_biotherapeutics(mode='by_name', name='trastuzumab')"
+            )
+        if mode in {"by_sequence", "similar_biologics"} and not (sequence or sequence_motif):
             return (
                 "❌ Invalid input: sequence or sequence_motif is required.\n"
-                "Example: search_biotherapeutics(mode='by_sequence', sequence='EVQLVESGG')"
+                "Examples:\n"
+                "  search_biotherapeutics(mode='by_name', name='adalimumab')\n"
+                "  search_biotherapeutics(mode='by_sequence', sequence_motif='EVQLVESGG')\n"
+                "  search_biotherapeutics(mode='similar_biologics', sequence='EVQLVESGGGLVQPGGSLRLSCAAS')"
             )
 
         detail_level, error = _validate_detail_level(detail_level)
@@ -2363,6 +2383,7 @@ async def search_biotherapeutics(
         sequence_value = sequence or sequence_motif
         search_input = BiotherapeuticSearchInput(
             mode=mode,
+            name=name,
             sequence=sequence_value,
             biotherapeutic_type=biotherapeutic_type,
             limit=min(limit, 500),

@@ -17,6 +17,7 @@ Data Sources:
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -121,16 +122,31 @@ async def _fetch_events_for_drug(
         params.append(min_subjects_affected)
         having_clause = f"HAVING SUM(re.subjects_affected) >= ${len(params)}"
 
+    # Limit event aggregation scope to top-ranked intervention matches.
+    candidate_limit = min(max(limit * 75, 1000), 10000)
+    params.append(candidate_limit)
+    candidate_idx = len(params)
+
     params.extend([limit, offset])
     limit_idx = len(params) - 1
     offset_idx = len(params)
     sql = f"""
-        WITH matched_trials AS (
-            SELECT nct_id
+        WITH ranked_trials AS (
+            SELECT nct_id,
+                   GREATEST(
+                       COALESCE(similarity(interventions_norm, $1), 0),
+                       COALESCE(ts_rank(terms_tsv, to_tsquery('english', $3)), 0)
+                   ) AS score
             FROM rag_study_search
             WHERE interventions_norm % $1
                OR interventions_norm ILIKE $2
                OR terms_tsv @@ to_tsquery('english', $3)
+            ORDER BY score DESC NULLS LAST, nct_id
+            LIMIT ${candidate_idx}
+        ),
+        matched_trials AS (
+            SELECT nct_id
+            FROM ranked_trials
         )
         SELECT re.adverse_event_term,
                re.event_type,
@@ -255,8 +271,7 @@ async def adverse_events_search_async(
             )
 
         if search_input.mode == "compare_safety":
-            comparisons: list[AdverseEventDrugComparison] = []
-            for name in search_input.drug_names:
+            async def _fetch_one(name: str) -> AdverseEventDrugComparison:
                 rows = await _fetch_events_for_drug(
                     async_config,
                     name,
@@ -265,12 +280,12 @@ async def adverse_events_search_async(
                     limit=min(20, search_input.limit),
                     offset=0,
                 )
-                comparisons.append(
-                    AdverseEventDrugComparison(
-                        drug_name=name,
-                        top_events=[AdverseEventSummaryHit(**row) for row in rows],
-                    )
+                return AdverseEventDrugComparison(
+                    drug_name=name,
+                    top_events=[AdverseEventSummaryHit(**row) for row in rows],
                 )
+
+            comparisons = await asyncio.gather(*[_fetch_one(name) for name in search_input.drug_names])
             status = "success" if comparisons else "not_found"
             return AdverseEventsSearchOutput(
                 status=status,

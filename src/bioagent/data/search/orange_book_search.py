@@ -238,6 +238,86 @@ async def _fetch_exclusivity(
     return [OrangeBookExclusivityHit(**row) for row in rows]
 
 
+async def _fetch_patents_bulk(
+    async_config: AsyncDatabaseConfig,
+    keys: list[tuple[str, str]],
+) -> dict[tuple[str, str], list[OrangeBookPatentHit]]:
+    if not keys:
+        return {}
+    appl_nos = [k[0] for k in keys]
+    product_nos = [k[1] for k in keys]
+    rows = await async_config.execute_query(
+        """
+        WITH key_pairs AS (
+            SELECT *
+            FROM unnest($1::text[], $2::text[]) AS t(appl_no, product_no)
+        )
+        SELECT p.appl_no, p.product_no,
+               p.patent_no, p.patent_expiration_date, p.drug_substance_flag, p.drug_product_flag,
+               p.patent_use_code, p.patent_use_code_description
+        FROM orange_book_patents p
+        JOIN key_pairs k
+          ON p.appl_no = k.appl_no AND p.product_no = k.product_no
+        ORDER BY p.appl_no, p.product_no, p.patent_expiration_date
+        """,
+        appl_nos,
+        product_nos,
+    )
+    grouped: dict[tuple[str, str], list[OrangeBookPatentHit]] = {}
+    for row in rows:
+        key = (row.get("appl_no"), row.get("product_no"))
+        if not key[0] or not key[1]:
+            continue
+        grouped.setdefault(key, []).append(
+            OrangeBookPatentHit(
+                patent_no=row.get("patent_no"),
+                patent_expiration_date=row.get("patent_expiration_date"),
+                drug_substance_flag=row.get("drug_substance_flag"),
+                drug_product_flag=row.get("drug_product_flag"),
+                patent_use_code=row.get("patent_use_code"),
+                patent_use_code_description=row.get("patent_use_code_description"),
+            )
+        )
+    return grouped
+
+
+async def _fetch_exclusivity_bulk(
+    async_config: AsyncDatabaseConfig,
+    keys: list[tuple[str, str]],
+) -> dict[tuple[str, str], list[OrangeBookExclusivityHit]]:
+    if not keys:
+        return {}
+    appl_nos = [k[0] for k in keys]
+    product_nos = [k[1] for k in keys]
+    rows = await async_config.execute_query(
+        """
+        WITH key_pairs AS (
+            SELECT *
+            FROM unnest($1::text[], $2::text[]) AS t(appl_no, product_no)
+        )
+        SELECT e.appl_no, e.product_no, e.exclusivity_code, e.exclusivity_date
+        FROM orange_book_exclusivity e
+        JOIN key_pairs k
+          ON e.appl_no = k.appl_no AND e.product_no = k.product_no
+        ORDER BY e.appl_no, e.product_no, e.exclusivity_date
+        """,
+        appl_nos,
+        product_nos,
+    )
+    grouped: dict[tuple[str, str], list[OrangeBookExclusivityHit]] = {}
+    for row in rows:
+        key = (row.get("appl_no"), row.get("product_no"))
+        if not key[0] or not key[1]:
+            continue
+        grouped.setdefault(key, []).append(
+            OrangeBookExclusivityHit(
+                exclusivity_code=row.get("exclusivity_code"),
+                exclusivity_date=row.get("exclusivity_date"),
+            )
+        )
+    return grouped
+
+
 async def orange_book_search_async(
     db_config: DatabaseConfig,
     search_input: OrangeBookSearchInput,
@@ -288,15 +368,27 @@ async def orange_book_search_async(
                 query_summary=search_input.drug_name or search_input.ingredient or search_input.nda_number or "",
             )
 
+        keys = [
+            (str(row.get("appl_no")), str(row.get("product_no")))
+            for row in rows
+            if row.get("appl_no") and row.get("product_no")
+        ]
+        patent_map: dict[tuple[str, str], list[OrangeBookPatentHit]] = {}
+        exclusivity_map: dict[tuple[str, str], list[OrangeBookExclusivityHit]] = {}
+        if search_input.mode in ("patents", "te_codes", "generics") and search_input.include_patents:
+            patent_map = await _fetch_patents_bulk(async_config, keys)
+        if search_input.mode in ("exclusivity", "te_codes", "generics") and search_input.include_exclusivity:
+            exclusivity_map = await _fetch_exclusivity_bulk(async_config, keys)
+
         hits: list[OrangeBookProductHit] = []
         for row in rows:
             hit = OrangeBookProductHit(**row)
-            if search_input.mode in ("patents", "te_codes", "generics") and search_input.include_patents:
-                if hit.appl_no and hit.product_no:
-                    hit.patents = await _fetch_patents(async_config, hit.appl_no, hit.product_no)
-            if search_input.mode in ("exclusivity", "te_codes", "generics") and search_input.include_exclusivity:
-                if hit.appl_no and hit.product_no:
-                    hit.exclusivity = await _fetch_exclusivity(async_config, hit.appl_no, hit.product_no)
+            if hit.appl_no and hit.product_no:
+                key = (hit.appl_no, hit.product_no)
+                if search_input.mode in ("patents", "te_codes", "generics") and search_input.include_patents:
+                    hit.patents = patent_map.get(key, [])
+                if search_input.mode in ("exclusivity", "te_codes", "generics") and search_input.include_exclusivity:
+                    hit.exclusivity = exclusivity_map.get(key, [])
 
             # Precision guards for legal-data specific modes.
             if search_input.mode == "patents" and search_input.include_patents and not hit.patents:
