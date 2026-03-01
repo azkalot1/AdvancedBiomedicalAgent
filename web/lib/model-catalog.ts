@@ -5,6 +5,7 @@ export const MODEL_CATALOG = [
   { id: "google/gemini-3.1-pro-preview", label: "Gemini 3.1 Pro" },
   { id: "z-ai/glm-5", label: "GLM-5" },
   { id: "moonshotai/kimi-k2.5", label: "Kimi K2.5" },
+  { id: "minimax/minimax-m2.5", label: "Minimax M2.5" },
 ] as const;
 
 export type CatalogModelId = (typeof MODEL_CATALOG)[number]["id"];
