@@ -36,6 +36,7 @@ ALLOWED_CHAT_MODELS = (
     "google/gemini-3.1-pro-preview",
     "z-ai/glm-5",
     "moonshotai/kimi-k2.5"
+    "minimax/minimax-m2.5"
 )
 
 
