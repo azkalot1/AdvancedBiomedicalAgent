@@ -23,6 +23,7 @@ def show_help() -> None:
     print("  tables                   - List all tables")
     print("  verify-deps              - Verify Python dependencies are installed")
     print("  chat                     - Start CLI chat client (Aegra server)")
+    print("  benchmark                - Run automated HTTP benchmark suites")
     print()
     print("Data Ingestion Commands:")
     print("  ingest                   - Run full data ingestion pipeline")
@@ -112,6 +113,7 @@ def show_help() -> None:
     print("  biomedagent-db ingest --ctgov-enriched-search-only   # standalone enriched search table")
     print("  biomedagent-db extract-schema --output schema.txt --sample-rows 5")
     print("  biomedagent-db chat --server-url http://localhost:8000 --user-id alice")
+    print("  biomedagent-db benchmark run --suite tests/benchmarks/mcq --output-dir benchmark_runs")
 
 
 def route_setup_postgres() -> NoReturn:
@@ -239,6 +241,27 @@ def route_chat_command() -> NoReturn:
     sys.exit(0)
 
 
+def route_benchmark_command() -> NoReturn:
+    """Route to benchmark runner CLI."""
+    try:
+        from bioagent.benchmarking.cli import main as benchmark_main
+
+        original_argv = sys.argv.copy()
+        sys.argv = ["benchmark.py"] + sys.argv[2:]
+        exit_code = benchmark_main()
+        sys.exit(exit_code)
+    except ImportError as e:
+        print(f"❌ Error importing benchmark runner: {e}")
+        print("Make sure all dependencies are installed with: pip install -e .")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error running benchmark command: {e}")
+        sys.exit(1)
+    finally:
+        if "original_argv" in locals():
+            sys.argv = original_argv
+
+
 def main() -> NoReturn:
     """Main CLI entry point."""
     if len(sys.argv) < 2:
@@ -259,6 +282,8 @@ def main() -> NoReturn:
         route_db_command(command, args)
     elif command in ["chat", "chat-server"]:
         route_chat_command()
+    elif command == "benchmark":
+        route_benchmark_command()
     elif command in ["help", "--help", "-h"]:
         show_help()
         sys.exit(0)

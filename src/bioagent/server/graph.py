@@ -143,6 +143,64 @@ def _runtime_summarizer_model_name() -> str:
     return os.getenv("BIOAGENT_SUMMARIZER_MODEL", DEFAULT_SUMMARIZER_MODEL)
 
 
+def _runtime_configurable() -> dict[str, Any]:
+    try:
+        from langgraph.config import get_config
+
+        cfg = get_config() or {}
+        configurable = cfg.get("configurable", {}) if isinstance(cfg, dict) else {}
+        if isinstance(configurable, dict):
+            return configurable
+    except Exception:
+        pass
+    return {}
+
+
+def _runtime_benchmark_tool_names(key: str) -> list[str]:
+    configurable = _runtime_configurable()
+    raw_value = configurable.get(key)
+    if not isinstance(raw_value, list):
+        return []
+    tool_names: list[str] = []
+    for raw_name in raw_value:
+        name = str(raw_name).strip()
+        if name and name not in tool_names:
+            tool_names.append(name)
+    return tool_names
+
+
+def _runtime_benchmark_allowed_tools() -> list[str]:
+    return _runtime_benchmark_tool_names("benchmark_allowed_tools")
+
+
+def _runtime_benchmark_disallowed_tools() -> list[str]:
+    return _runtime_benchmark_tool_names("benchmark_disallowed_tools")
+
+
+def _runtime_benchmark_max_tools_per_step(*, default: int | None = None) -> int | None:
+    configurable = _runtime_configurable()
+    raw_value = configurable.get("benchmark_max_tools_per_step")
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, value)
+
+
+def _runtime_benchmark_max_total_tool_calls() -> int | None:
+    configurable = _runtime_configurable()
+    raw_value = configurable.get("benchmark_max_total_tool_calls")
+    if raw_value is None:
+        return None
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def _build_summarizer_model() -> Any:
     return get_chat_model(
         _runtime_summarizer_model_name(),
@@ -675,6 +733,81 @@ class RuntimeModelSelectionMiddleware(AgentMiddleware):
         return await handler(request.override(model=model))
 
 
+class BenchmarkToolPolicyMiddleware(AgentMiddleware):
+    """Filter tool exposure per run for benchmark policies."""
+
+    @staticmethod
+    def _filtered_tools(tools: list[Any]) -> list[Any]:
+        allowed = set(_runtime_benchmark_allowed_tools())
+        disallowed = set(_runtime_benchmark_disallowed_tools())
+        if not allowed and not disallowed:
+            return tools
+
+        filtered: list[Any] = []
+        for tool in tools:
+            if isinstance(tool, dict):
+                filtered.append(tool)
+                continue
+            tool_name = getattr(tool, "name", None)
+            if not isinstance(tool_name, str) or not tool_name:
+                filtered.append(tool)
+                continue
+            if allowed and tool_name not in allowed:
+                continue
+            if tool_name in disallowed:
+                continue
+            filtered.append(tool)
+        return filtered
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        filtered_tools = self._filtered_tools(list(request.tools))
+        return handler(request.override(tools=filtered_tools))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        filtered_tools = self._filtered_tools(list(request.tools))
+        return await handler(request.override(tools=filtered_tools))
+
+
+class BenchmarkToolCallLimitMiddleware(AgentMiddleware):
+    """Apply LangChain tool call limits only for benchmark-configured runs."""
+
+    @staticmethod
+    def _delegate() -> Any | None:
+        run_limit = _runtime_benchmark_max_total_tool_calls()
+        if run_limit is None:
+            return None
+        try:
+            from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
+        except Exception as exc:
+            raise RuntimeError(
+                "benchmark_max_total_tool_calls was set, but ToolCallLimitMiddleware is unavailable "
+                "in the installed LangChain version."
+            ) from exc
+        return ToolCallLimitMiddleware(run_limit=run_limit, exit_behavior="continue")
+
+    def after_model(self, state: AgentState[Any], runtime: Any) -> dict[str, Any] | None:
+        delegate = self._delegate()
+        if delegate is None:
+            return None
+        return delegate.after_model(state, runtime)
+
+    async def aafter_model(self, state: AgentState[Any], runtime: Any) -> dict[str, Any] | None:
+        delegate = self._delegate()
+        if delegate is None:
+            return None
+        if hasattr(delegate, "aafter_model"):
+            return await delegate.aafter_model(state, runtime)
+        return delegate.after_model(state, runtime)
+
+
 class DiscoveryAwareLLMToolSelectorMiddleware(LLMToolSelectorMiddleware):
     """Extend LLM selection with user/agent-requested tools from state."""
 
@@ -702,11 +835,15 @@ class DiscoveryAwareLLMToolSelectorMiddleware(LLMToolSelectorMiddleware):
         requested = self._extract_requested_tools(getattr(request, "state", None))
         merged = list(dict.fromkeys([*self._base_always_include, *requested]))
         previous = list(self.always_include)
+        previous_max_tools = self.max_tools
         self.always_include = merged
+        runtime_max_tools = _runtime_benchmark_max_tools_per_step(default=previous_max_tools)
+        self.max_tools = runtime_max_tools
         try:
             return super()._prepare_selection_request(request)
         finally:
             self.always_include = previous
+            self.max_tools = previous_max_tools
 
     def _process_selection_response(
         self,
@@ -860,6 +997,8 @@ def _build_middleware(*, provider: str, model_name: str, temperature: float, sum
             model_parameters={"temperature": temperature},
             allowed_models=set(ALLOWED_CHAT_MODELS),
         ),
+        BenchmarkToolPolicyMiddleware(),
+        BenchmarkToolCallLimitMiddleware(),
         ContextWindowSummarizationMiddleware(
             summarizer_model=summarizer,
             default_model_name=model_name,
