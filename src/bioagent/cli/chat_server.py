@@ -35,6 +35,75 @@ def _extract_text(payload: Any) -> str:
     return ""
 
 
+def _infer_role(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    direct_role = payload.get("role") or payload.get("type") or payload.get("message_type")
+    if isinstance(direct_role, str) and direct_role.strip():
+        return direct_role.strip().lower()
+
+    nested_message = payload.get("message")
+    if isinstance(nested_message, dict):
+        nested_role = _infer_role(nested_message)
+        if nested_role:
+            return nested_role
+
+    nested_chunk = payload.get("chunk")
+    if isinstance(nested_chunk, dict):
+        nested_role = _infer_role(nested_chunk)
+        if nested_role:
+            return nested_role
+
+    return None
+
+
+def _looks_like_selector_output(text: str) -> bool:
+    stripped = (text or "").lstrip()
+    if not stripped:
+        return False
+    compact = "".join(stripped.split()).lower()
+    return compact.startswith('{"tools":[')
+
+
+def _should_include_stream_chunk(payload: Any, metadata: Any = None) -> bool:
+    if isinstance(metadata, dict):
+        node = metadata.get("langgraph_node")
+        if isinstance(node, str):
+            node_name = node.strip().lower()
+            if node_name and node_name != "model":
+                return False
+
+    role = _infer_role(payload)
+    if role and any(part in role for part in ("tool", "human", "user")):
+        return False
+
+    if isinstance(payload, dict):
+        for key in ("tool_calls", "tool_call_chunks", "invalid_tool_calls"):
+            value = payload.get(key)
+            if isinstance(value, list) and value:
+                return False
+
+    return not _looks_like_selector_output(_extract_text(payload))
+
+
+def _message_additional_kwargs(message: Any) -> dict[str, Any]:
+    if isinstance(message, dict):
+        additional_kwargs = message.get("additional_kwargs")
+        if isinstance(additional_kwargs, dict):
+            return additional_kwargs
+        nested_message = message.get("message")
+        if isinstance(nested_message, dict):
+            nested_additional_kwargs = nested_message.get("additional_kwargs")
+            if isinstance(nested_additional_kwargs, dict):
+                return nested_additional_kwargs
+    return {}
+
+
+def _has_lc_source(message: Any, expected: str) -> bool:
+    return _message_additional_kwargs(message).get("lc_source") == expected
+
+
 def _normalize_stream_event(event_name: str, event_data: Any) -> tuple[str, Any]:
     """
     Normalize stream events across Agent Server variants.
@@ -338,6 +407,9 @@ class LangGraphServerClient:
 
                 if mode in {"messages", "messages-tuple", "messages_tuple"}:
                     message_payload = payload_data[0] if isinstance(payload_data, list) and payload_data else payload_data
+                    metadata = payload_data[1] if isinstance(payload_data, list) and len(payload_data) > 1 else None
+                    if not _should_include_stream_chunk(message_payload, metadata):
+                        continue
                     token = _extract_text(message_payload)
                     if token:
                         print(token, end="", flush=True)
@@ -345,7 +417,11 @@ class LangGraphServerClient:
                     continue
 
                 if mode in {"on_chat_model_stream", "chat_model_stream"}:
-                    token = _extract_text(payload_data)
+                    stream_payload = payload_data[0] if isinstance(payload_data, list) and payload_data else payload_data
+                    metadata = payload_data[1] if isinstance(payload_data, list) and len(payload_data) > 1 else None
+                    if not _should_include_stream_chunk(stream_payload, metadata):
+                        continue
+                    token = _extract_text(stream_payload)
                     if token:
                         print(token, end="", flush=True)
                         printed_token = True
@@ -378,9 +454,13 @@ class LangGraphServerClient:
                         report_id = report.get("id", "unknown")
                         print(f"\n[report] generated {filename} ({report_id})")
                     elif custom_type == "context_updated":
-                        items = payload_data.get("items", [])
-                        count = len(items) if isinstance(items, list) else 0
-                        print(f"\n[context] {count} item(s) active")
+                        message = payload_data.get("message")
+                        if isinstance(message, str) and message.strip():
+                            print(f"\n[context] {message.strip()}")
+                        else:
+                            items = payload_data.get("items", [])
+                            count = len(items) if isinstance(items, list) else 0
+                            print(f"\n[context] {count} item(s) active")
                     elif custom_type == "plot_data":
                         print("\n[plot] plot_data event received")
 
@@ -517,6 +597,10 @@ def _print_state_messages(state_payload: dict[str, Any], *, full: bool = False) 
 
     print(f"Messages ({len(messages)}):")
     for index, message in enumerate(messages, start=1):
+        if _has_lc_source(message, "summarization"):
+            print(f"[{index}] internal (lc_source=summarization)")
+            print("  content: [Context was automatically summarized]")
+            continue
         role = str(message.get("type", message.get("role", "unknown"))).lower()
         msg_id = message.get("id") or message.get("message_id")
         name = message.get("name")

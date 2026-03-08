@@ -7,7 +7,7 @@ Agent-facing pharmacology search tools with proper formatting.
 from langchain_core.tools import tool
 
 from bioagent.data.ingest.config import DEFAULT_CONFIG
-from .tool_utils import robust_unwrap_llm_inputs, build_handoff_signals
+from .tool_utils import build_handoff_signals, robust_unwrap_llm_inputs, tool_summary
 
 from bioagent.data.search.target_search import (
     PharmacologySearch,
@@ -1852,6 +1852,10 @@ async def search_drug_interactions(
 # =============================================================================
 
 @tool("pharmacology_search", return_direct=False)
+@tool_summary(
+    "Unified pharmacology search for drug-target interactions, mechanisms, "
+    "clinical trials, and molecular similarity."
+)
 @robust_unwrap_llm_inputs
 async def pharmacology_search(
     search_type: str,

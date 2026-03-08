@@ -1,4 +1,5 @@
 import asyncio
+import httpx
 import json
 import os
 import re
@@ -14,6 +15,7 @@ from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, ConfigDict, Field
 
 from bioagent.agent import get_chat_model
+from bioagent.server.graph import build_manual_context_summary_update, manually_summarize_thread_context
 from bioagent.persistence import (
     delete_report,
     get_report,
@@ -138,6 +140,21 @@ class PromptPopularityResponse(BaseModel):
     limit: int
     days: int
     scope: str
+
+
+class ManualContextSummarizeRequest(BaseModel):
+    model_name: str | None = Field(default=None, max_length=200)
+
+
+class ManualContextSummarizeResponse(BaseModel):
+    ok: bool
+    thread_id: str
+    summarized: bool
+    message: str
+    model_name: str
+    context_window_tokens: int
+    trigger_tokens: int
+    keep_tokens: int
 
 
 class AuthSettings:
@@ -538,6 +555,93 @@ def create_webapp() -> FastAPI:
             display_name=display_name,
             generated=True,
         )
+
+    @app.post(
+        "/v1/threads/{thread_id}/context-summarize",
+        response_model=ManualContextSummarizeResponse,
+        tags=["threads"],
+    )
+    async def summarize_thread_context_v1(
+        thread_id: str,
+        payload: ManualContextSummarizeRequest,
+        request: Request,
+    ) -> ManualContextSummarizeResponse:
+        normalized_thread_id = thread_id.strip()
+        if not normalized_thread_id:
+            raise ApiError(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                code="invalid_thread_id",
+                message="thread_id is required.",
+            )
+
+        user_id = _auth_user_id(request)
+        try:
+            result = await manually_summarize_thread_context(
+                thread_id=normalized_thread_id,
+                user_id=user_id,
+                model_name=payload.model_name,
+            )
+        except Exception as exc:
+            if "No checkpointer set" not in str(exc):
+                raise ApiError(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    code="context_summarize_failed",
+                    message=f"Failed to summarize thread context: {exc}",
+                ) from exc
+
+            base_url = str(request.base_url).rstrip("/")
+            headers: dict[str, str] = {"x-bioagent-user-id": user_id}
+            auth_header = request.headers.get("authorization")
+            if auth_header:
+                headers["authorization"] = auth_header
+            async with httpx.AsyncClient(timeout=20.0, headers=headers) as client:
+                state_response = await client.get(f"{base_url}/threads/{normalized_thread_id}/state")
+                if state_response.status_code >= 400:
+                    raise ApiError(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        code="context_summarize_failed",
+                        message=(
+                            "Failed to load thread state for manual summarization: "
+                            f"{state_response.status_code} {state_response.text}"
+                        ),
+                    )
+                state_payload = state_response.json()
+                state_values = state_payload.get("values")
+                if not isinstance(state_values, dict):
+                    state_values = {}
+
+                update, result = await build_manual_context_summary_update(
+                    state_values=state_values,
+                    model_name=(payload.model_name or "").strip() or os.getenv("BIOAGENT_MODEL", "anthropic/claude-sonnet-4.6"),
+                )
+                result["thread_id"] = normalized_thread_id
+                if update:
+                    update_response = await client.post(
+                        f"{base_url}/threads/{normalized_thread_id}/state",
+                        json={
+                            "values": update,
+                            "checkpoint": state_payload.get("checkpoint"),
+                            "checkpoint_id": state_payload.get("checkpoint_id"),
+                            "as_node": "model",
+                        },
+                    )
+                    if update_response.status_code >= 400:
+                        raise ApiError(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            code="context_summarize_failed",
+                            message=(
+                                "Failed to update thread state during manual summarization: "
+                                f"{update_response.status_code} {update_response.text}"
+                            ),
+                        )
+        except Exception as exc:
+            raise ApiError(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                code="context_summarize_failed",
+                message=f"Failed to summarize thread context: {exc}",
+            ) from exc
+
+        return ManualContextSummarizeResponse.model_validate(result)
 
     @app.get("/v1/reports", response_model=ReportsListResponse, tags=["reports"])
     async def list_reports_v1(

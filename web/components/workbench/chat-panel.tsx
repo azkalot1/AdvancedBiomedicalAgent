@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, ChevronDown, Paperclip, Plus, Send, Square } from "lucide-react";
+import { AlertTriangle, ChevronDown, Paperclip, Plus, RefreshCcw, Send, Square } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Virtuoso } from "react-virtuoso";
@@ -10,7 +10,6 @@ import rehypeRaw from "rehype-raw";
 import {
   createThread,
   generateThreadDisplayName,
-  getPromptTokensFromStreamEvent,
   getThreadState,
   getTokenChunkFromEvent,
   listReports,
@@ -20,6 +19,7 @@ import {
   parseThreadPromptTokens,
   setThreadDisplayName,
   setThreadResponseFeedback,
+  summarizeThreadContext,
   streamRun
 } from "@/lib/backend-client";
 import { reportDisplayName, threadDisplayName } from "@/lib/display-names";
@@ -187,7 +187,21 @@ function toToolEvent(payload: Record<string, unknown>): ToolEvent | null {
     return {
       id: `${type}-${Date.now()}`,
       type: type as ToolEvent["type"],
-      timestamp: new Date().toISOString()
+      timestamp: typeof payload.timestamp === "string" ? payload.timestamp : new Date().toISOString(),
+      message: typeof payload.message === "string" ? payload.message : undefined,
+      reason: typeof payload.reason === "string" ? payload.reason : undefined,
+      argsPreview: normalizeArgsPreview(
+        isRecord(payload)
+          ? {
+              ...(typeof payload.model_name === "string" ? { model_name: payload.model_name } : {}),
+              ...(typeof payload.context_window_tokens === "number"
+                ? { context_window_tokens: payload.context_window_tokens }
+                : {}),
+              ...(typeof payload.trigger_tokens === "number" ? { trigger_tokens: payload.trigger_tokens } : {}),
+              ...(typeof payload.keep_tokens === "number" ? { keep_tokens: payload.keep_tokens } : {})
+            }
+          : undefined
+      )
     };
   }
 
@@ -298,6 +312,7 @@ export function ChatPanel(): React.ReactElement {
   const isStreaming = useBioAgentStore((state) => state.isStreaming);
   const setStreaming = useBioAgentStore((state) => state.setStreaming);
   const pushToolEvent = useBioAgentStore((state) => state.pushToolEvent);
+  const toolEvents = useBioAgentStore((state) => state.toolEvents);
   const setConnection = useBioAgentStore((state) => state.setConnection);
   const setCurrentPromptTokens = useBioAgentStore((state) => state.setCurrentPromptTokens);
   const starterPromptCategories = useBioAgentStore((state) => state.starterPromptCategories);
@@ -305,6 +320,7 @@ export function ChatPanel(): React.ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [threadMenuOpen, setThreadMenuOpen] = useState(false);
   const [threadsLoading, setThreadsLoading] = useState(false);
+  const [manualSummarizing, setManualSummarizing] = useState(false);
   const [canInterrupt, setCanInterrupt] = useState(false);
   const [openReasonMenuTurn, setOpenReasonMenuTurn] = useState<string | null>(null);
   const [feedbackSavingByTurn, setFeedbackSavingByTurn] = useState<Record<string, boolean>>({});
@@ -355,6 +371,11 @@ export function ChatPanel(): React.ReactElement {
     }
     return map;
   }, [messages]);
+
+  const latestContextNoticeEvent = useMemo(
+    () => toolEvents.find((event) => event.type === "context_updated" && typeof event.message === "string"),
+    [toolEvents]
+  );
 
   const regenerateStarterPromptSuggestions = (): void => {
     setStarterPromptSuggestions(pickStarterPromptSuggestions(starterPromptCategories, 5));
@@ -415,6 +436,42 @@ export function ChatPanel(): React.ReactElement {
       setThreads([]);
     } finally {
       setThreadsLoading(false);
+    }
+  };
+
+  const manuallySummarizeContext = async (): Promise<void> => {
+    if (!threadId || isStreaming || manualSummarizing) {
+      return;
+    }
+
+    setError(null);
+    setManualSummarizing(true);
+    try {
+      const summaryResult = await summarizeThreadContext(threadId, model);
+      await loadThreadSession(threadId);
+      if (summaryResult.summarized) {
+        pushToolEvent({
+          id: `manual-context-summary-${Date.now()}`,
+          type: "context_updated",
+          timestamp: new Date().toISOString(),
+          reason: "conversation_summarized",
+          message: summaryResult.message,
+          argsPreview: {
+            model_name: summaryResult.model_name,
+            context_window_tokens: summaryResult.context_window_tokens,
+            trigger_tokens: summaryResult.trigger_tokens,
+            keep_tokens: summaryResult.keep_tokens,
+            source: "manual"
+          }
+        });
+      }
+      setConnection("connected");
+    } catch (summaryError) {
+      const message = summaryError instanceof Error ? summaryError.message : "Failed to summarize thread context.";
+      setError(message);
+      setConnection("degraded");
+    } finally {
+      setManualSummarizing(false);
     }
   };
 
@@ -583,10 +640,6 @@ export function ChatPanel(): React.ReactElement {
           appendAssistantToken(assistantMessageId, chunk);
           emittedTokens += estimateTokens(chunk);
         }
-        const streamPromptTokens = getPromptTokensFromStreamEvent(event);
-        if (streamPromptTokens !== null) {
-          setCurrentPromptTokens(streamPromptTokens);
-        }
 
         const toolEvents = extractToolEventsFromStream(event);
         for (const toolEvent of toolEvents) {
@@ -690,6 +743,16 @@ export function ChatPanel(): React.ReactElement {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={() => void manuallySummarizeContext()}
+            className="inline-flex items-center gap-1 rounded-md border border-amber-400/45 bg-amber-400/10 px-2 py-1 text-xs text-amber-200 hover:border-amber-300/80 disabled:opacity-50"
+            disabled={!threadId || isStreaming || manualSummarizing}
+            title="Manually summarize conversation context"
+          >
+            <RefreshCcw className={cn("h-3.5 w-3.5", manualSummarizing ? "animate-spin" : "")} />
+            Summarize Context
+          </button>
+          <button
+            type="button"
             onClick={startNewChat}
             className="inline-flex items-center gap-1 rounded-md border border-accent-cyan/45 bg-accent-cyan/10 px-2 py-1 text-xs text-accent-cyan hover:border-accent-cyan/75 disabled:opacity-50"
             disabled={isStreaming}
@@ -734,6 +797,11 @@ export function ChatPanel(): React.ReactElement {
       </div>
 
       <div className="min-h-0 flex-1">
+        {latestContextNoticeEvent?.message ? (
+          <div className="border-b border-amber-500/25 bg-amber-500/8 px-4 py-2 text-xs text-amber-100">
+            {latestContextNoticeEvent.message}
+          </div>
+        ) : null}
         {messages.length === 0 ? (
           <div className="h-full overflow-y-auto px-4 py-5">
             <p className="mb-3 text-sm font-medium text-zinc-200">Example prompts</p>

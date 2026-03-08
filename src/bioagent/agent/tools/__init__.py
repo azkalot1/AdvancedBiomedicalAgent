@@ -11,6 +11,7 @@ from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, StructuredTool
 
 from .dbsearch import DBSEARCH_TOOLS
+from .discovery import create_discovery_tools
 from .summarizing import (
     _make_list_tool,
     _make_retrieve_tool,
@@ -19,6 +20,16 @@ from .summarizing import (
 from .target_search import TARGET_SEARCH_TOOLS
 from .thinking import think
 from .web_search import WEB_SEARCH_TOOLS
+
+ALL_BASE_TOOLS = [think] + DBSEARCH_TOOLS + TARGET_SEARCH_TOOLS + WEB_SEARCH_TOOLS
+RETRIEVE_FULL_OUTPUT_TOOL = _make_retrieve_tool()
+LIST_RESEARCH_OUTPUTS_TOOL = _make_list_tool()
+LIST_AVAILABLE_TOOLS_TOOL, REQUEST_TOOLS_TOOL = create_discovery_tools(
+    db_tools=DBSEARCH_TOOLS,
+    target_tools=TARGET_SEARCH_TOOLS,
+    web_tools=WEB_SEARCH_TOOLS,
+    utility_tools=[think, RETRIEVE_FULL_OUTPUT_TOOL, LIST_RESEARCH_OUTPUTS_TOOL],
+)
 
 
 def _truthy(value: Any) -> bool:
@@ -196,10 +207,12 @@ def get_summarized_tools(
         for tool in all_tools
     ]
     
-    # Add report retrieval/listing tools
+    # Add utility/discovery tools without summarization wrappers.
     wrapped_tools.extend([
-        with_tool_status_streaming(_make_retrieve_tool()),
-        with_tool_status_streaming(_make_list_tool()),
+        with_tool_status_streaming(RETRIEVE_FULL_OUTPUT_TOOL),
+        with_tool_status_streaming(LIST_RESEARCH_OUTPUTS_TOOL),
+        with_tool_status_streaming(LIST_AVAILABLE_TOOLS_TOOL),
+        with_tool_status_streaming(REQUEST_TOOLS_TOOL),
     ])
     return wrapped_tools
 
@@ -209,6 +222,9 @@ __all__ = [
     "DBSEARCH_TOOLS",
     "TARGET_SEARCH_TOOLS",
     "WEB_SEARCH_TOOLS",
+    "ALL_BASE_TOOLS",
+    "LIST_AVAILABLE_TOOLS_TOOL",
+    "REQUEST_TOOLS_TOOL",
     "make_summarizing_tool",
     "get_summarized_tools",
     "with_tool_status_streaming",

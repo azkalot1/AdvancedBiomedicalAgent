@@ -17,6 +17,7 @@ Usage:
   $(basename "$0") [options] [-- <extra npm args>]
 
 Options:
+  --quick                Use dev-quick (no Postgres/Docker; in-memory checkpointer)
   --server-url URL       Aegra server URL (default: ${SERVER_URL})
   --wait-seconds N       Wait timeout for backend readiness (default: ${WAIT_SECONDS})
   --log-path PATH        Aegra log path (default: ${LOG_PATH})
@@ -31,9 +32,14 @@ USAGE
 }
 
 EXTRA_WEB_ARGS=()
+QUICK_DEV=
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --quick)
+      QUICK_DEV=1
+      shift
+      ;;
     --server-url)
       SERVER_URL="${2:-}"
       shift 2
@@ -94,8 +100,13 @@ trap cleanup EXIT INT TERM
 mkdir -p "$(dirname "${LOG_PATH}")"
 
 cd "${ROOT_DIR}"
-echo "Starting Aegra server..."
-"${ROOT_DIR}/scripts/run_aegra.sh" dev >"${LOG_PATH}" 2>&1 &
+if [[ -n "${QUICK_DEV}" ]]; then
+  echo "Starting Aegra server (dev-quick, no Postgres)..."
+  "${ROOT_DIR}/scripts/run_aegra.sh" dev-quick >"${LOG_PATH}" 2>&1 &
+else
+  echo "Starting Aegra server..."
+  "${ROOT_DIR}/scripts/run_aegra.sh" dev >"${LOG_PATH}" 2>&1 &
+fi
 LG_PID=$!
 
 echo "Waiting for server at ${SERVER_URL} (timeout ${WAIT_SECONDS}s)..."

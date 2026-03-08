@@ -11,6 +11,7 @@ WAIT_SECONDS="${BIOAGENT_SERVER_WAIT_SECONDS:-90}"
 LOG_PATH="${BIOAGENT_AEGRA_LOG:-$ROOT_DIR/.aegra/server.log}"
 
 EXTRA_CHAT_ARGS=()
+QUICK_DEV=
 
 usage() {
   cat <<EOF
@@ -20,6 +21,7 @@ Usage:
   $(basename "$0") [options] [-- <extra chat args>]
 
 Options:
+  --quick                Use dev-quick (no Postgres/Docker; in-memory checkpointer)
   --server-url URL       Aegra server URL (default: ${SERVER_URL})
   --assistant-id ID      Assistant/graph id (default: ${ASSISTANT_ID})
   --user-id ID           Optional fallback user id for chat client
@@ -37,6 +39,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --quick)
+      QUICK_DEV=1
+      shift
+      ;;
     --server-url)
       SERVER_URL="${2:-}"
       shift 2
@@ -102,8 +108,13 @@ trap cleanup EXIT INT TERM
 mkdir -p "$(dirname "${LOG_PATH}")"
 
 cd "${ROOT_DIR}"
-echo "Starting Aegra server..."
-"${ROOT_DIR}/scripts/run_aegra.sh" dev >"${LOG_PATH}" 2>&1 &
+if [[ -n "${QUICK_DEV}" ]]; then
+  echo "Starting Aegra server (dev-quick, no Postgres)..."
+  "${ROOT_DIR}/scripts/run_aegra.sh" dev-quick >"${LOG_PATH}" 2>&1 &
+else
+  echo "Starting Aegra server..."
+  "${ROOT_DIR}/scripts/run_aegra.sh" dev >"${LOG_PATH}" 2>&1 &
+fi
 LG_PID=$!
 
 echo "Waiting for server at ${SERVER_URL} (timeout ${WAIT_SECONDS}s)..."

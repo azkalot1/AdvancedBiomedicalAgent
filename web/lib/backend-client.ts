@@ -12,6 +12,7 @@ import type {
   ResponseFeedbackRecord
 } from "@/lib/types";
 import { parseEventStream } from "@/lib/sse";
+import { estimateTokens } from "@/lib/token-estimate";
 
 const PROXY_BASE = "/api/backend";
 
@@ -208,6 +209,17 @@ interface ThreadDisplayNameResponse {
   generated: boolean;
 }
 
+interface ManualContextSummarizeResponse {
+  ok: boolean;
+  thread_id: string;
+  summarized: boolean;
+  message: string;
+  model_name: string;
+  context_window_tokens: number;
+  trigger_tokens: number;
+  keep_tokens: number;
+}
+
 interface ThreadRecordResponse {
   id?: string;
   thread_id?: string;
@@ -398,6 +410,18 @@ export async function generateThreadDisplayName(
   });
 }
 
+export async function summarizeThreadContext(
+  threadId: string,
+  modelName?: string
+): Promise<ManualContextSummarizeResponse> {
+  return fetchJson<ManualContextSummarizeResponse>(`/v1/threads/${encodeURIComponent(threadId)}/context-summarize`, {
+    method: "POST",
+    body: JSON.stringify({
+      ...(modelName ? { model_name: modelName } : {})
+    })
+  });
+}
+
 interface LogStarterPromptClickArgs {
   promptText: string;
   categoryId?: string;
@@ -543,38 +567,51 @@ function normalizeRole(raw: unknown): ChatMessage["role"] | null {
   return null;
 }
 
-export function parseThreadMessages(statePayload: Record<string, unknown>): ChatMessage[] {
-  const values = isRecord(statePayload.values) ? statePayload.values : statePayload;
-  const messages = Array.isArray(values.messages) ? values.messages : [];
-
-  const parsed: ChatMessage[] = [];
-  for (let index = 0; index < messages.length; index += 1) {
-    const item = messages[index];
-    if (!isRecord(item)) {
-      continue;
-    }
-    const role = normalizeRole(item.type ?? item.role);
-    if (!role) {
-      continue;
-    }
-    const content = extractText(item.content).trim();
-    if (!content) {
-      continue;
-    }
-    const idRaw = item.id ?? item.message_id;
-    const createdAtRaw = item.created_at ?? item.updated_at ?? item.timestamp;
-    parsed.push({
-      id: typeof idRaw === "string" && idRaw ? idRaw : `msg-${index}`,
-      role,
-      content,
-      createdAt: typeof createdAtRaw === "string" && createdAtRaw ? createdAtRaw : new Date().toISOString(),
-      streaming: false
-    });
+function getMessageAdditionalKwargs(item: Record<string, unknown>): Record<string, unknown> | null {
+  if (isRecord(item.additional_kwargs)) {
+    return item.additional_kwargs;
   }
-  return parsed;
+  if (isRecord(item.message) && isRecord((item.message as Record<string, unknown>).additional_kwargs)) {
+    return (item.message as Record<string, unknown>).additional_kwargs as Record<string, unknown>;
+  }
+  return null;
 }
 
-function parsePromptTokensFromMessageRecord(item: Record<string, unknown>): number | null {
+function hasLcSource(item: Record<string, unknown>, expected: string): boolean {
+  const additionalKwargs = getMessageAdditionalKwargs(item);
+  return additionalKwargs?.lc_source === expected;
+}
+
+function getMessageResponseMetadata(item: Record<string, unknown>): Record<string, unknown> | null {
+  if (isRecord(item.response_metadata)) {
+    return item.response_metadata;
+  }
+  if (isRecord(item.message) && isRecord((item.message as Record<string, unknown>).response_metadata)) {
+    return (item.message as Record<string, unknown>).response_metadata as Record<string, unknown>;
+  }
+  return null;
+}
+
+function getContextEditingMetadata(item: Record<string, unknown>): Record<string, unknown> | null {
+  const responseMetadata = getMessageResponseMetadata(item);
+  if (!responseMetadata || !isRecord(responseMetadata.context_editing)) {
+    return null;
+  }
+  return responseMetadata.context_editing as Record<string, unknown>;
+}
+
+function isMainModelNode(metadata: unknown): boolean {
+  if (!isRecord(metadata)) {
+    return true;
+  }
+  const node = metadata.langgraph_node;
+  if (typeof node !== "string") {
+    return true;
+  }
+  return node.trim().toLowerCase() === "model";
+}
+
+function parseMainModelPromptTokensFromRecord(item: Record<string, unknown>): number | null {
   const asNonNegativeInteger = (value: unknown): number | null => {
     if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
       return Math.floor(value);
@@ -614,24 +651,24 @@ function parsePromptTokensFromMessageRecord(item: Record<string, unknown>): numb
     const tokenUsage = isRecord(metadata.token_usage) ? metadata.token_usage : null;
     const usage = isRecord(metadata.usage) ? metadata.usage : null;
     const parsed = firstNumeric(
-      tokenUsage?.total_tokens,
-      tokenUsage?.totalTokens,
       tokenUsage?.prompt_tokens,
       tokenUsage?.promptTokens,
       tokenUsage?.input_tokens,
       tokenUsage?.inputTokens,
-      usage?.total_tokens,
-      usage?.totalTokens,
       usage?.prompt_tokens,
       usage?.promptTokens,
       usage?.input_tokens,
       usage?.inputTokens,
-      metadata.total_tokens,
-      metadata.totalTokens,
       metadata.prompt_tokens,
       metadata.promptTokens,
       metadata.input_tokens,
-      metadata.inputTokens
+      metadata.inputTokens,
+      tokenUsage?.total_tokens,
+      tokenUsage?.totalTokens,
+      usage?.total_tokens,
+      usage?.totalTokens,
+      metadata.total_tokens,
+      metadata.totalTokens
     );
     if (parsed !== null) {
       return parsed;
@@ -640,12 +677,12 @@ function parsePromptTokensFromMessageRecord(item: Record<string, unknown>): numb
 
   if (usageMetadata) {
     const parsed = firstNumeric(
-      usageMetadata.total_tokens,
-      usageMetadata.totalTokens,
       usageMetadata.prompt_tokens,
       usageMetadata.promptTokens,
       usageMetadata.input_tokens,
-      usageMetadata.inputTokens
+      usageMetadata.inputTokens,
+      usageMetadata.total_tokens,
+      usageMetadata.totalTokens
     );
     if (parsed !== null) {
       return parsed;
@@ -654,12 +691,12 @@ function parsePromptTokensFromMessageRecord(item: Record<string, unknown>): numb
 
   if (isRecord(item.token_usage)) {
     const parsed = firstNumeric(
-      (item.token_usage as Record<string, unknown>).total_tokens,
-      (item.token_usage as Record<string, unknown>).totalTokens,
       (item.token_usage as Record<string, unknown>).prompt_tokens,
       (item.token_usage as Record<string, unknown>).promptTokens,
       (item.token_usage as Record<string, unknown>).input_tokens,
-      (item.token_usage as Record<string, unknown>).inputTokens
+      (item.token_usage as Record<string, unknown>).inputTokens,
+      (item.token_usage as Record<string, unknown>).total_tokens,
+      (item.token_usage as Record<string, unknown>).totalTokens
     );
     if (parsed !== null) {
       return parsed;
@@ -669,59 +706,99 @@ function parsePromptTokensFromMessageRecord(item: Record<string, unknown>): numb
   return null;
 }
 
-export function parseThreadPromptTokens(statePayload: Record<string, unknown>): number | null {
+export function parseThreadMessages(statePayload: Record<string, unknown>): ChatMessage[] {
   const values = isRecord(statePayload.values) ? statePayload.values : statePayload;
   const messages = Array.isArray(values.messages) ? values.messages : [];
 
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
+  const parsed: ChatMessage[] = [];
+  for (let index = 0; index < messages.length; index += 1) {
     const item = messages[index];
     if (!isRecord(item)) {
       continue;
     }
-    const tokens = parsePromptTokensFromMessageRecord(item);
-    if (tokens !== null) {
-      return tokens;
+    if (hasLcSource(item, "summarization")) {
+      continue;
     }
+    const role = normalizeRole(item.type ?? item.role);
+    if (!role) {
+      continue;
+    }
+    const content = extractText(item.content).trim();
+    if (!content) {
+      continue;
+    }
+    const idRaw = item.id ?? item.message_id;
+    const createdAtRaw = item.created_at ?? item.updated_at ?? item.timestamp;
+    parsed.push({
+      id: typeof idRaw === "string" && idRaw ? idRaw : `msg-${index}`,
+      role,
+      content,
+      createdAt: typeof createdAtRaw === "string" && createdAtRaw ? createdAtRaw : new Date().toISOString(),
+      streaming: false
+    });
+  }
+  return parsed;
+}
+
+function estimateStateMessageTokens(item: Record<string, unknown>): number {
+  let total = 4;
+
+  const content = extractText(item.content).trim();
+  if (content) {
+    total += estimateTokens(content);
   }
 
-  let fallback: number | null = null;
-  function walk(value: unknown, depth = 0): void {
-    if (fallback !== null || depth > 8 || value == null) {
-      return;
+  const toolCalls = Array.isArray(item.tool_calls) ? item.tool_calls : [];
+  for (const toolCall of toolCalls) {
+    if (!isRecord(toolCall)) {
+      continue;
     }
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        walk(item, depth + 1);
-        if (fallback !== null) {
-          return;
-        }
-      }
-      return;
-    }
-    if (!isRecord(value)) {
-      return;
-    }
-
-    const parsed = parsePromptTokensFromMessageRecord(value);
-    if (parsed !== null) {
-      fallback = parsed;
-      return;
-    }
-
-    for (const nested of Object.values(value)) {
-      walk(nested, depth + 1);
-      if (fallback !== null) {
-        return;
-      }
-    }
+    const toolName = typeof toolCall.name === "string" ? toolCall.name : "";
+    const toolArgs =
+      toolCall.args !== undefined
+        ? toolCall.args
+        : toolCall.arguments !== undefined
+          ? toolCall.arguments
+          : isRecord(toolCall.function)
+            ? toolCall.function.arguments
+            : undefined;
+    total += estimateTokens(
+      JSON.stringify(
+        {
+          name: toolName,
+          args: toolArgs
+        },
+        null,
+        0
+      )
+    );
   }
 
-  walk(statePayload);
-  if (fallback !== null) {
-    return fallback;
+  if (isToolRole(item.type ?? item.role)) {
+    const toolName = typeof item.name === "string" ? item.name : "";
+    const toolCallId = typeof item.tool_call_id === "string" ? item.tool_call_id : "";
+    total += estimateTokens(`${toolName} ${toolCallId}`.trim());
   }
 
-  return null;
+  return total;
+}
+
+export function parseThreadPromptTokens(statePayload: Record<string, unknown>): number | null {
+  const values = isRecord(statePayload.values) ? statePayload.values : statePayload;
+  const messages = Array.isArray(values.messages) ? values.messages : [];
+
+  if (messages.length === 0) {
+    return null;
+  }
+
+  let total = 0;
+  for (const item of messages) {
+    if (!isRecord(item)) {
+      continue;
+    }
+    total += estimateStateMessageTokens(item);
+  }
+  return total;
 }
 
 function isToolRole(raw: unknown): boolean {
@@ -763,6 +840,9 @@ export function parseThreadToolEvents(statePayload: Record<string, unknown>): To
   const messages = Array.isArray(values.messages) ? values.messages : [];
 
   const events: ToolEvent[] = [];
+  let clearedToolResults = 0;
+  let clearedToolInputs = 0;
+  let latestContextEditingTimestamp: string | null = null;
 
   for (let index = 0; index < messages.length; index += 1) {
     const item = messages[index];
@@ -795,6 +875,28 @@ export function parseThreadToolEvents(statePayload: Record<string, unknown>): To
       });
     }
 
+    if (hasLcSource(item, "summarization")) {
+      events.push({
+        id: `state-context-summary-${index}`,
+        type: "context_updated",
+        timestamp: messageTimestamp,
+        reason: "conversation_summarized",
+        message: "Context was automatically summarized to stay within the model context window."
+      });
+      continue;
+    }
+
+    const contextEditing = getContextEditingMetadata(item);
+    if (contextEditing?.cleared === true) {
+      clearedToolResults += 1;
+      latestContextEditingTimestamp = messageTimestamp;
+    }
+    const clearedToolInputIds = contextEditing?.cleared_tool_inputs;
+    if (Array.isArray(clearedToolInputIds)) {
+      clearedToolInputs += clearedToolInputIds.length;
+      latestContextEditingTimestamp = messageTimestamp;
+    }
+
     if (isToolRole(item.type ?? item.role)) {
       const toolName = typeof item.name === "string" && item.name ? item.name : "unknown_tool";
       const invocationId = typeof item.tool_call_id === "string" && item.tool_call_id ? item.tool_call_id : undefined;
@@ -812,9 +914,28 @@ export function parseThreadToolEvents(statePayload: Record<string, unknown>): To
     }
   }
 
+  if (clearedToolResults > 0 || clearedToolInputs > 0) {
+    events.push({
+      id: "state-context-editing",
+      type: "context_updated",
+      timestamp: latestContextEditingTimestamp ?? new Date().toISOString(),
+      reason: "tool_results_cleared",
+      message: "Older tool results were automatically cleared to stay within the model context window.",
+      argsPreview: {
+        cleared_tool_results: clearedToolResults,
+        cleared_tool_inputs: clearedToolInputs
+      }
+    });
+  }
+
   const deduped = new Map<string, ToolEvent>();
   for (const event of events) {
-    const key = event.invocationId ? `invocation:${event.invocationId}` : `${event.toolName ?? "unknown"}:${event.id}`;
+    const key =
+      event.invocationId
+        ? `invocation:${event.invocationId}`
+        : event.type === "context_updated" && event.reason
+          ? `${event.type}:${event.reason}:${event.timestamp}`
+          : `${event.toolName ?? "unknown"}:${event.id}`;
     if (!deduped.has(key)) {
       deduped.set(key, event);
     }
@@ -850,7 +971,38 @@ function inferRole(value: unknown): string | null {
   return null;
 }
 
+function looksLikeSelectorOutput(value: unknown): boolean {
+  const text = extractText(value).trimStart();
+  if (!text) {
+    return false;
+  }
+  return text.replace(/\s+/g, "").toLowerCase().startsWith('{"tools":[');
+}
+
 function shouldIncludeChunk(payload: unknown, metadata: unknown): boolean {
+  if (isRecord(metadata)) {
+    const node = metadata.langgraph_node;
+    if (typeof node === "string") {
+      const normalizedNode = node.trim().toLowerCase();
+      if (normalizedNode && normalizedNode !== "model") {
+        return false;
+      }
+    }
+  }
+
+  if (isRecord(payload)) {
+    for (const key of ["tool_calls", "tool_call_chunks", "invalid_tool_calls"]) {
+      const value = payload[key];
+      if (Array.isArray(value) && value.length > 0) {
+        return false;
+      }
+    }
+  }
+
+  if (looksLikeSelectorOutput(payload)) {
+    return false;
+  }
+
   if (isRecord(metadata)) {
     const node = metadata.langgraph_node;
     if (typeof node === "string" && node.toLowerCase().includes("tool")) {
@@ -891,48 +1043,24 @@ function normalizeStreamEvent(eventName: string, eventData: unknown): Normalized
 }
 
 export function getPromptTokensFromStreamEvent(event: NormalizedStreamEvent): number | null {
-  let found: number | null = null;
-
-  function walk(value: unknown, depth = 0): void {
-    if (found !== null || depth > 8 || value == null) {
-      return;
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        walk(item, depth + 1);
-        if (found !== null) {
-          return;
-        }
-      }
-      return;
-    }
-    if (!isRecord(value)) {
-      return;
-    }
-
-    const direct = parsePromptTokensFromMessageRecord(value);
-    if (direct !== null) {
-      found = direct;
-      return;
-    }
-    if (isRecord(value.response_metadata)) {
-      const nested = parsePromptTokensFromMessageRecord({ response_metadata: value.response_metadata });
-      if (nested !== null) {
-        found = nested;
-        return;
-      }
-    }
-
-    for (const nestedValue of Object.values(value)) {
-      walk(nestedValue, depth + 1);
-      if (found !== null) {
-        return;
-      }
-    }
+  if (
+    event.mode !== "messages" &&
+    event.mode !== "messages-tuple" &&
+    event.mode !== "messages_tuple" &&
+    event.mode !== "on_chat_model_stream" &&
+    event.mode !== "chat_model_stream"
+  ) {
+    return null;
   }
 
-  walk(event.payload);
-  return found;
+  const payloadTuple = Array.isArray(event.payload) ? event.payload : [event.payload];
+  const payload = payloadTuple[0];
+  const metadata = payloadTuple.length > 1 ? payloadTuple[1] : null;
+  if (!isMainModelNode(metadata) || !isRecord(payload)) {
+    return null;
+  }
+
+  return parseMainModelPromptTokensFromRecord(payload);
 }
 
 export function getTokenChunkFromEvent(event: NormalizedStreamEvent): string {
@@ -956,7 +1084,13 @@ export function getTokenChunkFromEvent(event: NormalizedStreamEvent): string {
   }
 
   if (event.mode === "on_chat_model_stream" || event.mode === "chat_model_stream") {
-    return extractText(event.payload);
+    const payloadTuple = Array.isArray(event.payload) ? event.payload : [event.payload];
+    const payload = payloadTuple[0];
+    const metadata = payloadTuple.length > 1 ? payloadTuple[1] : null;
+    if (!shouldIncludeChunk(payload, metadata)) {
+      return "";
+    }
+    return extractText(payload);
   }
 
   return "";
