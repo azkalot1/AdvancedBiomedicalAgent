@@ -2,7 +2,7 @@
 
 import { Wifi, WifiOff } from "lucide-react";
 
-import { modelDisplayName } from "@/lib/model-catalog";
+import { modelContextUsagePercent, modelContextWindowTokens, modelDisplayName } from "@/lib/model-catalog";
 import { useBioAgentStore } from "@/lib/stores/use-bioagent-store";
 
 function connectionLabel(state: "connected" | "degraded" | "offline"): string {
@@ -20,13 +20,17 @@ export function StatusBar(): React.ReactElement {
   const reports = useBioAgentStore((state) => state.reports);
   const connection = useBioAgentStore((state) => state.connection);
   const currentPromptTokens = useBioAgentStore((state) => state.currentPromptTokens);
-  const displayTotalTokens = currentPromptTokens ?? 0;
+  const displayPromptTokens = currentPromptTokens ?? 0;
+  const contextWindowTokens = modelContextWindowTokens(model);
+  const contextUsedPercent = modelContextUsagePercent(model, displayPromptTokens);
 
   return (
     <footer className="flex h-9 items-center justify-between border-t border-surface-edge/70 bg-surface/90 px-4 text-xs text-zinc-400">
       <div className="flex items-center gap-4">
         <span>Model: {modelDisplayName(model)}</span>
-        <span>Context: {displayTotalTokens.toLocaleString()} total tokens</span>
+        <span title={`${displayPromptTokens.toLocaleString()} / ${contextWindowTokens.toLocaleString()} prompt tokens`}>
+          Context: {contextUsedPercent}% used
+        </span>
         <span>Reports: {reports.length}</span>
       </div>
 

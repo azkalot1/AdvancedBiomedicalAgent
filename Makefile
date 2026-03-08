@@ -6,7 +6,7 @@ PIP ?= pip
 NPM ?= npm
 WEB_DIR := web
 
-.PHONY: help install verify-deps setup-postgres ingest ingest-quick aegra-dev aegra-serve chat chat-stack gui-stack gui-stack-up web-install web-dev web-check users-db users-init users-setup users-list users-add users-reset-pw users-deactivate users-activate users-remove
+.PHONY: help install verify-deps setup-postgres ingest ingest-quick aegra-dev aegra-dev-quick aegra-serve chat chat-stack chat-stack-quick gui-stack gui-stack-quick gui-stack-up web-install web-dev web-dev-quick web-check users-db users-init users-setup users-list users-add users-reset-pw users-deactivate users-activate users-remove
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -29,6 +29,9 @@ ingest-quick: ## Run lightweight prototype ingest profile
 aegra-dev: ## Start Aegra development server
 	./scripts/run_aegra.sh dev
 
+aegra-dev-quick: ## Start Aegra dev without Postgres/Docker (in-memory checkpointer, quick debug)
+	./scripts/run_aegra.sh dev-quick
+
 aegra-serve: ## Start Aegra production server
 	./scripts/run_aegra.sh serve
 
@@ -38,15 +41,24 @@ chat: ## Start CLI chat (assumes Aegra server is already running)
 chat-stack: ## Start Aegra + CLI chat in one command
 	./scripts/run_aegra_and_chat.sh
 
+chat-stack-quick: ## Start Aegra dev-quick + CLI chat (no Postgres/Docker)
+	./scripts/run_aegra_and_chat.sh --quick
+
 gui-stack: ## Start Aegra + Next.js GUI in one command
 	./scripts/run_aegra_and_web.sh
+
+gui-stack-quick: ## Start Aegra dev-quick + Next.js GUI (no Postgres/Docker)
+	./scripts/run_aegra_and_web.sh --quick
+
+web-dev-quick: ## Start Aegra dev-quick + Next.js GUI (no Postgres/Docker)
+	./scripts/run_aegra_and_web.sh --quick
 
 gui-stack-up: ## Start Aegra serve + Next.js GUI in one command
 	./scripts/run_aegra_up_and_web.sh
 web-install: ## Install web dependencies
 	cd $(WEB_DIR) && $(NPM) install
 
-web-dev: ## Run web app in dev mode
+web-dev: ## Run web app in dev mode (assumes Aegra server already running)
 	cd $(WEB_DIR) && $(NPM) run dev
 
 web-check: ## Run web typecheck and lint

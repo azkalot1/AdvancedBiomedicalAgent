@@ -18,11 +18,13 @@ import { FilePlus2, GripVertical, Upload, X } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { useBioAgentStore } from "@/lib/stores/use-bioagent-store";
+import { modelContextUsagePercent, modelContextWindowTokens } from "@/lib/model-catalog";
 import { estimateTokens } from "@/lib/token-estimate";
 import type { ContextItem } from "@/lib/types";
 
-function TokenBudgetRing({ used }: { used: number }): React.ReactElement {
-  const ratio = 1;
+function TokenBudgetRing({ used, max }: { used: number; max: number }): React.ReactElement {
+  const ratio = max > 0 ? Math.max(0, Math.min(1, used / max)) : 0;
+  const percentUsed = Math.max(0, Math.min(100, Math.round(ratio * 100)));
   const radius = 42;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference * (1 - ratio);
@@ -50,8 +52,8 @@ function TokenBudgetRing({ used }: { used: number }): React.ReactElement {
         </defs>
       </svg>
       <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-        <span className="text-2xl font-semibold text-zinc-100">{used.toLocaleString()}</span>
-        <span className="text-xs text-zinc-400">total tokens</span>
+        <span className="text-2xl font-semibold text-zinc-100">{percentUsed}%</span>
+        <span className="text-[11px] text-zinc-400">context used</span>
       </div>
     </div>
   );
@@ -119,10 +121,13 @@ function ContextCard({ item, index }: { item: ContextItem; index: number }): Rea
 
 export function ContextManager(): React.ReactElement {
   const contextItems = useBioAgentStore((state) => state.contextItems);
+  const model = useBioAgentStore((state) => state.model);
   const currentPromptTokens = useBioAgentStore((state) => state.currentPromptTokens);
   const reorderContextItems = useBioAgentStore((state) => state.reorderContextItems);
   const addContextItem = useBioAgentStore((state) => state.addContextItem);
   const promptTokens = currentPromptTokens ?? 0;
+  const contextWindowTokens = modelContextWindowTokens(model);
+  const contextUsedPercent = modelContextUsagePercent(model, promptTokens);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
@@ -248,10 +253,13 @@ export function ContextManager(): React.ReactElement {
 
       <div className="border-b border-surface-edge/60 px-3 py-3">
         <div className="flex items-center gap-3">
-          <TokenBudgetRing used={promptTokens} />
+          <TokenBudgetRing used={promptTokens} max={contextWindowTokens} />
           <div>
             <p className="text-sm text-zinc-300">Active Context</p>
-            <p className="text-xs text-zinc-500">Total tokens from latest model response metadata.</p>
+            <p className="text-xs text-zinc-500">
+              {promptTokens.toLocaleString()} / {contextWindowTokens.toLocaleString()} prompt tokens ({contextUsedPercent}%)
+            </p>
+            <p className="text-xs text-zinc-500">Based on the latest main assistant model turn.</p>
           </div>
         </div>
       </div>

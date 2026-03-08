@@ -117,6 +117,19 @@ export function ToolStatePanel(): React.ReactElement {
                       <div className="text-zinc-500">{safeDate(event.timestamp)}</div>
                     </div>
                   </div>
+                ) : event.type === "context_updated" ? (
+                  <div className="flex items-start gap-2">
+                    <CheckCircle2 className="mt-0.5 h-4 w-4 text-amber-300" />
+                    <div>
+                      <div className="text-zinc-100">{event.message ?? "Context updated"}</div>
+                      <div className="text-zinc-500">{safeDate(event.timestamp)}</div>
+                      {event.argsPreview ? (
+                        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded border border-surface-edge/60 bg-slate-950/60 p-1 text-[10px] text-zinc-300">
+                          {JSON.stringify(event.argsPreview, null, 2)}
+                        </pre>
+                      ) : null}
+                    </div>
+                  </div>
                 ) : (
                   <div className="flex items-start gap-2">
                     <Clock3 className="mt-0.5 h-4 w-4 text-zinc-400" />

@@ -3,14 +3,16 @@
 import { FlaskConical, Settings2 } from "lucide-react";
 
 import { UserMenu } from "@/components/user-menu";
-import { MODEL_CATALOG } from "@/lib/model-catalog";
+import { MODEL_CATALOG, modelContextUsagePercent, modelContextWindowTokens } from "@/lib/model-catalog";
 import { useBioAgentStore } from "@/lib/stores/use-bioagent-store";
 
 export function TopBar(): React.ReactElement {
   const model = useBioAgentStore((state) => state.model);
   const setModel = useBioAgentStore((state) => state.setModel);
   const currentPromptTokens = useBioAgentStore((state) => state.currentPromptTokens);
-  const displayTotalTokens = currentPromptTokens ?? 0;
+  const displayPromptTokens = currentPromptTokens ?? 0;
+  const contextWindowTokens = modelContextWindowTokens(model);
+  const contextUsedPercent = modelContextUsagePercent(model, displayPromptTokens);
 
   return (
     <header className="flex h-14 items-center justify-between border-b border-surface-edge/70 bg-surface/85 px-4 backdrop-blur">
@@ -35,8 +37,11 @@ export function TopBar(): React.ReactElement {
           </select>
         </label>
 
-        <div className="rounded-lg border border-surface-edge bg-surface-raised px-3 py-1.5 text-zinc-300">
-          Context {displayTotalTokens.toLocaleString()} total tokens
+        <div
+          className="rounded-lg border border-surface-edge bg-surface-raised px-3 py-1.5 text-zinc-300"
+          title={`${displayPromptTokens.toLocaleString()} / ${contextWindowTokens.toLocaleString()} prompt tokens`}
+        >
+          Context {contextUsedPercent}% used
         </div>
 
         <button

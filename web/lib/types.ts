@@ -53,6 +53,8 @@ export interface ToolEvent {
   timestamp: string;
   invocationId?: string;
   error?: string;
+  message?: string;
+  reason?: string;
   argsPreview?: Record<string, unknown>;
   report?: ReportFile;
 }

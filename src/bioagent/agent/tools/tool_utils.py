@@ -1,6 +1,40 @@
 import json
 import inspect
 from functools import wraps
+from typing import Any, Callable
+
+from langchain_core.tools import BaseTool
+
+
+def tool_summary(summary: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Attach a concise one-line summary to a tool function."""
+
+    normalized = " ".join((summary or "").split())
+
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        setattr(func, "__tool_summary__", normalized)
+        return func
+
+    return decorator
+
+
+def get_tool_summary(tool: BaseTool) -> str:
+    """Resolve a concise summary for a LangChain tool."""
+
+    for attr in ("coroutine", "func"):
+        wrapped = getattr(tool, attr, None)
+        summary = getattr(wrapped, "__tool_summary__", None)
+        if isinstance(summary, str) and summary.strip():
+            return " ".join(summary.split())
+
+    description = (tool.description or "").strip()
+    if description:
+        for line in description.splitlines():
+            first_line = line.strip()
+            if first_line:
+                return first_line
+
+    return tool.name
 
 def robust_unwrap_llm_inputs(func):
     """
