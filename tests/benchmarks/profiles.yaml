@@ -1,0 +1,153 @@
+profiles:
+  baseline_gemini_3_1_flash_lite_preview_all_tools:
+    model:
+      provider: openrouter
+      model_name: google/gemini-3.1-flash-lite-preview
+      temperature: 0.0
+    server:
+      base_url: http://localhost:8000
+      assistant_id: co_scientist
+      timeout_seconds: 180
+    run_policy:
+      max_total_tool_calls: 6
+      max_tools_per_step: 4
+      concurrency: 3
+
+  baseline_gemini_3_1_flash_lite_preview_no_tools:
+    model:
+      provider: openrouter
+      model_name: google/gemini-3.1-flash-lite-preview
+      temperature: 0.0
+    server:
+      base_url: http://localhost:8000
+      assistant_id: co_scientist
+      timeout_seconds: 180
+    run_policy:
+      tool_mode: none
+      concurrency: 3
+
+  gemini-3-flash-preview:
+    model:
+      provider: openrouter
+      model_name: google/gemini-3-flash-preview
+      temperature: 0.0
+    server:
+      base_url: http://localhost:8000
+      assistant_id: co_scientist
+      timeout_seconds: 1800
+    run_policy:
+      max_total_tool_calls: 100
+      max_tools_per_step: 7
+      concurrency: 3
+
+  gemini-3.1-flash-lite-preview:
+    model:
+      provider: openrouter
+      model_name: google/gemini-3.1-flash-lite-preview
+      temperature: 0.0
+    server:
+      base_url: http://localhost:8000
+      assistant_id: co_scientist
+      timeout_seconds: 1800
+    run_policy:
+      max_total_tool_calls: 100
+      max_tools_per_step: 7
+      concurrency: 3
+
+  kimi-k2.5:
+    model:
+      provider: openrouter
+      model_name: moonshotai/kimi-k2.5
+      temperature: 0.0
+    server:
+      base_url: http://localhost:8000
+      assistant_id: co_scientist
+      timeout_seconds: 1800
+    run_policy:
+      max_total_tool_calls: 100
+      max_tools_per_step: 7
+      concurrency: 20
+
+  minimax-m2.5:
+    model:
+      provider: openrouter
+      model_name: minimax/minimax-m2.5
+      temperature: 0.0
+    server:
+      base_url: http://localhost:8000
+      assistant_id: co_scientist
+      timeout_seconds: 1800
+    run_policy:
+      max_total_tool_calls: 100
+      max_tools_per_step: 7
+      concurrency: 20
+
+  glm-5:
+    model:
+      provider: openrouter
+      model_name: z-ai/glm-5
+      temperature: 0.0
+    server:
+      base_url: http://localhost:8000
+      assistant_id: co_scientist
+      timeout_seconds: 1800
+    run_policy:
+      max_total_tool_calls: 100
+      max_tools_per_step: 7
+      concurrency: 20
+
+  qwen3.5-35b-a3b:
+    model:
+      provider: openrouter
+      model_name: qwen/qwen3.5-35b-a3b
+      temperature: 0.0
+    server:
+      base_url: http://localhost:8000
+      assistant_id: co_scientist
+      timeout_seconds: 1800
+    run_policy:
+      max_total_tool_calls: 100
+      max_tools_per_step: 7
+      concurrency: 20  
+
+  qwen3.5-397b-a17b:
+    model:
+      provider: openrouter
+      model_name: qwen/qwen3.5-397b-a17b
+      temperature: 0.0
+    server:
+      base_url: http://localhost:8000
+      assistant_id: co_scientist
+      timeout_seconds: 1800
+    run_policy:
+      max_total_tool_calls: 100
+      max_tools_per_step: 7
+      concurrency: 20  
+
+  gemini-3.1-pro-preview:
+    model:
+      provider: openrouter
+      model_name: google/gemini-3.1-pro-preview
+      temperature: 0.0
+    server:
+      base_url: http://localhost:8000
+      assistant_id: co_scientist
+      timeout_seconds: 1800
+    run_policy:
+      max_total_tool_calls: 100
+      max_tools_per_step: 7
+      concurrency: 20  
+
+
+  gemini-3.1-pro-preview-only-thinking:
+    model:
+      provider: openrouter
+      model_name: google/gemini-3.1-pro-preview
+      temperature: 0.0
+    server:
+      base_url: http://localhost:8000
+      assistant_id: co_scientist
+      timeout_seconds: 1800
+    run_policy:
+      tool_mode: none
+      concurrency: 20  

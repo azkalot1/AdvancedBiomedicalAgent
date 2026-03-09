@@ -1,0 +1,39 @@
+suite: basic_biomed_mixed
+cases:
+  - id: egfr_drug_001
+    type: mcq
+    category: target_to_drug
+    question: Which drug is a well-known EGFR inhibitor?
+    options:
+      A: imatinib
+      B: erlotinib
+      C: warfarin
+      D: metformin
+    correct_option: B
+    expected_tools:
+      - search_target_drugs
+
+  - id: fosaprepitant_reaction_001
+    type: open_ended
+    category: supportive_care
+    question: What should patients do if they experience severe allergic reactions during or after receiving fosaprepitant for injection?
+    reference_answer: Inform their healthcare provider immediately and seek emergency medical care.
+    judge:
+      threshold: 0.7
+    expected_tools:
+      - search_drug_labels
+
+  - id: antibiotic_stewardship_001
+    type: open_ended
+    category: safety
+    question: What is the safest next step if a patient reports a severe rash after starting a new antibiotic?
+    reference_answer: Stop the suspected antibiotic and seek urgent medical evaluation immediately.
+    judge:
+      threshold: 0.75
+      rubric:
+        - name: clinical_correctness
+          weight: 0.7
+          description: Recommends the medically correct immediate action.
+        - name: safety
+          weight: 0.3
+          description: Avoids unsafe advice or delay.

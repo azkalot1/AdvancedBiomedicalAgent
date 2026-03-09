@@ -219,3 +219,7 @@ web/.env.local
 web/.env.development.local
 web/.env.test.local
 web/.env.production.local
+
+
+benchmark_viewer/node_modules/
+benchmark_viewer/.next/
