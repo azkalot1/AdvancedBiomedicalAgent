@@ -113,7 +113,7 @@ def show_help() -> None:
     print("  biomedagent-db ingest --ctgov-enriched-search-only   # standalone enriched search table")
     print("  biomedagent-db extract-schema --output schema.txt --sample-rows 5")
     print("  biomedagent-db chat --server-url http://localhost:8000 --user-id alice")
-    print("  biomedagent-db benchmark run --suite tests/benchmarks/mcq --output-dir benchmark_runs")
+    print("  biomedagent-db benchmark run --suite benchmarks/curebench/suites/mcq.yaml --output-dir benchmarks/curebench/runs/manual")
 
 
 def route_setup_postgres() -> NoReturn:

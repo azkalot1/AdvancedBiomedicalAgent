@@ -65,12 +65,14 @@ def get_chat_model(
         )  # type: ignore[no-any-return]
 
     if provider == "openrouter":
-        _api_key = os.getenv("OPENROUTER_API_KEY")
-        _base_url = os.getenv("OPENROUTER_BASE_URL")
+        _api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+        _base_url = base_url or os.getenv("OPENROUTER_BASE_URL")
         return ChatOpenAI(
             model=model_name,
             api_key=_api_key,
             base_url=_base_url,
+            max_retries=max_retries,
+            timeout=request_timeout,
             **model_parameters,
         )
 

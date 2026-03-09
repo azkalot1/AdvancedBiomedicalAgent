@@ -9,7 +9,7 @@ function viewerRoot(): string {
   return process.env.BENCHMARK_VIEWER_ROOT || path.resolve(process.cwd(), "..");
 }
 
-async function discoverManifestPaths(rootDir: string, maxDepth = 4, currentDepth = 0): Promise<string[]> {
+async function discoverManifestPaths(rootDir: string, maxDepth = 7, currentDepth = 0): Promise<string[]> {
   const manifests: string[] = [];
   const entries = await readdir(rootDir, { withFileTypes: true });
 
@@ -35,6 +35,21 @@ async function loadJsonFile<T>(filePath: string): Promise<T> {
   return JSON.parse(raw) as T;
 }
 
+function inferDatasetAndModel(relativeRunPath: string, manifest: RunManifest): { datasetKey: string; modelBucket: string } {
+  const pathParts = relativeRunPath.split(path.sep).filter(Boolean);
+  const runsIndex = pathParts.indexOf("runs");
+  if (runsIndex >= 1) {
+    return {
+      datasetKey: pathParts[runsIndex - 1] || manifest.suite_name,
+      modelBucket: pathParts[runsIndex + 1] || manifest.profile.name
+    };
+  }
+  return {
+    datasetKey: pathParts[0] || manifest.suite_name,
+    modelBucket: pathParts[1] || manifest.profile.name
+  };
+}
+
 export async function loadRunIndexes(): Promise<RunIndexRecord[]> {
   const rootDir = viewerRoot();
   const manifestPaths = await discoverManifestPaths(rootDir);
@@ -45,13 +60,13 @@ export async function loadRunIndexes(): Promise<RunIndexRecord[]> {
     const summaryPath = path.join(path.dirname(manifestPath), manifest.files.summary_json);
     const summary = await loadJsonFile<RunSummaryPayload>(summaryPath);
     const relativeRunPath = path.relative(rootDir, path.dirname(manifestPath));
-    const pathParts = relativeRunPath.split(path.sep).filter(Boolean);
+    const inferred = inferDatasetAndModel(relativeRunPath, manifest);
     indexes.push({
       manifest,
       summary,
       relativeRunPath,
-      datasetKey: pathParts[0] || manifest.suite_name,
-      modelBucket: pathParts[1] || manifest.profile.name
+      datasetKey: inferred.datasetKey,
+      modelBucket: inferred.modelBucket
     });
   }
 

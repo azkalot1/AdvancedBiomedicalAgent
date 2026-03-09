@@ -177,6 +177,15 @@ def _runtime_benchmark_disallowed_tools() -> list[str]:
     return _runtime_benchmark_tool_names("benchmark_disallowed_tools")
 
 
+def _runtime_benchmark_tool_mode() -> str:
+    configurable = _runtime_configurable()
+    raw_value = configurable.get("benchmark_tool_mode")
+    value = str(raw_value or "all").strip().lower().replace("-", "_")
+    if value not in {"all", "selective", "none"}:
+        return "all"
+    return value
+
+
 def _runtime_benchmark_max_tools_per_step(*, default: int | None = None) -> int | None:
     configurable = _runtime_configurable()
     raw_value = configurable.get("benchmark_max_tools_per_step")
@@ -738,9 +747,12 @@ class BenchmarkToolPolicyMiddleware(AgentMiddleware):
 
     @staticmethod
     def _filtered_tools(tools: list[Any]) -> list[Any]:
+        tool_mode = _runtime_benchmark_tool_mode()
+        if tool_mode == "none":
+            return []
         allowed = set(_runtime_benchmark_allowed_tools())
         disallowed = set(_runtime_benchmark_disallowed_tools())
-        if not allowed and not disallowed:
+        if tool_mode == "all" and not allowed and not disallowed:
             return tools
 
         filtered: list[Any] = []
@@ -832,6 +844,8 @@ class DiscoveryAwareLLMToolSelectorMiddleware(LLMToolSelectorMiddleware):
         return requested
 
     def _prepare_selection_request(self, request: ModelRequest) -> Any:
+        if _runtime_benchmark_tool_mode() == "none":
+            return None
         requested = self._extract_requested_tools(getattr(request, "state", None))
         merged = list(dict.fromkeys([*self._base_always_include, *requested]))
         previous = list(self.always_include)

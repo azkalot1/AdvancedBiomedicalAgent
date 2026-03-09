@@ -1,6 +1,7 @@
 "use client";
 
 import type { LoadedRunData } from "@/src/lib/types";
+import { formatLoadedRunDisplayName, formatRunSecondaryLabel } from "@/src/lib/run-labels";
 
 interface MetricsDashboardProps {
   runs: LoadedRunData[];
@@ -8,7 +9,9 @@ interface MetricsDashboardProps {
 
 export function MetricsDashboard({ runs }: MetricsDashboardProps): React.ReactElement {
   const categoryNames = Array.from(new Set(runs.flatMap((run) => Object.keys(run.summary.by_category)))).sort();
+  const typeNames = Array.from(new Set(runs.flatMap((run) => Object.keys(run.summary.by_type ?? {})))).sort();
   const toolNames = Array.from(new Set(runs.flatMap((run) => Object.keys(run.summary.tool_usage)))).sort();
+  const scoreDimensionNames = Array.from(new Set(runs.flatMap((run) => Object.keys(run.summary.score_dimensions ?? {})))).sort();
   const chartRows = comparisonChartRows(runs);
 
   return (
@@ -25,7 +28,8 @@ export function MetricsDashboard({ runs }: MetricsDashboardProps): React.ReactEl
                   <th style={thStyle}>Metric</th>
                   {runs.map((run) => (
                     <th key={run.manifest.run_id} style={thStyle}>
-                      {run.manifest.profile.model.model_name}
+                      <div>{formatLoadedRunDisplayName(run)}</div>
+                      <div style={headerSubLabelStyle}>{formatRunSecondaryLabel(run.manifest)}</div>
                     </th>
                   ))}
                 </tr>
@@ -79,7 +83,8 @@ export function MetricsDashboard({ runs }: MetricsDashboardProps): React.ReactEl
                       <th style={thStyle}>Category</th>
                       {runs.map((run) => (
                         <th key={run.manifest.run_id} style={thStyle}>
-                          {run.manifest.profile.model.model_name}
+                          <div>{formatLoadedRunDisplayName(run)}</div>
+                          <div style={headerSubLabelStyle}>{formatRunSecondaryLabel(run.manifest)}</div>
                         </th>
                       ))}
                     </tr>
@@ -104,6 +109,77 @@ export function MetricsDashboard({ runs }: MetricsDashboardProps): React.ReactEl
             </div>
           ) : null}
 
+          {typeNames.length > 0 ? (
+            <div style={{ marginTop: 20 }}>
+              <h3 style={subheadingStyle}>Question Type Breakdown</h3>
+              <div style={{ overflowX: "auto" }}>
+                <table style={tableStyle}>
+                  <thead>
+                    <tr>
+                      <th style={thStyle}>Type</th>
+                      {runs.map((run) => (
+                        <th key={run.manifest.run_id} style={thStyle}>
+                          <div>{formatLoadedRunDisplayName(run)}</div>
+                          <div style={headerSubLabelStyle}>{formatRunSecondaryLabel(run.manifest)}</div>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {typeNames.map((typeName) => (
+                      <tr key={typeName}>
+                        <td style={tdLabelStyle}>{typeName}</td>
+                        {runs.map((run) => {
+                          const stats = run.summary.by_type?.[typeName];
+                          return (
+                            <td key={`${run.manifest.run_id}-${typeName}`} style={tdStyle}>
+                              {stats ? `${(stats.accuracy * 100).toFixed(1)}% (${stats.correct}/${stats.total})` : "n/a"}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+
+          {scoreDimensionNames.length > 0 ? (
+            <div style={{ marginTop: 20 }}>
+              <h3 style={subheadingStyle}>Judge Dimensions</h3>
+              <div style={{ overflowX: "auto" }}>
+                <table style={tableStyle}>
+                  <thead>
+                    <tr>
+                      <th style={thStyle}>Dimension</th>
+                      {runs.map((run) => (
+                        <th key={run.manifest.run_id} style={thStyle}>
+                          <div>{formatLoadedRunDisplayName(run)}</div>
+                          <div style={headerSubLabelStyle}>{formatRunSecondaryLabel(run.manifest)}</div>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {scoreDimensionNames.map((dimensionName) => (
+                      <tr key={dimensionName}>
+                        <td style={tdLabelStyle}>{dimensionName}</td>
+                        {runs.map((run) => (
+                          <td key={`${run.manifest.run_id}-${dimensionName}`} style={tdStyle}>
+                            {run.summary.score_dimensions?.[dimensionName] == null
+                              ? "n/a"
+                              : run.summary.score_dimensions[dimensionName].toFixed(2)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+
           {toolNames.length > 0 ? (
             <div style={{ marginTop: 20 }}>
               <h3 style={subheadingStyle}>Tool Usage</h3>
@@ -114,7 +190,8 @@ export function MetricsDashboard({ runs }: MetricsDashboardProps): React.ReactEl
                       <th style={thStyle}>Tool</th>
                       {runs.map((run) => (
                         <th key={run.manifest.run_id} style={thStyle}>
-                          {run.manifest.profile.model.model_name}
+                          <div>{formatLoadedRunDisplayName(run)}</div>
+                          <div style={headerSubLabelStyle}>{formatRunSecondaryLabel(run.manifest)}</div>
                         </th>
                       ))}
                     </tr>
@@ -144,8 +221,34 @@ export function MetricsDashboard({ runs }: MetricsDashboardProps): React.ReactEl
 function metricRows(runs: LoadedRunData[]): Array<{ label: string; values: string[] }> {
   return [
     {
+      label: "Pass rate",
+      values: runs.map((run) =>
+        run.summary.summary.pass_rate == null ? "n/a" : `${(run.summary.summary.pass_rate * 100).toFixed(1)}%`
+      )
+    },
+    {
       label: "Accuracy",
       values: runs.map((run) => `${(run.summary.summary.accuracy * 100).toFixed(1)}%`)
+    },
+    {
+      label: "MCQ accuracy",
+      values: runs.map((run) =>
+        run.summary.summary.mcq_accuracy == null ? "n/a" : `${(run.summary.summary.mcq_accuracy * 100).toFixed(1)}%`
+      )
+    },
+    {
+      label: "Open-ended pass rate",
+      values: runs.map((run) =>
+        run.summary.summary.open_ended_pass_rate == null
+          ? "n/a"
+          : `${(run.summary.summary.open_ended_pass_rate * 100).toFixed(1)}%`
+      )
+    },
+    {
+      label: "Average judge score",
+      values: runs.map((run) =>
+        run.summary.summary.average_score == null ? "n/a" : run.summary.summary.average_score.toFixed(2)
+      )
     },
     {
       label: "Invalid format rate",
@@ -181,9 +284,17 @@ function comparisonChartRows(
 ): Array<{ label: string; items: Array<{ label: string; displayValue: string; widthPercent: number }> }> {
   const rows = [
     {
+      label: "Pass rate",
+      values: runs.map((run) => ({
+        label: formatLoadedRunDisplayName(run),
+        numericValue: (run.summary.summary.pass_rate ?? 0) * 100,
+        displayValue: run.summary.summary.pass_rate == null ? "n/a" : `${(run.summary.summary.pass_rate * 100).toFixed(1)}%`
+      }))
+    },
+    {
       label: "Accuracy",
       values: runs.map((run) => ({
-        label: run.manifest.profile.model.model_name,
+        label: formatLoadedRunDisplayName(run),
         numericValue: run.summary.summary.accuracy * 100,
         displayValue: `${(run.summary.summary.accuracy * 100).toFixed(1)}%`
       }))
@@ -191,7 +302,7 @@ function comparisonChartRows(
     {
       label: "Average latency",
       values: runs.map((run) => ({
-        label: run.manifest.profile.model.model_name,
+        label: formatLoadedRunDisplayName(run),
         numericValue: run.summary.summary.average_latency_seconds,
         displayValue: `${run.summary.summary.average_latency_seconds.toFixed(2)}s`
       }))
@@ -199,7 +310,7 @@ function comparisonChartRows(
     {
       label: "Average tool calls",
       values: runs.map((run) => ({
-        label: run.manifest.profile.model.model_name,
+        label: formatLoadedRunDisplayName(run),
         numericValue: run.summary.summary.average_tool_calls,
         displayValue: run.summary.summary.average_tool_calls.toFixed(2)
       }))
@@ -207,7 +318,7 @@ function comparisonChartRows(
     {
       label: "Total tokens",
       values: runs.map((run) => ({
-        label: run.manifest.profile.model.model_name,
+        label: formatLoadedRunDisplayName(run),
         numericValue: run.summary.summary.sum_total_tokens ?? 0,
         displayValue: String(run.summary.summary.sum_total_tokens ?? "n/a")
       }))
@@ -293,6 +404,13 @@ const thStyle: React.CSSProperties = {
   borderBottom: "1px solid rgba(148, 163, 184, 0.2)",
   color: "#bfdbfe",
   fontSize: 13
+};
+
+const headerSubLabelStyle: React.CSSProperties = {
+  color: "#94a3b8",
+  fontSize: 11,
+  fontWeight: 400,
+  marginTop: 4
 };
 
 const tdStyle: React.CSSProperties = {

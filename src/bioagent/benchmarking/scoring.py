@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from bioagent.llm_judge import DEFAULT_PASS_THRESHOLD, LLMJudge
 from .dataset import BenchmarkCase
 
 
@@ -27,6 +28,8 @@ class AnswerExtractionResult:
 
 
 def build_benchmark_prompt(case: BenchmarkCase) -> str:
+    if case.is_open_ended:
+        return build_open_ended_prompt(case)
     option_lines = [f"{letter}. {text}" for letter, text in case.options.items()]
     options_block = "\n".join(option_lines)
     return (
@@ -37,6 +40,16 @@ def build_benchmark_prompt(case: BenchmarkCase) -> str:
         "Do not include anything after the final answer line.\n\n"
         f"Question:\n{case.question}\n\n"
         f"Options:\n{options_block}"
+    )
+
+
+def build_open_ended_prompt(case: BenchmarkCase) -> str:
+    return (
+        "Answer the following biomedical question.\n"
+        "You may use tools if needed.\n"
+        "Provide a concise, directly useful answer grounded in the evidence you find.\n"
+        "Do not use multiple-choice notation unless the question explicitly asks for it.\n\n"
+        f"Question:\n{case.question}"
     )
 
 
@@ -120,7 +133,36 @@ def parse_final_answer(text: str, option_letters: list[str] | tuple[str, ...]) -
     )
 
 
-def score_case_result(case: BenchmarkCase, answer_text: str) -> dict[str, object]:
+def _judge_threshold(case: BenchmarkCase) -> float:
+    threshold = case.judge.get("threshold") if isinstance(case.judge, dict) else None
+    try:
+        return float(DEFAULT_PASS_THRESHOLD if threshold is None else threshold)
+    except (TypeError, ValueError):
+        return DEFAULT_PASS_THRESHOLD
+
+
+def score_case_result(case: BenchmarkCase, answer_text: str, judge: LLMJudge | None = None) -> dict[str, object]:
+    if case.is_open_ended:
+        if judge is None:
+            raise ValueError("Open-ended benchmark scoring requires an LLMJudge instance.")
+        judge_result = judge.evaluate_answer_sync(
+            question=case.question,
+            reference_answer=case.reference_answer or "",
+            candidate_answer=answer_text,
+            threshold=_judge_threshold(case),
+            rubric=case.judge.get("rubric") if isinstance(case.judge, dict) else None,
+        )
+        scoring_type = "llm_judge_rubric" if case.judge.get("rubric") else "llm_judge_reference"
+        return {
+            "answer_status": "passed" if judge_result.passed else "failed",
+            "selected_option": None,
+            "is_correct": judge_result.passed,
+            "expected_option": None,
+            "reference_answer": case.reference_answer,
+            "scoring_type": scoring_type,
+            **judge_result.to_dict(),
+        }
+
     extraction = parse_final_answer(answer_text, case.option_letters())
     if extraction.status != "parsed" or extraction.selected_option is None:
         return {
@@ -128,6 +170,7 @@ def score_case_result(case: BenchmarkCase, answer_text: str) -> dict[str, object
             "selected_option": extraction.selected_option,
             "is_correct": False,
             "expected_option": case.correct_option,
+            "scoring_type": "mcq_exact_match",
             "extraction": extraction.to_dict(),
         }
 
@@ -137,5 +180,6 @@ def score_case_result(case: BenchmarkCase, answer_text: str) -> dict[str, object
         "selected_option": extraction.selected_option,
         "is_correct": is_correct,
         "expected_option": case.correct_option,
+        "scoring_type": "mcq_exact_match",
         "extraction": extraction.to_dict(),
     }

@@ -1,5 +1,6 @@
 "use client";
 
+import { formatIndexRunDisplayName, formatRunSecondaryLabel } from "@/src/lib/run-labels";
 import type { RunIndexRecord } from "@/src/lib/types";
 
 interface RunSelectorProps {
@@ -43,9 +44,10 @@ export function RunSelector({
                 <input type="checkbox" checked={checked} onChange={() => onToggle(run.manifest.run_id)} />
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 600 }}>
-                    {run.manifest.profile.model.model_name}{" "}
+                    {formatIndexRunDisplayName(run)}{" "}
                     <span style={chipStyle}>{run.manifest.profile.model.provider}</span>
                   </div>
+                  <div style={mutedStyle}>{formatRunSecondaryLabel(run.manifest)}</div>
                   <div style={mutedStyle}>
                     run_id: {run.manifest.run_id} | suite: {run.manifest.suite_name}
                   </div>

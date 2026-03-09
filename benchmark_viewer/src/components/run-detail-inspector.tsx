@@ -1,5 +1,6 @@
 "use client";
 
+import { formatLoadedRunDisplayName } from "@/src/lib/run-labels";
 import type { CaseDetailRecord, LoadedRunData } from "@/src/lib/types";
 
 interface RunDetailInspectorProps {
@@ -34,7 +35,7 @@ export function RunDetailInspector({
         >
           {runs.map((run) => (
             <option key={run.manifest.run_id} value={run.manifest.run_id}>
-              {run.manifest.profile.model.model_name}
+              {formatLoadedRunDisplayName(run)}
             </option>
           ))}
         </select>
@@ -51,14 +52,39 @@ export function RunDetailInspector({
           <div style={cardStyle}>
             <div style={headingStyle}>Question</div>
             <div>{detail.case.question}</div>
-            <pre style={preStyle}>{JSON.stringify(detail.case.options, null, 2)}</pre>
+            <div style={mutedStyle}>type: {detail.case.type || "mcq"}</div>
+            {detail.case.type === "open_ended" ? (
+              <pre style={preStyle}>{detail.case.reference_answer || "[missing reference answer]"}</pre>
+            ) : (
+              <pre style={preStyle}>{JSON.stringify(detail.case.options, null, 2)}</pre>
+            )}
           </div>
 
           <div style={cardStyle}>
             <div style={headingStyle}>Answer Summary</div>
             <div>status: {detail.answer_status}</div>
-            <div>selected: {detail.selected_option ?? "n/a"}</div>
-            <div>expected: {detail.expected_option ?? "n/a"}</div>
+            {detail.case.type === "open_ended" ? (
+              <>
+                <div>score: {detail.score_value == null ? "n/a" : detail.score_value.toFixed(2)}</div>
+                <div>threshold: {detail.score_threshold == null ? "n/a" : detail.score_threshold.toFixed(2)}</div>
+                <div>passed: {detail.passed == null ? "n/a" : String(detail.passed)}</div>
+                {detail.judge_notes ? <pre style={preStyle}>{detail.judge_notes}</pre> : null}
+                {detail.score_dimensions && detail.score_dimensions.length > 0 ? (
+                  <pre style={preStyle}>{JSON.stringify(detail.score_dimensions, null, 2)}</pre>
+                ) : null}
+                {detail.judge_missing_points && detail.judge_missing_points.length > 0 ? (
+                  <pre style={preStyle}>{JSON.stringify({ missing_points: detail.judge_missing_points }, null, 2)}</pre>
+                ) : null}
+                {detail.judge_incorrect_statements && detail.judge_incorrect_statements.length > 0 ? (
+                  <pre style={preStyle}>{JSON.stringify({ incorrect_statements: detail.judge_incorrect_statements }, null, 2)}</pre>
+                ) : null}
+              </>
+            ) : (
+              <>
+                <div>selected: {detail.selected_option ?? "n/a"}</div>
+                <div>expected: {detail.expected_option ?? "n/a"}</div>
+              </>
+            )}
             <div>latency: {typeof detail.latency_seconds === "number" ? `${detail.latency_seconds.toFixed(2)}s` : "n/a"}</div>
             <div>
               tokens: {detail.token_usage?.total_tokens ?? "n/a"} (in: {detail.token_usage?.input_tokens ?? "n/a"}, out:{" "}

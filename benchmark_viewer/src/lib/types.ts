@@ -54,6 +54,12 @@ export interface RunSummaryPayload {
     average_total_tokens?: number | null;
     sum_streamed_output_chars?: number;
     average_streamed_output_chars?: number;
+    pass_rate?: number;
+    overall_pass_rate?: number;
+    mcq_accuracy?: number | null;
+    open_ended_pass_rate?: number | null;
+    average_score?: number | null;
+    judge_error_rate?: number | null;
   };
   by_category: Record<
     string,
@@ -66,7 +72,19 @@ export interface RunSummaryPayload {
       accuracy: number;
     }
   >;
+  by_type?: Record<
+    string,
+    {
+      total: number;
+      correct: number;
+      incorrect: number;
+      invalid_format: number;
+      error: number;
+      accuracy: number;
+    }
+  >;
   tool_usage: Record<string, number>;
+  score_dimensions?: Record<string, number>;
 }
 
 export interface RawRunRecord {
@@ -79,9 +97,12 @@ export interface RawRunRecord {
   detail_path?: string;
   case: {
     id: string;
+    type?: string;
     question: string;
     options: Record<string, string>;
-    correct_option: string;
+    correct_option?: string | null;
+    reference_answer?: string | null;
+    judge?: Record<string, unknown>;
     category?: string;
     expected_tools?: string[];
     allowed_tools?: string[];
@@ -98,7 +119,21 @@ export interface RawRunRecord {
   answer_status: string;
   selected_option?: string | null;
   is_correct?: boolean;
-  expected_option?: string;
+  expected_option?: string | null;
+  scoring_type?: string;
+  score_value?: number | null;
+  score_threshold?: number | null;
+  passed?: boolean;
+  score_dimensions?: Array<{
+    name: string;
+    score: number;
+    weight?: number;
+    reasoning?: string;
+  }>;
+  judge_notes?: string;
+  judge_missing_points?: string[];
+  judge_incorrect_statements?: string[];
+  judge_raw_response?: string;
   latency_seconds?: number;
   token_chars?: number;
   token_usage?: {

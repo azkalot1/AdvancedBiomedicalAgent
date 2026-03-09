@@ -41,13 +41,23 @@ def _normalize_str_list(raw_values: Any, *, field_name: str) -> list[str]:
     return values
 
 
+def _normalize_case_type(raw_value: Any) -> str:
+    case_type = str(raw_value or "mcq").strip().lower().replace("-", "_")
+    if case_type not in {"mcq", "open_ended"}:
+        raise ValueError(f"Unsupported benchmark case type '{raw_value}'. Expected 'mcq' or 'open_ended'.")
+    return case_type
+
+
 @dataclass(frozen=True)
 class BenchmarkCase:
     case_id: str
+    case_type: str
     question: str
     options: dict[str, str]
-    correct_option: str
+    correct_option: str | None
+    reference_answer: str | None
     category: str
+    judge: dict[str, Any] = field(default_factory=dict)
     expected_tools: list[str] = field(default_factory=list)
     allowed_tools: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -59,26 +69,47 @@ class BenchmarkCase:
         if not case_id:
             raise ValueError("Benchmark case is missing required field 'id'.")
 
+        case_type = _normalize_case_type(payload.get("type", "mcq"))
         question = str(payload.get("question", "")).strip()
         if not question:
             raise ValueError(f"Benchmark case '{case_id}' is missing required field 'question'.")
 
-        options = _ensure_text_map(payload.get("options"))
-        correct_option = _normalize_option_key(payload.get("correct_option", ""))
-        if correct_option not in options:
-            raise ValueError(
-                f"Benchmark case '{case_id}' has correct_option='{correct_option}', "
-                f"which is not present in options {sorted(options)}."
-            )
+        if case_type == "mcq":
+            options = _ensure_text_map(payload.get("options"))
+            correct_option = _normalize_option_key(payload.get("correct_option", ""))
+            if correct_option not in options:
+                raise ValueError(
+                    f"Benchmark case '{case_id}' has correct_option='{correct_option}', "
+                    f"which is not present in options {sorted(options)}."
+                )
+            reference_answer = None
+        else:
+            raw_options = payload.get("options")
+            options = _ensure_text_map(raw_options) if raw_options is not None else {}
+            correct_option = None
+            if payload.get("correct_option") is not None:
+                correct_option = _normalize_option_key(payload.get("correct_option", ""))
+                if correct_option not in options:
+                    raise ValueError(
+                        f"Benchmark case '{case_id}' has correct_option='{correct_option}', "
+                        f"which is not present in options {sorted(options)}."
+                    )
+            reference_answer = str(payload.get("reference_answer", "")).strip()
+            if not reference_answer:
+                raise ValueError(f"Open-ended benchmark case '{case_id}' is missing required field 'reference_answer'.")
 
         category = str(payload.get("category", "general")).strip() or "general"
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        judge = payload.get("judge") if isinstance(payload.get("judge"), dict) else {}
 
         return cls(
             case_id=case_id,
+            case_type=case_type,
             question=question,
             options=options,
             correct_option=correct_option,
+            reference_answer=reference_answer,
+            judge=dict(judge),
             category=category,
             expected_tools=_normalize_str_list(payload.get("expected_tools"), field_name="expected_tools"),
             allowed_tools=_normalize_str_list(payload.get("allowed_tools"), field_name="allowed_tools"),
@@ -89,12 +120,23 @@ class BenchmarkCase:
     def option_letters(self) -> list[str]:
         return list(self.options)
 
+    @property
+    def is_mcq(self) -> bool:
+        return self.case_type == "mcq"
+
+    @property
+    def is_open_ended(self) -> bool:
+        return self.case_type == "open_ended"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.case_id,
+            "type": self.case_type,
             "question": self.question,
             "options": dict(self.options),
             "correct_option": self.correct_option,
+            "reference_answer": self.reference_answer,
+            "judge": dict(self.judge),
             "category": self.category,
             "expected_tools": list(self.expected_tools),
             "allowed_tools": list(self.allowed_tools),

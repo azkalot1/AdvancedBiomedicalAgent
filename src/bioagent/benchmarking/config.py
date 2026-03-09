@@ -30,6 +30,13 @@ def _string_list(raw_values: Any, *, field_name: str) -> list[str]:
     return [str(item).strip() for item in raw_values if str(item).strip()]
 
 
+def _tool_mode(raw_value: Any) -> str:
+    value = str(raw_value or "all").strip().lower().replace("-", "_")
+    if value not in {"all", "selective", "none"}:
+        raise ValueError(f"Profile field 'run_policy.tool_mode' must be one of: all, selective, none. Got '{raw_value}'.")
+    return value
+
+
 @dataclass(frozen=True)
 class ModelProfile:
     provider: str = "openrouter"
@@ -76,10 +83,12 @@ class BenchmarkServerConfig:
 
 @dataclass(frozen=True)
 class BenchmarkRunPolicy:
+    tool_mode: str = "all"
     allowed_tools: list[str] = field(default_factory=list)
     disallowed_tools: list[str] = field(default_factory=list)
     max_total_tool_calls: int | None = None
     max_tools_per_step: int | None = None
+    retry_attempts: int = 0
     stream_tool_args: bool = False
     per_case_timeout_seconds: float = 180.0
     concurrency: int = 1
@@ -113,10 +122,12 @@ class BenchmarkProfile:
                 "readiness_timeout_seconds": self.server.readiness_timeout_seconds,
             },
             "run_policy": {
+                "tool_mode": self.run_policy.tool_mode,
                 "allowed_tools": list(self.run_policy.allowed_tools),
                 "disallowed_tools": list(self.run_policy.disallowed_tools),
                 "max_total_tool_calls": self.run_policy.max_total_tool_calls,
                 "max_tools_per_step": self.run_policy.max_tools_per_step,
+                "retry_attempts": self.run_policy.retry_attempts,
                 "stream_tool_args": self.run_policy.stream_tool_args,
                 "per_case_timeout_seconds": self.run_policy.per_case_timeout_seconds,
                 "concurrency": self.run_policy.concurrency,
@@ -160,10 +171,12 @@ def _build_profile(name: str, payload: dict[str, Any]) -> BenchmarkProfile:
         readiness_timeout_seconds=float(server_payload.get("readiness_timeout_seconds", 90.0)),
     )
     run_policy = BenchmarkRunPolicy(
+        tool_mode=_tool_mode(run_payload.get("tool_mode", "all")),
         allowed_tools=_string_list(run_payload.get("allowed_tools"), field_name="run_policy.allowed_tools"),
         disallowed_tools=_string_list(run_payload.get("disallowed_tools"), field_name="run_policy.disallowed_tools"),
         max_total_tool_calls=int(run_payload["max_total_tool_calls"]) if run_payload.get("max_total_tool_calls") is not None else None,
         max_tools_per_step=int(run_payload["max_tools_per_step"]) if run_payload.get("max_tools_per_step") is not None else None,
+        retry_attempts=max(0, int(run_payload.get("retry_attempts", 0))),
         stream_tool_args=bool(run_payload.get("stream_tool_args", False)),
         per_case_timeout_seconds=float(run_payload.get("per_case_timeout_seconds", server.timeout_seconds)),
         concurrency=max(1, int(run_payload.get("concurrency", 1))),

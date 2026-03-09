@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -13,12 +12,10 @@ from typing import Any
 from bioagent.agent import get_chat_model
 from bioagent.agent.tools.dbsearch import DBSEARCH_TOOLS
 from bioagent.agent.tools.target_search import TARGET_SEARCH_TOOLS, pharmacology_search
+from bioagent.llm_judge import LLMJudge, load_ground_truth_cases
 
 
 TESTS_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(TESTS_DIR))
-
-from llm_judge import LLMJudge, load_ground_truth_cases  # noqa: E402
 
 
 EXCLUDED_TOOLS = {"search_drug_interactions"}

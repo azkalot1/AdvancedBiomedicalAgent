@@ -13,6 +13,8 @@ from uuid import uuid4
 
 import requests
 
+from bioagent.agent import get_chat_model
+from bioagent.llm_judge import LLMJudge
 from .config import BenchmarkProfile
 from .dataset import BenchmarkCase
 from .scoring import build_benchmark_prompt, score_case_result
@@ -420,6 +422,7 @@ class BenchmarkHttpRunner:
     def __init__(self, profile: BenchmarkProfile) -> None:
         self.profile = profile
         self.session = requests.Session()
+        self.answer_judge: LLMJudge | None = None
         if self.profile.server.api_token:
             self.session.headers.update({"Authorization": f"Bearer {self.profile.server.api_token}"})
 
@@ -429,6 +432,33 @@ class BenchmarkHttpRunner:
 
     def close(self) -> None:
         self.session.close()
+
+    def _get_answer_judge(self) -> LLMJudge:
+        if self.answer_judge is not None:
+            return self.answer_judge
+        try:
+            self.answer_judge = LLMJudge(
+                get_chat_model(
+                    self.profile.model.model_name,
+                    self.profile.model.provider,
+                    {"temperature": 0.0},
+                    request_timeout=self.profile.server.timeout_seconds,
+                    base_url=self.profile.model.base_url,
+                    api_key=self.profile.model.api_key,
+                )
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Open-ended benchmark scoring requires a configured judge model. "
+                "Set the appropriate API key for the selected provider "
+                "(for example `OPENROUTER_API_KEY` for `openrouter` or `OPENAI_API_KEY` for `openai`), "
+                "or run an MCQ-only suite that does not invoke the judge."
+            ) from exc
+        return self.answer_judge
+
+    @staticmethod
+    def _should_retry(payload: dict[str, Any]) -> bool:
+        return str(payload.get("answer_status", "")).strip() in {"invalid_format", "ambiguous", "error"}
 
     def check_health(self) -> tuple[str, requests.Response]:
         paths = [
@@ -506,6 +536,7 @@ class BenchmarkHttpRunner:
             "stream_tool_args": self.profile.run_policy.stream_tool_args,
             "model_name": self.profile.model.model_name,
             "benchmark_run_id": run_id,
+            "benchmark_tool_mode": self.profile.run_policy.tool_mode,
         }
         if allowed_tools:
             configurable["benchmark_allowed_tools"] = allowed_tools
@@ -569,7 +600,7 @@ class BenchmarkHttpRunner:
 
         return "".join(answer_chunks), tool_events, report_ids, token_chars
 
-    def run_case(self, case: BenchmarkCase) -> BenchmarkRunResult:
+    def _run_case_once(self, case: BenchmarkCase) -> BenchmarkRunResult:
         started = perf_counter()
         started_at = datetime.now(timezone.utc).isoformat()
         prompt = build_benchmark_prompt(case)
@@ -600,7 +631,11 @@ class BenchmarkHttpRunner:
             # Score against the latest assistant message from persisted state.
             # The streamed text may contain concatenated chunks from multiple assistant turns.
             final_answer_text = latest_assistant_message_text or streamed_answer_text
-            score = score_case_result(case, final_answer_text)
+            score = score_case_result(
+                case,
+                final_answer_text,
+                judge=self._get_answer_judge() if case.is_open_ended else None,
+            )
             tool_summary = _summarize_tool_events(tool_events)
             token_usage = _extract_state_token_usage(state)
             normalized_messages = _extract_normalized_messages(state)
@@ -651,6 +686,7 @@ class BenchmarkHttpRunner:
                     "answer_status": "error",
                     "selected_option": None,
                     "is_correct": False,
+                    "scoring_type": "error",
                     "error": f"{type(exc).__name__}: {exc}",
                     "tool_events": [],
                     "tool_invocations": [],
@@ -662,6 +698,7 @@ class BenchmarkHttpRunner:
                     "answer_status": "error",
                     "selected_option": None,
                     "is_correct": False,
+                    "scoring_type": "error",
                     "error": f"{type(exc).__name__}: {exc}",
                     "tool_events": [],
                     "tool_invocations": [],
@@ -672,3 +709,45 @@ class BenchmarkHttpRunner:
         result_payload["latency_seconds"] = latency_seconds
         detail_payload["latency_seconds"] = latency_seconds
         return BenchmarkRunResult(result_payload, detail_payload)
+
+    def run_case(self, case: BenchmarkCase) -> BenchmarkRunResult:
+        max_attempts = 1 + max(0, self.profile.run_policy.retry_attempts)
+        retry_history: list[dict[str, Any]] = []
+        final_result: BenchmarkRunResult | None = None
+
+        for attempt_number in range(1, max_attempts + 1):
+            current_result = self._run_case_once(case)
+            payload = current_result.to_dict()
+            detail_payload = current_result.to_detail_dict()
+            status = str(payload.get("answer_status", "unknown"))
+
+            payload["attempt_number"] = attempt_number
+            payload["max_attempts"] = max_attempts
+            detail_payload["attempt_number"] = attempt_number
+            detail_payload["max_attempts"] = max_attempts
+
+            current_result = BenchmarkRunResult(payload, detail_payload)
+            final_result = current_result
+
+            if attempt_number >= max_attempts or not self._should_retry(payload):
+                break
+
+            retry_history.append(
+                {
+                    "attempt_number": attempt_number,
+                    "answer_status": status,
+                    "latency_seconds": payload.get("latency_seconds"),
+                    "error": payload.get("error"),
+                }
+            )
+
+        if final_result is None:
+            raise RuntimeError("Benchmark runner produced no result.")
+
+        final_payload = final_result.to_dict()
+        final_detail = final_result.to_detail_dict()
+        final_payload["retry_count"] = len(retry_history)
+        final_payload["retry_history"] = list(retry_history)
+        final_detail["retry_count"] = len(retry_history)
+        final_detail["retry_history"] = list(retry_history)
+        return BenchmarkRunResult(final_payload, final_detail)

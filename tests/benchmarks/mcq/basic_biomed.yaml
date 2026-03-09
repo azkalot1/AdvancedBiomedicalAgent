@@ -1,0 +1,43 @@
+suite: basic_biomed_mcq
+cases:
+  - id: egfr_drug_001
+    category: target_to_drug
+    question: Which drug is a well-known EGFR inhibitor?
+    options:
+      A: imatinib
+      B: erlotinib
+      C: warfarin
+      D: metformin
+    correct_option: B
+    expected_tools:
+      - search_target_drugs
+    metadata:
+      difficulty: easy
+
+  - id: imatinib_target_001
+    category: drug_to_target
+    question: Which target is strongly associated with imatinib?
+    options:
+      A: ABL1
+      B: PDCD1
+      C: TNF
+      D: PTGS2
+    correct_option: A
+    expected_tools:
+      - search_drug_targets
+    metadata:
+      difficulty: easy
+
+  - id: orange_book_001
+    category: regulatory
+    question: Which tool area would you most likely use to inspect TE codes and exclusivity information for approved drugs?
+    options:
+      A: drug labels only
+      B: clinical trial outcomes only
+      C: Orange Book search
+      D: adverse event search
+    correct_option: C
+    expected_tools:
+      - search_orange_book
+    metadata:
+      difficulty: easy

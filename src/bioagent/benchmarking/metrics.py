@@ -77,9 +77,17 @@ def summarize_results(results: list[dict[str, Any]]) -> dict[str, Any]:
                 "average_total_tokens": None,
                 "sum_streamed_output_chars": 0,
                 "average_streamed_output_chars": 0.0,
+                "pass_rate": 0.0,
+                "overall_pass_rate": 0.0,
+                "mcq_accuracy": None,
+                "open_ended_pass_rate": None,
+                "average_score": None,
+                "judge_error_rate": None,
             },
             "by_category": {},
+            "by_type": {},
             "tool_usage": {},
+            "score_dimensions": {},
         }
 
     counts = Counter()
@@ -94,23 +102,68 @@ def summarize_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     within_budget_correct = 0
     budget_applicable = 0
     category_stats: dict[str, Counter] = defaultdict(Counter)
+    type_stats: dict[str, Counter] = defaultdict(Counter)
     tool_usage = Counter()
+    score_sum = 0.0
+    scored_runs = 0
+    mcq_total = 0
+    mcq_correct = 0
+    open_ended_total = 0
+    open_ended_passed = 0
+    judge_error_count = 0
+    score_dimension_totals: dict[str, float] = defaultdict(float)
+    score_dimension_counts: dict[str, int] = defaultdict(int)
 
     for result in results:
         answer_status = str(result.get("answer_status", "error"))
-        if answer_status not in {"correct", "incorrect", "invalid_format", "ambiguous"}:
+        case_type = str(result.get("case", {}).get("type", "mcq") or "mcq")
+        if answer_status in {"correct", "passed"}:
+            category_status = "correct"
+            counts["correct"] += 1
+        elif answer_status in {"incorrect", "failed"}:
+            category_status = "incorrect"
+            counts["incorrect"] += 1
+        elif answer_status in {"invalid_format", "ambiguous"}:
+            category_status = "invalid_format"
+            counts["invalid_format"] += 1
+        else:
             counts["error"] += 1
             category_status = "error"
-        else:
-            category_status = "invalid_format" if answer_status == "ambiguous" else answer_status
-            counts[category_status] += 1
 
         category = str(result.get("case", {}).get("category", "general"))
         category_stats[category]["total"] += 1
         category_stats[category][category_status] += 1
+        type_stats[case_type]["total"] += 1
+        type_stats[case_type][category_status] += 1
 
         latency_sum += _safe_float(result.get("latency_seconds"))
         token_chars_sum += _safe_int(result.get("token_chars"))
+
+        score_value = result.get("score_value")
+        if isinstance(score_value, (int, float)):
+            score_sum += float(score_value)
+            scored_runs += 1
+        score_dimensions = result.get("score_dimensions")
+        if isinstance(score_dimensions, list):
+            for dimension in score_dimensions:
+                if not isinstance(dimension, dict):
+                    continue
+                name = str(dimension.get("name", "")).strip()
+                if not name:
+                    continue
+                score_dimension_totals[name] += _safe_float(dimension.get("score"))
+                score_dimension_counts[name] += 1
+
+        if case_type == "mcq":
+            mcq_total += 1
+            if category_status == "correct":
+                mcq_correct += 1
+        elif case_type == "open_ended":
+            open_ended_total += 1
+            if category_status == "correct":
+                open_ended_passed += 1
+            if category_status == "error":
+                judge_error_count += 1
 
         token_usage = result.get("token_usage")
         if isinstance(token_usage, dict) and token_usage.get("source") == "usage_metadata":
@@ -151,6 +204,18 @@ def summarize_results(results: list[dict[str, Any]]) -> dict[str, Any]:
             "accuracy": (stats["correct"] / category_total) if category_total else 0.0,
         }
 
+    by_type: dict[str, Any] = {}
+    for case_type, stats in sorted(type_stats.items()):
+        type_total = stats["total"]
+        by_type[case_type] = {
+            "total": type_total,
+            "correct": stats["correct"],
+            "incorrect": stats["incorrect"],
+            "invalid_format": stats["invalid_format"],
+            "error": stats["error"],
+            "accuracy": (stats["correct"] / type_total) if type_total else 0.0,
+        }
+
     summary = {
         "total": total,
         "correct": correct,
@@ -173,9 +238,21 @@ def summarize_results(results: list[dict[str, Any]]) -> dict[str, Any]:
         "sum_streamed_output_chars": token_chars_sum,
         "average_streamed_output_chars": token_chars_sum / total,
         "correct_within_budget_rate": (within_budget_correct / budget_applicable) if budget_applicable else None,
+        "pass_rate": correct / total,
+        "overall_pass_rate": correct / total,
+        "mcq_accuracy": (mcq_correct / mcq_total) if mcq_total else None,
+        "open_ended_pass_rate": (open_ended_passed / open_ended_total) if open_ended_total else None,
+        "average_score": (score_sum / scored_runs) if scored_runs else None,
+        "judge_error_rate": (judge_error_count / open_ended_total) if open_ended_total else None,
     }
     return {
         "summary": summary,
         "by_category": by_category,
+        "by_type": by_type,
         "tool_usage": dict(tool_usage.most_common()),
+        "score_dimensions": {
+            name: score_dimension_totals[name] / score_dimension_counts[name]
+            for name in sorted(score_dimension_totals)
+            if score_dimension_counts[name]
+        },
     }

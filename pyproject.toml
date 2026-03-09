@@ -22,6 +22,7 @@ dependencies = [
   "aegra-cli",
   "langgraph-checkpoint-sqlite",
   "langgraph-checkpoint-postgres",
+  "datasets",
   # Database
   "psycopg2-binary",  # PostgreSQL adapter
   "asyncpg>=0.29.0",  # Async PostgreSQL adapter
@@ -39,6 +40,8 @@ dependencies = [
   "tqdm",             # Progress bars
   "numpy",            # Numerical computing
   "sentence-transformers",  # Semantic embeddings
+  "matplotlib",
+  "seaborn",
   # CLI framework
   "typer",            # CLI framework
   # Jupyter ecosystem

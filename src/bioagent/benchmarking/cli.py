@@ -38,10 +38,22 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--temperature", type=float, default=0.0, help="Primary model temperature")
     run_parser.add_argument("--model-base-url", default=None, help="Model base URL for local/OpenAI-compatible providers")
     run_parser.add_argument("--model-api-key", default=None, help="Model API key for launched server profiles")
+    run_parser.add_argument(
+        "--tool-mode",
+        default="all",
+        choices=["all", "selective", "none"],
+        help="Tool exposure mode: all tools, selective subset, or no tools bound",
+    )
     run_parser.add_argument("--allow-tool", action="append", default=[], help="Allow only the named tool (repeatable)")
     run_parser.add_argument("--deny-tool", action="append", default=[], help="Disallow the named tool (repeatable)")
     run_parser.add_argument("--max-total-tool-calls", type=int, default=None, help="Global tool-call budget per case")
     run_parser.add_argument("--max-tools-per-step", type=int, default=None, help="Max tools exposed per model step")
+    run_parser.add_argument(
+        "--retry-attempts",
+        type=int,
+        default=0,
+        help="Number of extra attempts for invalid-format or error case results",
+    )
     run_parser.add_argument("--stream-tool-args", action="store_true", help="Capture sanitized tool arg previews")
     run_parser.add_argument("--timeout", type=float, default=180.0, help="Per-case timeout and default server timeout")
     run_parser.add_argument("--concurrency", type=int, default=1, help="Number of concurrent cases to run")
@@ -114,10 +126,12 @@ def _profile_from_args(args: argparse.Namespace) -> BenchmarkProfile:
         api_key=args.model_api_key,
     )
     run_policy = BenchmarkRunPolicy(
+        tool_mode=args.tool_mode,
         allowed_tools=list(dict.fromkeys(args.allow_tool)),
         disallowed_tools=list(dict.fromkeys(args.deny_tool)),
         max_total_tool_calls=args.max_total_tool_calls,
         max_tools_per_step=args.max_tools_per_step,
+        retry_attempts=max(0, args.retry_attempts),
         stream_tool_args=args.stream_tool_args,
         per_case_timeout_seconds=args.timeout,
         concurrency=max(1, args.concurrency),
@@ -145,6 +159,10 @@ def _render_summary_markdown(suite: BenchmarkSuite, summary: dict[str, Any]) -> 
         f"- invalid_format: {summary_block['invalid_format']}",
         f"- error: {summary_block['error']}",
         f"- accuracy: {summary_block['accuracy']:.3f}",
+        f"- pass_rate: {summary_block.get('pass_rate', summary_block['accuracy']):.3f}",
+        f"- mcq_accuracy: {summary_block.get('mcq_accuracy')}",
+        f"- open_ended_pass_rate: {summary_block.get('open_ended_pass_rate')}",
+        f"- average_score: {summary_block.get('average_score')}",
         f"- invalid_format_rate: {summary_block['invalid_format_rate']:.3f}",
         f"- error_rate: {summary_block['error_rate']:.3f}",
         f"- average_latency_seconds: {summary_block['average_latency_seconds']:.3f}",
@@ -179,6 +197,10 @@ def _render_summary_markdown(suite: BenchmarkSuite, summary: dict[str, Any]) -> 
         lines.extend(["", "## Tool Usage"])
         for tool_name, count in summary["tool_usage"].items():
             lines.append(f"- {tool_name}: {count}")
+    if summary.get("score_dimensions"):
+        lines.extend(["", "## Judge Dimensions"])
+        for dimension_name, value in summary["score_dimensions"].items():
+            lines.append(f"- {dimension_name}: {value:.3f}")
     return "\n".join(lines) + "\n"
 
 
