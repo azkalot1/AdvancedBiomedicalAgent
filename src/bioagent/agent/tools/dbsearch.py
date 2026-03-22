@@ -717,8 +717,20 @@ def _format_hpa_expression_output(
         lines.append(f"Resolved gene: {output.resolved_gene_symbol}")
     if output.resolved_ensembl_gene_id:
         lines.append(f"Ensembl: {output.resolved_ensembl_gene_id}")
+    if output.resolved_genes:
+        lines.append(f"Resolved genes: {', '.join(output.resolved_genes)}")
+    if output.query_genes:
+        lines.append(f"Query genes: {', '.join(output.query_genes)}")
     if output.query_cell_type:
         lines.append(f"Cell type: {output.query_cell_type}")
+    if output.resolved_cell_types:
+        lines.append(f"Cell types: {', '.join(output.resolved_cell_types)}")
+    if output.compare_gene_1 and output.compare_gene_2:
+        lines.append(f"Compare genes: {output.compare_gene_1} vs {output.compare_gene_2}")
+    if output.compare_cell_type_1 and output.compare_cell_type_2:
+        lines.append(
+            f"Compare cell types: {output.compare_cell_type_1} vs {output.compare_cell_type_2}"
+        )
     for msg in output.messages:
         lines.append(f"Note: {msg}")
     lines.append("=" * 40)
@@ -739,8 +751,34 @@ def _format_hpa_expression_output(
             extra = ""
             if row.get("dm_uniprot_id"):
                 extra = f" | UniProt {row.get('dm_uniprot_id')} (dm_target)"
+            ct_prefix = f"{row.get('cell_type')} | " if row.get("cell_type") else ""
             lines.append(
-                f"[{i}] {row.get('gene_symbol')} | nCPM {row.get('ncpm')} | {row.get('ensembl_gene_id')}{extra}"
+                f"[{i}] {ct_prefix}{row.get('gene_symbol')} | nCPM {row.get('ncpm')} | "
+                f"{row.get('ensembl_gene_id')}{extra}"
+            )
+        elif output.mode == "compare_genes":
+            g1 = output.compare_gene_1 or "gene_1"
+            g2 = output.compare_gene_2 or "gene_2"
+            a = row.get("gene_1_ncpm")
+            b = row.get("gene_2_ncpm")
+            fold = row.get("fold_change")
+            dlt = row.get("delta_ncpm")
+            fold_s = f"{float(fold):.2f}x" if fold is not None else "n/a"
+            dlt_s = f"{float(dlt):+.2f}" if dlt is not None else "n/a"
+            lines.append(
+                f"[{i}] {row.get('cell_type')} | {g1}={a} {g2}={b} | fold={fold_s} | delta={dlt_s}"
+            )
+        elif output.mode == "compare_cell_types":
+            ct1 = output.compare_cell_type_1 or "cell_type_1"
+            ct2 = output.compare_cell_type_2 or "cell_type_2"
+            a = row.get("cell_type_1_ncpm")
+            b = row.get("cell_type_2_ncpm")
+            fold = row.get("fold_change")
+            dlt = row.get("delta_ncpm")
+            fold_s = f"{float(fold):.2f}x" if fold is not None else "n/a"
+            dlt_s = f"{float(dlt):+.2f}" if dlt is not None else "n/a"
+            lines.append(
+                f"[{i}] {row.get('gene_symbol')} | {ct1}={a} {ct2}={b} | fold={fold_s} | delta={dlt_s}"
             )
         else:
             extra = ""
@@ -2766,8 +2804,13 @@ async def search_biotherapeutics(
 async def search_gene_expression(
     mode: str,
     gene: str | None = None,
+    genes: list[str] | str | None = None,
     cell_type: str | None = None,
     cell_types: list[str] | str | None = None,
+    gene_1: str | None = None,
+    gene_2: str | None = None,
+    cell_type_1: str | None = None,
+    cell_type_2: str | None = None,
     min_ncpm: float | None = None,
     include_target_info: bool = False,
     limit: int = 30,
@@ -2777,67 +2820,147 @@ async def search_gene_expression(
     Search Human Protein Atlas single-cell RNA expression (nCPM by gene and cell type).
 
     Modes:
-        gene_expression — For a gene, list cell types ranked by expression (use `gene`).
-        cell_type_genes — For a cell type, list highly expressed genes (use `cell_type`).
-        list_cell_types — List all HPA cell types with summary stats (no gene/cell_type required).
-        compare_expression — Expression of one gene across cell types; optional `cell_types` filter.
+        gene_expression — One or more genes: expression across cell types (`gene` and/or `genes`).
+        cell_type_genes — Top genes for one cell type (`cell_type`) or several (`cell_types` list).
+        list_cell_types — List all HPA cell types with summary stats.
+        compare_expression — Like gene_expression with optional `cell_types` filter (single or batch genes).
+        compare_genes — Two genes side-by-side per cell type: fold-change and delta (`gene_1`, `gene_2`);
+            optional `cell_types` to restrict.
+        compare_cell_types — Two cell types side-by-side per gene (`cell_type_1`, `cell_type_2`);
+            optional `genes` list filter; optional `min_ncpm`.
 
-    Gene identifiers: pass HGNC symbol or Ensembl ID (ENSG...) in `gene`.
+    Gene identifiers: HGNC symbol or ENSG in `gene`, `genes`, `gene_1`, `gene_2`.
     """
     try:
-        valid_modes = {"gene_expression", "cell_type_genes", "list_cell_types", "compare_expression"}
+        valid_modes = {
+            "gene_expression",
+            "cell_type_genes",
+            "list_cell_types",
+            "compare_expression",
+            "compare_genes",
+            "compare_cell_types",
+        }
         if not mode or mode not in valid_modes:
             return (
                 "❌ Invalid input: mode is required.\n"
-                "Valid options: gene_expression, cell_type_genes, list_cell_types, compare_expression"
+                "Valid options: gene_expression, cell_type_genes, list_cell_types, "
+                "compare_expression, compare_genes, compare_cell_types"
             )
 
         if isinstance(cell_types, str):
             cell_types = [cell_types]
+        if isinstance(genes, str):
+            parts = _split_filter_values(genes)
+            genes = parts if parts else ([genes.strip()] if genes.strip() else None)
 
         detail_level, error = _validate_detail_level(detail_level)
         if error:
             return f"❌ Invalid input: {error}"
 
+        merged_tokens: list[str] = []
+        if gene and isinstance(gene, str) and gene.strip():
+            merged_tokens.append(gene.strip())
+        if genes:
+            for item in genes:
+                if item is None:
+                    continue
+                s = str(item).strip()
+                if s:
+                    merged_tokens.append(s)
+        seen_tok: set[str] = set()
+        deduped_tokens: list[str] = []
+        for t in merged_tokens:
+            key = t.upper()
+            if key not in seen_tok:
+                seen_tok.add(key)
+                deduped_tokens.append(t)
+
+        gene_symbols_compare: list[str] | None = None
+        if mode == "compare_cell_types" and genes:
+            gseen: set[str] = set()
+            glist: list[str] = []
+            for item in genes:
+                if item is None:
+                    continue
+                s = str(item).strip()
+                if s and s.upper() not in gseen:
+                    gseen.add(s.upper())
+                    glist.append(s)
+            gene_symbols_compare = glist or None
+
         gene_symbol: str | None = None
         ensembl_gene_id: str | None = None
-        if gene and isinstance(gene, str) and gene.strip():
-            g = gene.strip()
-            if g.upper().startswith("ENSG"):
-                ensembl_gene_id = g
-            else:
-                gene_symbol = g
+        gene_symbols_batch: list[str] | None = None
+        if mode != "compare_cell_types":
+            if len(deduped_tokens) > 1:
+                gene_symbols_batch = deduped_tokens
+            elif len(deduped_tokens) == 1:
+                g0 = deduped_tokens[0]
+                if g0.upper().startswith("ENSG"):
+                    ensembl_gene_id = g0
+                else:
+                    gene_symbol = g0
+
+        gene_symbols_input = (
+            gene_symbols_compare if mode == "compare_cell_types" else gene_symbols_batch
+        )
 
         ct_clean: str | None = None
         if isinstance(cell_type, str):
             ct_clean = cell_type.strip() or None
 
+        ct_list = list(cell_types) if cell_types else None
+
+        g1c = gene_1.strip() if isinstance(gene_1, str) and gene_1.strip() else None
+        g2c = gene_2.strip() if isinstance(gene_2, str) and gene_2.strip() else None
+        ct1c = cell_type_1.strip() if isinstance(cell_type_1, str) and cell_type_1.strip() else None
+        ct2c = cell_type_2.strip() if isinstance(cell_type_2, str) and cell_type_2.strip() else None
+
         search_input = HpaExpressionSearchInput(
             mode=mode,
             gene_symbol=gene_symbol,
             ensembl_gene_id=ensembl_gene_id,
+            gene_symbols=gene_symbols_input,
             cell_type=ct_clean,
-            cell_types=list(cell_types) if cell_types else None,
+            cell_types=ct_list,
+            gene_1=g1c,
+            gene_2=g2c,
+            cell_type_1=ct1c,
+            cell_type_2=ct2c,
             min_ncpm=min_ncpm,
             include_target_info=include_target_info,
             limit=min(int(limit), 500),
         )
 
-        if mode == "gene_expression" and not (gene_symbol or ensembl_gene_id):
+        if mode == "gene_expression" and not (
+            gene_symbol or ensembl_gene_id or gene_symbols_input
+        ):
             return (
-                "❌ Invalid input: gene_expression requires `gene` (gene symbol or ENSG...).\n"
-                "Example: search_gene_expression(mode='gene_expression', gene='EGFR')"
+                "❌ Invalid input: gene_expression requires `gene` and/or `genes` "
+                "(symbols or ENSG...).\n"
+                "Example: search_gene_expression(mode='gene_expression', genes=['TP53','MDM2'])"
             )
-        if mode == "cell_type_genes" and not search_input.cell_type:
+        if mode == "cell_type_genes" and not (search_input.cell_type or search_input.cell_types):
             return (
-                "❌ Invalid input: cell_type_genes requires `cell_type`.\n"
-                "Tip: use list_cell_types first to see valid names.\n"
-                "Example: search_gene_expression(mode='cell_type_genes', cell_type='astrocytes')"
+                "❌ Invalid input: cell_type_genes requires `cell_type` and/or `cell_types`.\n"
+                "Tip: use list_cell_types first to see valid names."
             )
-        if mode == "compare_expression" and not (gene_symbol or ensembl_gene_id):
+        if mode == "compare_expression" and not (
+            gene_symbol or ensembl_gene_id or gene_symbols_input
+        ):
             return (
-                "❌ Invalid input: compare_expression requires `gene`.\n"
-                "Optional: cell_types=['astrocytes','adipocytes'] to restrict."
+                "❌ Invalid input: compare_expression requires `gene` and/or `genes`.\n"
+                "Optional: cell_types to restrict."
+            )
+        if mode == "compare_genes" and not (g1c and g2c):
+            return (
+                "❌ Invalid input: compare_genes requires `gene_1` and `gene_2`.\n"
+                "Optional: cell_types=['...'] to restrict."
+            )
+        if mode == "compare_cell_types" and not (ct1c and ct2c):
+            return (
+                "❌ Invalid input: compare_cell_types requires `cell_type_1` and `cell_type_2`.\n"
+                "Optional: genes=['GFAP','CX3CR1']; optional min_ncpm."
             )
 
         result = await hpa_expression_search_async(DEFAULT_CONFIG, search_input)
@@ -2845,7 +2968,13 @@ async def search_gene_expression(
             result,
             detail_level=detail_level,
             source_tool="search_gene_expression",
-            result_context={"mode": mode, "gene": gene, "cell_type": cell_type},
+            result_context={
+                "mode": mode,
+                "gene": gene,
+                "genes": genes,
+                "cell_type": cell_type,
+                "cell_types": cell_types,
+            },
         )
     except Exception as e:
         return f"Error in HPA expression search: {type(e).__name__}: {e}"
