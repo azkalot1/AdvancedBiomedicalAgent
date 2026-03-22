@@ -31,6 +31,8 @@ dependencies = [
   "pandas",
   "ijson",            # Streaming JSON parser
   "requests",         # HTTP requests
+  "httpx",            # Async HTTP (Open Targets GraphQL, etc.)
+  "tenacity",         # Retries for transient HTTP/API failures
   "beautifulsoup4",   # HTML/XML parsing
   "lxml",             # XML/HTML parser
   "python-dateutil",  # Date parsing
@@ -78,6 +80,9 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+bioagent = ["config/*.json"]
 
 [tool.black]
 line-length = 130

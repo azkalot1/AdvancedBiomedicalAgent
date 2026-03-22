@@ -25,7 +25,7 @@ DEFAULT_RUN_IDS = [
     "gemini31propreviewonlythinking",
     "glm5",
     "kimik25",
-    "minmaxm25",
+    "minmaxm27",
     "qwen3535ba3b",
     "qwen35397ba17b",
 ]
@@ -35,6 +35,7 @@ DISPLAY_NAMES = {
     "glm5": "GLM-5",
     "kimik25": "Kimi K2.5",
     "minmaxm25": "MiniMax-M2.5",
+    "minmaxm27": "MiniMax-M2.7",
     "qwen3535ba3b": "Qwen 3.5 35B A3B",
     "qwen35397ba17b": "Qwen 3.5 397B A17B",
 }

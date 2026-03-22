@@ -65,6 +65,21 @@ from bioagent.data.search.biotherapeutic_sequence_search import (
     BiotherapeuticSearchOutput,
     biotherapeutic_sequence_search_async,
 )
+from bioagent.data.search.hpa_expression_search import (
+    HpaExpressionSearchInput,
+    HpaExpressionSearchOutput,
+    hpa_expression_search_async,
+)
+from bioagent.data.search.ppi_search import (
+    PpiSearchInput,
+    PpiSearchOutput,
+    ppi_search_async,
+)
+from bioagent.data.search.opentargets_client import (
+    OpenTargetsSearchInput,
+    OpenTargetsSearchOutput,
+    opentargets_search_async,
+)
 from bioagent.data.search.target_search import (
     PharmacologySearch,
     TargetSearchInput,
@@ -671,6 +686,315 @@ def _format_orange_book_output(
 
     if detail_level != "comprehensive" and output.total_hits > 50:
         lines.append(f"\n... and {output.total_hits - 50} more results (truncated)")
+
+    return _wrap_results("\n".join(lines), source_tool, result_context)
+
+
+def _format_hpa_expression_output(
+    output: HpaExpressionSearchOutput,
+    detail_level: str = "standard",
+    source_tool: str | None = None,
+    result_context: dict | None = None,
+) -> str:
+    """Format Human Protein Atlas RNA expression search results."""
+    if output.status == "error":
+        return _wrap_results(f"❌ HPA expression search failed: {output.error}", source_tool, result_context)
+    if output.status == "invalid_input":
+        return _wrap_results(f"❌ Invalid input: {output.error}", source_tool, result_context)
+    if output.status == "not_found" or not output.results:
+        q = output.query_gene or output.query_cell_type or "query"
+        hint = "; ".join(output.messages) if output.messages else ""
+        body = f"🔍 No HPA expression results for: {q}"
+        if hint:
+            body = f"{body}\n{hint}"
+        return _wrap_results(body, source_tool, result_context)
+
+    lines = [
+        f"✅ HPA RNA (single-cell type): {output.total_results} row(s)",
+        f"Mode: {output.mode}",
+    ]
+    if output.resolved_gene_symbol:
+        lines.append(f"Resolved gene: {output.resolved_gene_symbol}")
+    if output.resolved_ensembl_gene_id:
+        lines.append(f"Ensembl: {output.resolved_ensembl_gene_id}")
+    if output.query_cell_type:
+        lines.append(f"Cell type: {output.query_cell_type}")
+    for msg in output.messages:
+        lines.append(f"Note: {msg}")
+    lines.append("=" * 40)
+
+    cap = output.total_results if detail_level == "comprehensive" else min(40, output.total_results)
+    if detail_level == "brief":
+        cap = min(15, output.total_results)
+
+    for i, row in enumerate(output.results[:cap], 1):
+        if output.mode == "list_cell_types":
+            avg = row.get("avg_ncpm")
+            avg_s = f"{float(avg):.2f}" if avg is not None else "n/a"
+            lines.append(
+                f"[{i}] {row.get('cell_type')} | genes≈{row.get('gene_count')} | "
+                f"avg nCPM {avg_s} | max {row.get('max_ncpm')} | top {row.get('top_gene_symbol')}"
+            )
+        elif output.mode == "cell_type_genes":
+            extra = ""
+            if row.get("dm_uniprot_id"):
+                extra = f" | UniProt {row.get('dm_uniprot_id')} (dm_target)"
+            lines.append(
+                f"[{i}] {row.get('gene_symbol')} | nCPM {row.get('ncpm')} | {row.get('ensembl_gene_id')}{extra}"
+            )
+        else:
+            extra = ""
+            if row.get("dm_uniprot_id"):
+                extra = f" | UniProt {row.get('dm_uniprot_id')}"
+            lines.append(
+                f"[{i}] {row.get('cell_type')} | nCPM {row.get('ncpm')} | {row.get('gene_symbol')}{extra}"
+            )
+
+    if cap < output.total_results:
+        lines.append(f"\n... and {output.total_results - cap} more rows (truncated)")
+
+    return _wrap_results("\n".join(lines), source_tool, result_context)
+
+
+def _format_ppi_output(
+    output: PpiSearchOutput,
+    detail_level: str = "standard",
+    source_tool: str | None = None,
+    result_context: dict | None = None,
+) -> str:
+    """Format STRING protein-protein interaction search results."""
+    if output.status == "error":
+        return _wrap_results(f"❌ STRING PPI search failed: {output.error}", source_tool, result_context)
+    if output.status == "invalid_input":
+        return _wrap_results(f"❌ Invalid input: {output.error}", source_tool, result_context)
+    if output.status == "not_found" or not output.results:
+        hint = "; ".join(output.messages) if output.messages else ""
+        q = output.query_gene or output.resolved_gene_1 or "query"
+        body = f"🔍 No STRING PPI results for: {q}"
+        if hint:
+            body = f"{body}\n{hint}"
+        return _wrap_results(body, source_tool, result_context)
+
+    lines = [
+        f"✅ STRING PPI: {output.total_results} row(s)",
+        f"Mode: {output.mode}",
+    ]
+    if output.resolved_gene_symbol:
+        lines.append(f"Resolved gene: {output.resolved_gene_symbol}")
+    if output.resolved_gene_1 and output.resolved_gene_2:
+        lines.append(f"Genes: {output.resolved_gene_1} / {output.resolved_gene_2}")
+    for msg in output.messages:
+        lines.append(f"Note: {msg}")
+    lines.append("=" * 40)
+
+    cap = output.total_results if detail_level == "comprehensive" else min(35, output.total_results)
+    if detail_level == "brief":
+        cap = min(12, output.total_results)
+
+    if output.mode == "pair_detail" and output.results:
+        r = output.results[0]
+        lines.append(
+            f"Pair: {r.get('gene_symbol_1')} — {r.get('gene_symbol_2')} | "
+            f"combined={r.get('combined_score')}"
+        )
+        lines.append(
+            f"  neighborhood={r.get('neighborhood')} fusion={r.get('fusion')} "
+            f"coocc={r.get('cooccurence')} coexpr={r.get('coexpression')} "
+            f"exp={r.get('experimental')} db={r.get('database')} text={r.get('textmining')}"
+        )
+        if r.get("dm_uniprot_a"):
+            lines.append(f"  {output.resolved_gene_1}: UniProt {r.get('dm_uniprot_a')}")
+        if r.get("dm_uniprot_b"):
+            lines.append(f"  {output.resolved_gene_2}: UniProt {r.get('dm_uniprot_b')}")
+        return _wrap_results("\n".join(lines), source_tool, result_context)
+
+    for i, row in enumerate(output.results[:cap], 1):
+        if output.mode == "shared_partners":
+            lines.append(f"[{i}] {row.get('partner_gene')}")
+        else:
+            extra = ""
+            if row.get("dm_uniprot_id"):
+                extra = f" | UniProt {row.get('dm_uniprot_id')}"
+            lines.append(
+                f"[{i}] {row.get('partner_gene')} | combined={row.get('combined_score')}"
+                f" (exp={row.get('experimental')} db={row.get('database')}){extra}"
+            )
+
+    if cap < output.total_results:
+        lines.append(f"\n... and {output.total_results - cap} more rows (truncated)")
+
+    return _wrap_results("\n".join(lines), source_tool, result_context)
+
+
+def _opentargets_row_cap(detail_level: str, total: int) -> int:
+    if detail_level == "comprehensive":
+        return total
+    if detail_level == "brief":
+        return min(8, total)
+    return min(25, total)
+
+
+def _format_opentargets_output(
+    output: OpenTargetsSearchOutput,
+    detail_level: str = "standard",
+    source_tool: str | None = None,
+    result_context: dict | None = None,
+) -> str:
+    """Format Open Targets GraphQL search results for the agent."""
+    if output.status == "error":
+        return _wrap_results(f"❌ Open Targets error: {output.error}", source_tool, result_context)
+    if output.status == "invalid_input":
+        return _wrap_results(f"❌ Invalid input: {output.error}", source_tool, result_context)
+    if output.status == "not_found":
+        hint = "; ".join(output.messages) if output.messages else ""
+        body = "🔍 No Open Targets data for this query."
+        if hint:
+            body = f"{body}\n{hint}"
+        return _wrap_results(body, source_tool, result_context)
+
+    lines: list[str] = [
+        f"✅ Open Targets — mode={output.mode}",
+        f"Rows in response: {output.total_results}",
+    ]
+    if output.resolved_id:
+        lines.append(f"Resolved id: {output.resolved_id}")
+    for msg in output.messages:
+        lines.append(f"Note: {msg}")
+    lines.append("=" * 40)
+
+    cap = _opentargets_row_cap(detail_level, output.total_results)
+
+    if output.mode == "search":
+        for i, row in enumerate(output.results[:cap], 1):
+            desc = row.get("description") or ""
+            if isinstance(desc, str) and len(desc) > 120:
+                desc = desc[:117] + "..."
+            cat = row.get("category")
+            cat_s = ", ".join(cat) if isinstance(cat, list) else (cat or "")
+            lines.append(
+                f"[{i}] {row.get('entity')} | {row.get('id')} | {row.get('name')}"
+                f" | score={row.get('score')}"
+                + (f" | {cat_s}" if cat_s else "")
+                + (f"\n    {desc}" if desc else "")
+            )
+
+    elif output.mode == "target_info" and output.results:
+        node = output.results[0]
+        lines.append(
+            f"{node.get('approvedSymbol')} — {node.get('approvedName')} "
+            f"(biotype={node.get('biotype')}, id={node.get('id')})"
+        )
+        gc = node.get("geneticConstraint") or []
+        if isinstance(gc, list) and gc:
+            lines.append("Genetic constraint (sample):")
+            for row in gc[:6]:
+                lines.append(
+                    f"  - {row.get('constraintType')}: score={row.get('score')} oe={row.get('oe')}"
+                )
+        tr = node.get("tractability") or []
+        if isinstance(tr, list) and tr:
+            true_only = [t for t in tr if t.get("value") is True]
+            use = true_only[:12] if detail_level != "comprehensive" else true_only[:40]
+            if use:
+                lines.append("Tractability (selected true):")
+                for t in use:
+                    lines.append(f"  - {t.get('label')} [{t.get('modality')}]")
+        sl = node.get("safetyLiabilities") or []
+        if isinstance(sl, list) and sl:
+            lim = 8 if detail_level == "brief" else (20 if detail_level == "standard" else 40)
+            lines.append(f"Safety liabilities (up to {lim}):")
+            for liab in sl[:lim]:
+                ev = liab.get("event") or ""
+                lines.append(f"  - {ev}")
+        pw = node.get("pathways") or []
+        if isinstance(pw, list) and pw:
+            lim = 5 if detail_level == "brief" else (15 if detail_level == "standard" else 40)
+            lines.append("Pathways (sample):")
+            for p in pw[:lim]:
+                lines.append(f"  - {p.get('pathwayId')}: {p.get('topLevelTerm')}")
+        fds = node.get("functionDescriptions") or []
+        if isinstance(fds, list) and fds:
+            joined = " ".join(str(x) for x in fds if x)
+            max_ch = 400 if detail_level == "brief" else (900 if detail_level == "standard" else 4000)
+            if len(joined) > max_ch:
+                joined = joined[: max_ch - 3] + "..."
+            lines.append("Function:")
+            lines.append(f"  {joined}")
+
+    elif output.mode == "target_associations":
+        for i, row in enumerate(output.results[:cap], 1):
+            dis = row.get("disease") or {}
+            lines.append(
+                f"[{i}] score={row.get('score')} | {dis.get('id')} | {dis.get('name')}"
+            )
+
+    elif output.mode == "target_drugs":
+        for i, row in enumerate(output.results[:cap], 1):
+            drug = row.get("drug") or {}
+            lines.append(
+                f"[{i}] {drug.get('id')} | {drug.get('name')} | MoA: {row.get('mechanismOfAction')}"
+            )
+
+    elif output.mode == "disease_info" and output.results:
+        node = output.results[0]
+        lines.append(f"{node.get('name')} ({node.get('id')})")
+        desc = node.get("description") or ""
+        max_ch = 300 if detail_level == "brief" else (800 if detail_level == "standard" else 2500)
+        if len(desc) > max_ch:
+            desc = desc[: max_ch - 3] + "..."
+        if desc:
+            lines.append(desc)
+        ta = node.get("therapeuticAreas") or []
+        if isinstance(ta, list) and ta:
+            lines.append("Therapeutic areas:")
+            for a in ta[:10]:
+                lines.append(f"  - {a.get('id')}: {a.get('name')}")
+        syns = node.get("synonyms") or []
+        if isinstance(syns, list) and syns and detail_level != "brief":
+            lines.append("Synonyms (sample):")
+            for syn in syns[:5]:
+                terms = syn.get("terms") or []
+                if terms:
+                    lines.append(f"  - {syn.get('relation')}: {', '.join(str(t) for t in terms[:6])}")
+
+    elif output.mode == "disease_targets":
+        for i, row in enumerate(output.results[:cap], 1):
+            tgt = row.get("target") or {}
+            lines.append(
+                f"[{i}] score={row.get('score')} | {tgt.get('id')} | {tgt.get('approvedSymbol')}"
+            )
+
+    elif output.mode == "drug_info" and output.results:
+        node = output.results[0]
+        lines.append(
+            f"{node.get('name')} ({node.get('id')}) | type={node.get('drugType')} | "
+            f"maxPhase={node.get('maximumClinicalTrialPhase')} | withdrawn={node.get('hasBeenWithdrawn')}"
+        )
+        tn = node.get("tradeNames") or []
+        if isinstance(tn, list) and tn:
+            lines.append(f"Trade names: {', '.join(str(x) for x in tn[:8])}")
+        moa_block = node.get("mechanismsOfAction") or {}
+        moa_rows = moa_block.get("rows") if isinstance(moa_block, dict) else None
+        if isinstance(moa_rows, list) and moa_rows:
+            lim = 5 if detail_level == "brief" else (15 if detail_level == "standard" else 40)
+            lines.append("Mechanisms of action:")
+            for r in moa_rows[:lim]:
+                lines.append(
+                    f"  - {r.get('mechanismOfAction')} (target: {r.get('targetName')})"
+                )
+        ind_block = node.get("indications") or {}
+        ind_rows = ind_block.get("rows") if isinstance(ind_block, dict) else None
+        if isinstance(ind_rows, list) and ind_rows:
+            lim = 5 if detail_level == "brief" else (18 if detail_level == "standard" else 50)
+            lines.append("Indications (sample):")
+            for r in ind_rows[:lim]:
+                d = r.get("disease") or {}
+                lines.append(
+                    f"  - phase {r.get('maxPhaseForIndication')}: {d.get('id')} {d.get('name')}"
+                )
+
+    if cap < output.total_results:
+        lines.append(f"\n... and {output.total_results - cap} more rows (truncated)")
 
     return _wrap_results("\n".join(lines), source_tool, result_context)
 
@@ -1471,6 +1795,39 @@ async def check_data_availability(
             gene_result = await searcher.search(gene_input)
             has_targets = bool(gene_result.hits)
             lines.append(f"  Target-linked drugs: {'Yes' if has_targets else 'No'}")
+
+            hpa_input = HpaExpressionSearchInput(
+                mode="gene_expression",
+                gene_symbol=entity,
+                limit=1,
+            )
+            hpa_out = await hpa_expression_search_async(DEFAULT_CONFIG, hpa_input)
+            has_hpa = hpa_out.status == "success" and hpa_out.total_results > 0
+            lines.append(f"  HPA single-cell RNA expression: {'Yes' if has_hpa else 'No'}")
+
+            ppi_input = PpiSearchInput(
+                mode="interactions",
+                gene=entity,
+                min_score=400,
+                limit=1,
+            )
+            ppi_out = await ppi_search_async(DEFAULT_CONFIG, ppi_input)
+            has_ppi = ppi_out.status == "success" and ppi_out.total_results > 0
+            lines.append(f"  STRING protein interactions: {'Yes' if has_ppi else 'No'}")
+
+            lines.append(
+                "  Open Targets Platform: Yes (API; use search_opentargets for targets, diseases, drugs)"
+            )
+
+        if detected == "condition":
+            lines.append(
+                "  Open Targets Platform: Yes (API; use search_opentargets for disease associations)"
+            )
+
+        if detected == "drug":
+            lines.append(
+                "  Open Targets Platform: Yes (API; use search_opentargets for drug MoA and indications)"
+            )
 
     except Exception as exc:
         lines.append(f"  ⚠ Availability check error: {type(exc).__name__}: {exc}")
@@ -2400,6 +2757,273 @@ async def search_biotherapeutics(
 
 
 # =============================================================================
+# HPA RNA EXPRESSION (single-cell type)
+# =============================================================================
+
+
+@tool("search_gene_expression", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_gene_expression(
+    mode: str,
+    gene: str | None = None,
+    cell_type: str | None = None,
+    cell_types: list[str] | str | None = None,
+    min_ncpm: float | None = None,
+    include_target_info: bool = False,
+    limit: int = 30,
+    detail_level: str = "standard",
+) -> str:
+    """
+    Search Human Protein Atlas single-cell RNA expression (nCPM by gene and cell type).
+
+    Modes:
+        gene_expression — For a gene, list cell types ranked by expression (use `gene`).
+        cell_type_genes — For a cell type, list highly expressed genes (use `cell_type`).
+        list_cell_types — List all HPA cell types with summary stats (no gene/cell_type required).
+        compare_expression — Expression of one gene across cell types; optional `cell_types` filter.
+
+    Gene identifiers: pass HGNC symbol or Ensembl ID (ENSG...) in `gene`.
+    """
+    try:
+        valid_modes = {"gene_expression", "cell_type_genes", "list_cell_types", "compare_expression"}
+        if not mode or mode not in valid_modes:
+            return (
+                "❌ Invalid input: mode is required.\n"
+                "Valid options: gene_expression, cell_type_genes, list_cell_types, compare_expression"
+            )
+
+        if isinstance(cell_types, str):
+            cell_types = [cell_types]
+
+        detail_level, error = _validate_detail_level(detail_level)
+        if error:
+            return f"❌ Invalid input: {error}"
+
+        gene_symbol: str | None = None
+        ensembl_gene_id: str | None = None
+        if gene and isinstance(gene, str) and gene.strip():
+            g = gene.strip()
+            if g.upper().startswith("ENSG"):
+                ensembl_gene_id = g
+            else:
+                gene_symbol = g
+
+        ct_clean: str | None = None
+        if isinstance(cell_type, str):
+            ct_clean = cell_type.strip() or None
+
+        search_input = HpaExpressionSearchInput(
+            mode=mode,
+            gene_symbol=gene_symbol,
+            ensembl_gene_id=ensembl_gene_id,
+            cell_type=ct_clean,
+            cell_types=list(cell_types) if cell_types else None,
+            min_ncpm=min_ncpm,
+            include_target_info=include_target_info,
+            limit=min(int(limit), 500),
+        )
+
+        if mode == "gene_expression" and not (gene_symbol or ensembl_gene_id):
+            return (
+                "❌ Invalid input: gene_expression requires `gene` (gene symbol or ENSG...).\n"
+                "Example: search_gene_expression(mode='gene_expression', gene='EGFR')"
+            )
+        if mode == "cell_type_genes" and not search_input.cell_type:
+            return (
+                "❌ Invalid input: cell_type_genes requires `cell_type`.\n"
+                "Tip: use list_cell_types first to see valid names.\n"
+                "Example: search_gene_expression(mode='cell_type_genes', cell_type='astrocytes')"
+            )
+        if mode == "compare_expression" and not (gene_symbol or ensembl_gene_id):
+            return (
+                "❌ Invalid input: compare_expression requires `gene`.\n"
+                "Optional: cell_types=['astrocytes','adipocytes'] to restrict."
+            )
+
+        result = await hpa_expression_search_async(DEFAULT_CONFIG, search_input)
+        return _format_hpa_expression_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_gene_expression",
+            result_context={"mode": mode, "gene": gene, "cell_type": cell_type},
+        )
+    except Exception as e:
+        return f"Error in HPA expression search: {type(e).__name__}: {e}"
+
+
+# =============================================================================
+# STRING PROTEIN-PROTEIN INTERACTIONS
+# =============================================================================
+
+
+@tool("search_protein_interactions", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_protein_interactions(
+    mode: str,
+    gene: str | None = None,
+    gene_1: str | None = None,
+    gene_2: str | None = None,
+    min_score: int = 700,
+    evidence_type: str | None = None,
+    include_target_info: bool = False,
+    limit: int = 30,
+    detail_level: str = "standard",
+) -> str:
+    """
+    Search STRING DB human protein-protein interactions (gene symbols / ENSG via dm_target).
+
+    Modes:
+        interactions — Partners of a gene ranked by combined score (use `gene`).
+        network — Same as interactions (local network, depth 1).
+        pair_detail — Evidence for a specific pair (use `gene_1`, `gene_2`).
+        shared_partners — Genes that interact with both gene_1 and gene_2.
+
+    min_score: STRING combined score 0–1000 (default 700). Ingestion may use a lower cutoff;
+        queries can still filter higher at runtime.
+
+    evidence_type (optional): neighborhood, fusion, coexpression, cooccurrence, experimental,
+        database, textmining — requires that channel score > 0.
+
+    detail_level (how many partner lines are rendered in the tool text):
+        brief — first 12 rows; standard — first 35 rows; comprehensive — all rows returned
+        (up to `limit`). The header still reports total row count; truncated modes append
+        a “more rows (truncated)” note.
+
+    Long outputs may be summarized by the agent runtime; `retrieve_full_output(ref_id)` returns
+    the stored tool string only — it does not bypass these display caps or re-fetch omitted rows.
+    For an exhaustive partner list in the response text, use `detail_level='comprehensive'`
+    and set `limit` as needed.
+    """
+    try:
+        valid_modes = {"interactions", "pair_detail", "shared_partners", "network"}
+        if not mode or mode not in valid_modes:
+            return (
+                "❌ Invalid input: mode is required.\n"
+                "Valid options: interactions, pair_detail, shared_partners, network"
+            )
+
+        detail_level, error = _validate_detail_level(detail_level)
+        if error:
+            return f"❌ Invalid input: {error}"
+
+        search_input = PpiSearchInput(
+            mode=mode,
+            gene=gene.strip() if isinstance(gene, str) and gene.strip() else None,
+            gene_1=gene_1.strip() if isinstance(gene_1, str) and gene_1.strip() else None,
+            gene_2=gene_2.strip() if isinstance(gene_2, str) and gene_2.strip() else None,
+            min_score=min(int(min_score), 1000),
+            evidence_type=evidence_type,
+            include_target_info=include_target_info,
+            limit=min(int(limit), 500),
+        )
+
+        if mode in {"interactions", "network"} and not search_input.gene:
+            return (
+                "❌ Invalid input: interactions/network require `gene` (symbol or ENSG...).\n"
+                "Example: search_protein_interactions(mode='interactions', gene='TP53')"
+            )
+        if mode == "pair_detail" and not (search_input.gene_1 and search_input.gene_2):
+            return (
+                "❌ Invalid input: pair_detail requires gene_1 and gene_2.\n"
+                "Example: search_protein_interactions(mode='pair_detail', gene_1='TP53', gene_2='MDM2')"
+            )
+        if mode == "shared_partners" and not (search_input.gene_1 and search_input.gene_2):
+            return (
+                "❌ Invalid input: shared_partners requires gene_1 and gene_2."
+            )
+
+        result = await ppi_search_async(DEFAULT_CONFIG, search_input)
+        return _format_ppi_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_protein_interactions",
+            result_context={"mode": mode, "gene": gene},
+        )
+    except Exception as e:
+        return f"Error in STRING PPI search: {type(e).__name__}: {e}"
+
+
+# =============================================================================
+# OPEN TARGETS PLATFORM (GraphQL API)
+# =============================================================================
+
+
+@tool("search_opentargets", return_direct=False)
+@robust_unwrap_llm_inputs
+async def search_opentargets(
+    mode: str,
+    query: str | None = None,
+    gene: str | None = None,
+    disease: str | None = None,
+    drug: str | None = None,
+    limit: int = 20,
+    detail_level: str = "standard",
+) -> str:
+    """
+    Query the Open Targets Platform (GraphQL API) for target, disease, and drug data.
+
+    Modes:
+        search — Free-text search across entities (use `query`). Returns ids, names, types.
+        target_info — Target annotation: tractability, genetic constraint, safety, pathways
+            (use `gene`: symbol or ENSG…; resolved via dm_target when possible).
+        target_associations — Diseases associated with a target (use `gene`).
+        target_drugs — Known drugs for a target (use `gene`).
+        disease_info — Disease/phenotype details (use `disease`: name or ontology id e.g. EFO_…, MONDO_…).
+        disease_targets — Targets associated with a disease (use `disease`).
+        drug_info — Drug details: mechanisms, indications, phase (use `drug`: name or CHEMBL…).
+
+    No local ingestion required; requires outbound HTTPS. Gene resolution uses dm_target when available.
+
+    detail_level: brief | standard | comprehensive — controls how many list rows and text are shown.
+    """
+    try:
+        valid_modes = {
+            "search",
+            "target_info",
+            "target_associations",
+            "target_drugs",
+            "disease_info",
+            "disease_targets",
+            "drug_info",
+        }
+        if not mode or mode.strip().lower() not in valid_modes:
+            return (
+                "❌ Invalid input: mode is required.\n"
+                f"Valid options: {', '.join(sorted(valid_modes))}"
+            )
+        mode_norm = mode.strip().lower()
+
+        detail_level, derr = _validate_detail_level(detail_level)
+        if derr:
+            return f"❌ Invalid input: {derr}"
+
+        search_input = OpenTargetsSearchInput(
+            mode=mode_norm,
+            query=query.strip() if isinstance(query, str) and query.strip() else None,
+            gene=gene.strip() if isinstance(gene, str) and gene.strip() else None,
+            disease=disease.strip() if isinstance(disease, str) and disease.strip() else None,
+            drug=drug.strip() if isinstance(drug, str) and drug.strip() else None,
+            limit=min(int(limit), 100),
+        )
+
+        result = await opentargets_search_async(DEFAULT_CONFIG, search_input)
+        return _format_opentargets_output(
+            result,
+            detail_level=detail_level,
+            source_tool="search_opentargets",
+            result_context={
+                "mode": mode_norm,
+                "query": query,
+                "gene": gene,
+                "disease": disease,
+                "drug": drug,
+            },
+        )
+    except Exception as e:
+        return f"Error in Open Targets search: {type(e).__name__}: {e}"
+
+
+# =============================================================================
 # TOOL COLLECTION
 # =============================================================================
 
@@ -2426,4 +3050,10 @@ DBSEARCH_TOOLS = [
     lookup_drug_identifiers,
     # Biotherapeutics
     search_biotherapeutics,
+    # HPA RNA (single-cell type)
+    search_gene_expression,
+    # STRING PPI
+    search_protein_interactions,
+    # Open Targets Platform (GraphQL)
+    search_opentargets,
 ]
