@@ -88,6 +88,19 @@ OPENFDA_DOWNLOAD_INDEX = "https://api.fda.gov/download.json"
 # Orange Book URL
 ORANGE_BOOK_URL = "https://www.fda.gov/media/76860/download"
 
+# Human Protein Atlas — single-cell RNA expression by cell type (TSV in zip)
+HPA_RNA_CELL_TYPE_URL = "https://www.proteinatlas.org/download/tsv/rna_single_cell_type.tsv.zip"
+
+# STRING DB v12.0 — human (9606) protein links + protein info (ENSP -> gene symbol)
+STRING_PPI_LINKS_URL = (
+    "https://stringdb-downloads.org/download/protein.links.detailed.v12.0/"
+    "9606.protein.links.detailed.v12.0.txt.gz"
+)
+STRING_PROTEIN_INFO_URL = (
+    "https://stringdb-downloads.org/download/protein.info.v12.0/"
+    "9606.protein.info.v12.0.txt.gz"
+)
+
 # ClinicalTrials.gov URLs
 CTGOV_URLS = [
     "https://clinicaltrials.gov/AllPublicXML.zip",  # primary

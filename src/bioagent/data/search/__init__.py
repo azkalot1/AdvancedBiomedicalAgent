@@ -19,6 +19,21 @@ from .biotherapeutic_sequence_search import (
     BiotherapeuticSearchInput,
     BiotherapeuticSearchOutput,
 )
+from .hpa_expression_search import (
+    hpa_expression_search_async,
+    HpaExpressionSearchInput,
+    HpaExpressionSearchOutput,
+)
+from .ppi_search import (
+    ppi_search_async,
+    PpiSearchInput,
+    PpiSearchOutput,
+)
+from .opentargets_client import (
+    opentargets_search_async,
+    OpenTargetsSearchInput,
+    OpenTargetsSearchOutput,
+)
 
 
 __all__ = [
@@ -50,4 +65,13 @@ __all__ = [
     "biotherapeutic_sequence_search_async",
     "BiotherapeuticSearchInput",
     "BiotherapeuticSearchOutput",
+    "hpa_expression_search_async",
+    "HpaExpressionSearchInput",
+    "HpaExpressionSearchOutput",
+    "ppi_search_async",
+    "PpiSearchInput",
+    "PpiSearchOutput",
+    "opentargets_search_async",
+    "OpenTargetsSearchInput",
+    "OpenTargetsSearchOutput",
 ]

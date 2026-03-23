@@ -11,6 +11,8 @@ This document describes the order and roles of the ingestion scripts used to pop
 5. **BindingDB** → molecules, targets, binding activities
 6. **ChEMBL** → molecules, targets, activities, **biotherapeutics** (antibodies, peptides, etc.)
 7. **dm_target** → canonical target mapping (ChEMBL + BindingDB); requires ChEMBL and BindingDB
+7b. **HPA RNA** → Human Protein Atlas single-cell RNA expression by cell type (`build_hpa_rna.py`); optional backfill of `dm_target.ensembl_gene_id`; no hard dependency on other steps (backfill only if `dm_target` exists)
+7c. **STRING PPI** → STRING DB human protein-protein interactions (`build_string_ppi.py`); uses `9606.protein.info` (ENSP → gene symbol) and `9606.protein.links.detailed`; stores edges as gene symbols for joins to `dm_target` / HPA; no hard dependency on other steps
 8. **DrugCentral** → drug structures and identifiers
 9. **Molecular mappings** → dm_molecule hierarchy, synonyms, **biotherapeutics**, map_ctgov_molecules, map_product_molecules, dm_compound_target_activity; requires ChEMBL, DrugCentral, BindingDB, dm_target, and CT.gov
 
@@ -33,6 +35,8 @@ Optional post-processing:
 | **build_bindingdb.py** | Ingest BindingDB TSV: molecules, targets, activities (binding affinity). | bindingdb_molecules, bindingdb_targets, bindingdb_activities. |
 | **build_chembl.py** | Ingest ChEMBL (molecule_dictionary, compound_structures, target_dictionary, activities, **biotherapeutics**, biotherapeutic_components, etc.). | ChEMBL schema; source for dm_molecule and **dm_biotherapeutic**. |
 | **create_and_populate_dm_target.py** | Build canonical target table from ChEMBL + BindingDB. Phases: (1) ChEMBL base, (2) BindingDB augmentation, (3) gene synonyms, (4) UniProt mappings. | dm_target, dm_target_gene_synonyms, dm_target_uniprot_mappings. |
+| **build_hpa_rna.py** | Download HPA `rna_single_cell_type.tsv.zip`, load gene/cell-type nCPM; build `hpa_cell_type_summary`; optionally backfill `dm_target.ensembl_gene_id` by matching `gene_symbol`. | hpa_rna_cell_type_expression, hpa_cell_type_summary. |
+| **build_string_ppi.py** | Download STRING `9606.protein.info` + `9606.protein.links.detailed`, map ENSP → gene symbol, load scored PPI edges (filter by `min_combined_score`). | string_protein_info, string_ppi. |
 | **build_drugcentral.py** | Ingest DrugCentral (drugs, structures, identifiers). | drugcentral_drugs, etc. |
 | **build_molecular_mappings.py** | Build unified molecule layer and trial/product mappings. Creates dm_molecule_concept, dm_molecule_stereo, dm_molecule, dm_molecule_synonyms; **Phase 2B: dm_biotherapeutic, dm_biotherapeutic_component, dm_biotherapeutic_synonyms** (from ChEMBL); map_ctgov_molecules (small molecules + biotherapeutics, mol_id nullable for bio-only); map_product_molecules; dm_compound_target_activity. | dm_* molecule/biotherapeutic tables, map_ctgov_molecules, map_product_molecules, dm_compound_target_activity. |
 | **generate_ctgov_enriched_search.py** | Create and populate denormalized CT.gov search table (conditions, interventions, sponsors, full-text vectors, filters). | ctgov_enriched_search. |
@@ -53,7 +57,9 @@ Optional post-processing:
 
 - Full pipeline: `biomedagent-db ingest` (see README for prerequisites).
 - Quick prototype: `biomedagent-db ingest --quick-prototype` (OpenFDA + Orange Book only; applies `--openfda-files 2 --n-max 2000` unless overridden).
-- Skip steps: `--skip-openfda`, `--skip-orange-book`, `--skip-ctgov`, `--skip-dailymed`, `--skip-drugcentral`, `--skip-chembl`, `--skip-bindingdb`, `--skip-dm-target`, `--skip-dm-molecule`.
+- Skip steps: `--skip-openfda`, `--skip-orange-book`, `--skip-ctgov`, `--skip-dailymed`, `--skip-drugcentral`, `--skip-chembl`, `--skip-bindingdb`, `--skip-dm-target`, `--skip-hpa-rna`, `--skip-string-ppi`, `--skip-dm-molecule`.
+- HPA RNA only: `biomedagent-db ingest --hpa-rna-only` (optional: `--hpa-rna-no-backfill-ensembl`, `--hpa-rna-batch-size N`).
+- STRING PPI only: `biomedagent-db ingest --string-ppi-only` (optional: `--string-min-score N`, `--string-ppi-batch-size N`).
 - CT.gov RAG only: `biomedagent-db ingest --ctgov-rag-corpus-only` then `--ctgov-rag-keys-only`.
 - CT.gov enriched search only: `biomedagent-db ingest --ctgov-enriched-search-only`.
 - Full-text indexes only: `biomedagent-db ingest --generate-search`.

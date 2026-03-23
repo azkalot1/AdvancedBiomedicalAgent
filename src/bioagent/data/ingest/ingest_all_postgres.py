@@ -29,6 +29,8 @@ try:
     from .build_ctgov import ingest_ctgov_full, populate_rag_corpus, populate_rag_keys
     from .build_dailymed import run_dailymed_ingestion_pipeline
     from .build_drugcentral import build_drugcentral
+    from .build_hpa_rna import ingest_hpa_rna
+    from .build_string_ppi import ingest_string_ppi
     from .build_molecular_mappings import main as build_molecular_mappings
     from .build_openfda import build_fda_normalized
     from .build_orange_book import ingest_orange_book
@@ -58,6 +60,8 @@ except ImportError:
     from build_ctgov import ingest_ctgov_full, populate_rag_corpus, populate_rag_keys
     from build_dailymed import run_dailymed_ingestion_pipeline
     from build_drugcentral import build_drugcentral
+    from build_hpa_rna import ingest_hpa_rna
+    from build_string_ppi import ingest_string_ppi
     from build_molecular_mappings import main as build_molecular_mappings
     from build_openfda import build_fda_normalized
     from build_orange_book import ingest_orange_book
@@ -392,6 +396,60 @@ def run_chembl_ingestion(config: DatabaseConfig, raw_dir: Path, force_recreate: 
         return False
 
 
+def run_hpa_rna_ingestion(
+    config: DatabaseConfig,
+    raw_dir: Path,
+    batch_size: int = 10000,
+    backfill_ensembl: bool = True,
+) -> bool:
+    """Download and load Human Protein Atlas single-cell RNA expression by cell type."""
+    print("\n" + "=" * 60)
+    print("🧬 HPA RNA SINGLE-CELL-TYPE EXPRESSION")
+    print(f"   (Batch size: {batch_size:,})")
+    print("=" * 60)
+    try:
+        start_time = time.time()
+        ingest_hpa_rna(
+            config,
+            raw_dir,
+            batch_size=batch_size,
+            backfill_ensembl=backfill_ensembl,
+        )
+        elapsed = time.time() - start_time
+        print(f"✅ HPA RNA ingestion completed in {elapsed:.1f} seconds")
+        return True
+    except Exception as e:
+        print(f"❌ HPA RNA ingestion failed: {e}")
+        return False
+
+
+def run_string_ppi_ingestion(
+    config: DatabaseConfig,
+    raw_dir: Path,
+    min_combined_score: int = 400,
+    batch_size: int = 10000,
+) -> bool:
+    """Download and load STRING DB human protein-protein interactions."""
+    print("\n" + "=" * 60)
+    print("🔗 STRING DB PROTEIN-PROTEIN INTERACTIONS (9606)")
+    print(f"   (min combined score: {min_combined_score}, batch: {batch_size:,})")
+    print("=" * 60)
+    try:
+        start_time = time.time()
+        ingest_string_ppi(
+            config,
+            raw_dir,
+            min_combined_score=min_combined_score,
+            batch_size=batch_size,
+        )
+        elapsed = time.time() - start_time
+        print(f"✅ STRING PPI ingestion completed in {elapsed:.1f} seconds")
+        return True
+    except Exception as e:
+        print(f"❌ STRING PPI ingestion failed: {e}")
+        return False
+
+
 def run_dm_target_population(config: DatabaseConfig) -> bool:
     """
     Run dm_target population to combine ChEMBL and BindingDB annotations.
@@ -657,6 +715,8 @@ Examples:
   %(prog)s --ctgov-enriched-search-only     # Only populate enriched search table (standalone)
   %(prog)s --ctgov-enriched-search-batch-size 2000  # Batch size for enriched search
   %(prog)s --generate-search                # Only create full-text indexes on raw CT.gov tables (standalone)
+  %(prog)s --hpa-rna-only                   # Only ingest HPA RNA single-cell-type expression
+  %(prog)s --string-ppi-only                # Only ingest STRING PPI (human)
   %(prog)s --reset --force --vacuum         # Complete reset: drop all, reimport, optimize
   %(prog)s --dump-db backup.sql             # Create database dump
   %(prog)s --restore-db backup.sql          # Restore database from dump
@@ -680,6 +740,41 @@ Examples:
     parser.add_argument("--skip-drugcentral", action="store_true", help="Skip DrugCentral ingestion")
     parser.add_argument("--skip-chembl", action="store_true", help="Skip ChEMBL ingestion")
     parser.add_argument("--skip-dm-target", action="store_true", help="Skip dm_target population (requires ChEMBL + BindingDB)")
+    parser.add_argument("--skip-hpa-rna", action="store_true", help="Skip HPA RNA single-cell-type expression ingest")
+    parser.add_argument(
+        "--hpa-rna-only",
+        action="store_true",
+        help="Only run HPA RNA ingest (download TSV zip, load tables, optional Ensembl backfill on dm_target)",
+    )
+    parser.add_argument(
+        "--hpa-rna-batch-size",
+        type=int,
+        default=10000,
+        help="Batch size for HPA RNA row inserts (default: 10000)",
+    )
+    parser.add_argument(
+        "--hpa-rna-no-backfill-ensembl",
+        action="store_true",
+        help="Do not backfill dm_target.ensembl_gene_id from HPA data",
+    )
+    parser.add_argument("--skip-string-ppi", action="store_true", help="Skip STRING DB PPI ingest (human 9606)")
+    parser.add_argument(
+        "--string-ppi-only",
+        action="store_true",
+        help="Only run STRING PPI ingest (protein.info + protein.links.detailed)",
+    )
+    parser.add_argument(
+        "--string-min-score",
+        type=int,
+        default=400,
+        help="Minimum STRING combined_score to store edges (0-1000, default: 400)",
+    )
+    parser.add_argument(
+        "--string-ppi-batch-size",
+        type=int,
+        default=10000,
+        help="Batch size for STRING PPI row inserts (default: 10000)",
+    )
     parser.add_argument("--skip-dm-molecule", action="store_true", help="Skip dm_molecule/molecular mappings (requires all molecule sources + dm_target)")
     parser.add_argument("--ctgov-populate-rag", action="store_true", help="Populate CT.gov RAG corpus after ingestion (WARNING: takes hours!)")
     parser.add_argument("--ctgov-rag-buckets", type=int, default=16, help="Number of buckets for CT.gov RAG corpus (default: 16)")
@@ -727,11 +822,13 @@ Examples:
         args.skip_chembl = True
         args.skip_dm_target = True
         args.skip_dm_molecule = True
+        args.skip_hpa_rna = True
+        args.skip_string_ppi = True
         args.skip_ctgov_enriched_search = True
 
         print("\n⚡ Quick prototype profile enabled")
         print("   Included: OpenFDA, Orange Book")
-        print("   Skipped: CT.gov, DailyMed, BindingDB, ChEMBL, DrugCentral, dm_target, dm_molecule")
+        print("   Skipped: CT.gov, DailyMed, BindingDB, ChEMBL, DrugCentral, dm_target, HPA RNA, STRING PPI, dm_molecule")
         print(f"   OpenFDA files limit: {args.openfda_files}")
         print(f"   n-max limit: {args.n_max}")
 
@@ -854,6 +951,47 @@ Examples:
             sys.exit(1)
         return
 
+    # Handle --hpa-rna-only (standalone)
+    if args.hpa_rna_only:
+        print("🧬 HPA RNA Single-Cell-Type Expression (Standalone)")
+        print("=" * 50)
+        raw_dir = (args.raw_dir if args.raw_dir is not None else _get_repo_root() / "raw")
+        raw_dir = Path(raw_dir).resolve()
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        backfill = not args.hpa_rna_no_backfill_ensembl
+        if run_hpa_rna_ingestion(
+            config,
+            raw_dir,
+            batch_size=args.hpa_rna_batch_size,
+            backfill_ensembl=backfill,
+        ):
+            print("\n🎉 HPA RNA ingestion completed!")
+            show_database_info(config)
+        else:
+            print("\n❌ HPA RNA ingestion failed!")
+            sys.exit(1)
+        return
+
+    # Handle --string-ppi-only (standalone)
+    if args.string_ppi_only:
+        print("🔗 STRING PPI (Standalone)")
+        print("=" * 50)
+        raw_dir = (args.raw_dir if args.raw_dir is not None else _get_repo_root() / "raw")
+        raw_dir = Path(raw_dir).resolve()
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        if run_string_ppi_ingestion(
+            config,
+            raw_dir,
+            min_combined_score=args.string_min_score,
+            batch_size=args.string_ppi_batch_size,
+        ):
+            print("\n🎉 STRING PPI ingestion completed!")
+            show_database_info(config)
+        else:
+            print("\n❌ STRING PPI ingestion failed!")
+            sys.exit(1)
+        return
+
     # Show initial database info
     print("\n📊 Initial Database State:")
     show_database_info(config)
@@ -959,6 +1097,30 @@ Examples:
         print("\n⏭️  Skipping dm_target population")
         results["dm_target"] = True
 
+    # 7b. HPA RNA (single-cell-type expression; optional Ensembl backfill on dm_target)
+    if not args.skip_hpa_rna:
+        results["hpa_rna"] = run_hpa_rna_ingestion(
+            config,
+            raw_dir,
+            batch_size=args.hpa_rna_batch_size,
+            backfill_ensembl=not args.hpa_rna_no_backfill_ensembl,
+        )
+    else:
+        print("\n⏭️  Skipping HPA RNA ingestion")
+        results["hpa_rna"] = True
+
+    # 7c. STRING PPI (human protein-protein interactions)
+    if not args.skip_string_ppi:
+        results["string_ppi"] = run_string_ppi_ingestion(
+            config,
+            raw_dir,
+            min_combined_score=args.string_min_score,
+            batch_size=args.string_ppi_batch_size,
+        )
+    else:
+        print("\n⏭️  Skipping STRING PPI ingestion")
+        results["string_ppi"] = True
+
     # 8. DrugCentral (molecular structures and chemical data)
     if not args.skip_drugcentral:
         results["drugcentral"] = run_drugcentral_ingestion(config, raw_dir)
@@ -1029,6 +1191,10 @@ Examples:
         print("   - map_ctgov_molecules: CT.gov intervention to molecule mappings")
         print("   - map_product_molecules: OpenFDA/DailyMed to molecule mappings")
         print("   - dm_compound_target_activity: Unified molecule-target activity view")
+        print("   - hpa_rna_cell_type_expression: HPA single-cell RNA nCPM by gene and cell type")
+        print("   - hpa_cell_type_summary: Per-cell-type gene counts and expression stats")
+        print("   - string_protein_info: STRING ENSP -> gene symbol (preferred_name)")
+        print("   - string_ppi: STRING scored protein-protein interactions (gene symbols)")
         print("\nExample cross-source queries you can now run:")
         print("1. Find OpenFDA drugs with Orange Book therapeutic equivalents")
         print("2. Link clinical trials to FDA-approved drugs")

@@ -13,6 +13,11 @@ from langgraph.channels.ephemeral_value import EphemeralValue
 
 from bioagent.agent import get_chat_model
 from bioagent.agent.tools import get_summarized_tools, think, with_tool_status_streaming
+from bioagent.config.model_catalog import (
+    ALLOWED_CHAT_MODELS,
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    MODEL_CONTEXT_WINDOWS,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -34,31 +39,6 @@ Use:
 _MODEL_NAME_KEYS = ("model", "model_name", "llm_model")
 DEFAULT_SUMMARIZER_MODEL = "google/gemini-3.1-flash-lite-preview"
 DEFAULT_LLM_TOOL_SELECTOR_MODEL = "google/gemini-3.1-flash-lite-preview"
-ALLOWED_CHAT_MODELS = (
-    "anthropic/claude-opus-4.6",
-    "anthropic/claude-sonnet-4.6",
-    "anthropic/claude-haiku-4.5",
-    "google/gemini-3.1-pro-preview",
-    "google/gemini-3-flash-preview",
-    "google/gemini-3.1-flash-lite-preview",
-    "z-ai/glm-5",
-    "moonshotai/kimi-k2.5",
-    "minimax/minimax-m2.5",
-    "qwen/qwen3.5-35b-a3b",
-)
-DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000
-MODEL_CONTEXT_WINDOWS: dict[str, int] = {
-    "anthropic/claude-opus-4.6": DEFAULT_CONTEXT_WINDOW_TOKENS,
-    "anthropic/claude-sonnet-4.6": DEFAULT_CONTEXT_WINDOW_TOKENS,
-    "anthropic/claude-haiku-4.5": DEFAULT_CONTEXT_WINDOW_TOKENS,
-    "google/gemini-3.1-pro-preview": DEFAULT_CONTEXT_WINDOW_TOKENS,
-    "google/gemini-3-flash-preview": DEFAULT_CONTEXT_WINDOW_TOKENS,
-    "google/gemini-3.1-flash-lite-preview": DEFAULT_CONTEXT_WINDOW_TOKENS,
-    "z-ai/glm-5": DEFAULT_CONTEXT_WINDOW_TOKENS,
-    "moonshotai/kimi-k2.5": DEFAULT_CONTEXT_WINDOW_TOKENS,
-    "minimax/minimax-m2.5": DEFAULT_CONTEXT_WINDOW_TOKENS,
-    "qwen/qwen3.5-35b-a3b": DEFAULT_CONTEXT_WINDOW_TOKENS,
-}
 DEFAULT_CONTEXT_SUMMARY_TRIGGER_FRACTION = 0.8
 DEFAULT_CONTEXT_SUMMARY_KEEP_FRACTION = 0.5
 MAX_TOOLS_COUNT = 4
